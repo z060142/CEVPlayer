@@ -120,7 +120,29 @@ namespace CEVPlayer
 
 			if (textWidth > 0 && textHeight > 0 && screenWidth > 0 && screenHeight > 0)
 			{
-				IRenderAuxImage::Draw2dImage(0, 0, screenWidth, screenHeight, pTex->GetTextureID(), 0.0f, 1.0f, 1.0f, 0.0f);
+				//gEnv->pRenderer->;
+				//static const int flags3D = e_Mode3D | e_AlphaBlended | e_DrawInFrontOff | e_FillModeSolid | e_CullModeBack | e_DepthWriteOn | e_DepthTestOn;				IRenderAuxGeom* pAux = IRenderAuxGeom::GetAux();
+				//pAux->SetRenderFlags(flags3D);
+
+				IRenderAuxImage::Draw2dImage(0, 0, screenWidth, screenHeight, pTex->GetTextureID(), 0.0f, 1.0f, 1.0f, 0.0f/**/, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 2.0f);
+			
+				/*SRender2DImageDescription img;
+				img.x = 0.0f;
+				img.y = 0.0f;
+				img.z = 1.0f;
+				img.w = screenWidth;
+				img.h = screenHeight;
+				img.textureId = pTex->GetTextureID();
+				img.renderFlags = flags3D;
+				img.uv[0].x = 0.0f;
+				img.uv[0].y = 1.0f;
+				img.uv[1].x = 1.0f;
+				img.uv[1].y = 1.0f;
+				img.angle = 0.0f;
+				img.color = ColorB(ColorF(1.0f,  1.0f, 1.0f));
+				img.stereoDepth = 1.0f;
+
+				pAux->PushImage(img);*/
 			}
 		}
 	}
