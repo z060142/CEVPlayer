@@ -19,8 +19,8 @@
 
 | 里程碑 | 狀態 | 備註 |
 |---|---|---|
-| M0 獨立倉、SDK、patch 01、腳本、兩樹編譯舊插件 | 進行中 | 已完成：倉庫改成引擎同構 `Code/CryPlugins/CEVPlayer/{Interface,Module}`；CMake 模組放 `cmake/modules/`（`sync_sources.sh` 複製到引擎 `Tools/CMake/modules/`，因 Windows 上 `Tools` 與 `tools` 同一資料夾）；舊插件移除 Libav，改用 `Video/YuvToRgba.{h,cpp}`（BT.601 limited，支援奇數寬高與 stride，同時去掉寬高裁成 4 的倍數）；libwebm 標頭改 `.h`；patch 01（vanilla / community）、`BASE_FILES.*`、`tools/{apply,sync,build_engine,deploy,run_source_engine,make_test_media}`。待做：libvpx SDK（另一 agent）、兩樹實際編譯舊插件（未驗證，此輪沒有碰引擎樹）。 |
-| M1 執行期核心（解碼層、渲染橋、使用端、計數、查詢接口） | 未開始 | |
+| M0 獨立倉、SDK、patch 01、腳本、兩樹編譯舊插件 | 編譯完成，冒煙測試待做 | 官方版整樹建置 0 錯誤；patch 01 + sync 後舊插件在官方版與 CECE 都建置成功，apply_patches 重跑為冪等。CECE 整樹有 fork 本身的 4 組錯誤（AssimpSDK、HPi/LodGenerator 缺 XT、GameSDK unity 重複定義），見 docs/research/02-baseline-build.md；依使用者指示以官方版為主線，CECE 只驗證 CEVPlayer 目標。 |
+| M1 執行期核心（解碼層、渲染橋、使用端、計數、查詢接口） | 進行中 | 設計：docs/design/M1-runtime-core.md；CEVPlayerCore 實作中 |
 | M2 快速路線聲音與腳本綁定 | 未開始 | |
 | M3 規範路線（CryAudio 位置查詢，optional patch） | 未開始 | |
 | M4 資產與編輯器 | 未開始 | |
@@ -30,3 +30,5 @@
 
 - 2026-11-16 分支名用 `rebuild`。
 - 2026-11-16 M0：repo 內 CMake 模組放 `cmake/modules/`（不用 `Tools/CMake/`）。patches 以 CRLF 產生並用 `.gitattributes` 排除換行正規化；`apply_patches.sh` 以去 CR 後的 blob hash 辨識引擎樹。
+- 2026-11-16 CECE 整樹編不過（fork 本身問題）→ 依使用者指示以官方版為主線開發，CECE 只建 CEVPlayer 目標驗證。
+- 2026-11-16 本機 VS 沒裝 ATL/MFC 且無法提權安裝 → 由 VS 套件解出到 D:/coding11/_tools/atlmfc，經 baseline_compat.props 引入（只有 Release MFC）。
