@@ -2618,6 +2618,273 @@ namespace
 		TestResampledAllocations(*FindClip("av_sync_flash_beep.webm"));
 		TestAudioClockRealtime();
 	}
+
+	// ---------------------------------------------------------------------------------------------------------------
+	// M2 fixes: PlayerConfig::decodeVideo and the A/V offset
+	// ---------------------------------------------------------------------------------------------------------------
+	struct DecodeVideoRun
+	{
+		bool loaded = false;
+		bool ended = false;
+		uint64_t presented = 0;
+		uint64_t realFrames = 0;
+		size_t maxAlloc = 0;
+		double duration = 0.0;
+		double endTime = 0.0;
+		bool hasVideo = false;
+		bool videoSkipped = false;
+		bool gotFrame = false;
+		bool videoBuffered = false;
+		uint32_t decodeErrors = 0;
+	};
+
+	// Plays a clip to the end on the simulated device and reports what the player did. MaxAlloc covers Load() + playback.
+	DecodeVideoRun RunDecodeVideo(const Clip& clip, bool decodeVideo)
+	{
+		DecodeVideoRun r;
+		VirtualTime vt;
+		AudioClock clk(48000);
+		PlayerConfig cfg = MakeResampledConfig(clk);
+		cfg.decodeVideo = decodeVideo;
+		PlayerCore p(cfg);
+		ResetMaxAlloc();
+		if (!LoadAndWait(p, ClipPath(clip), false))
+			return r;
+		r.loaded = true;
+		const MediaInfo& info = p.GetInfo();
+		r.hasVideo = info.hasVideo;
+		r.videoSkipped = info.videoSkipped;
+		r.duration = info.durationSeconds;
+		AvSim s;
+		s.Init(p, clk, vt);
+		p.Update();
+		CHECK(Succeeded(p.Play()));
+		r.ended = s.RunToEnd(clip.duration + 2.0);
+		r.presented = s.presented;
+		r.realFrames = s.realFrames;
+		r.endTime = p.GetTime();
+		FrameView fv;
+		r.gotFrame = p.GetFrame(fv);
+		r.videoBuffered = p.VideoBufferedFrame();
+		r.decodeErrors = p.DecodeErrors();
+		CHECK(!s.timedOut);
+		CHECK(!s.nonFinite);
+		r.maxAlloc = MaxAlloc();
+		return r;
+	}
+
+	void TestDecodeVideoOff()
+	{
+		// 1. video + audio clip, video ignored
+		{
+			const Clip& clip = *FindClip("vp9_1080p30_opus.webm");
+			g_context = "decodeVideo=false vp9_1080p30_opus";
+			const DecodeVideoRun on = RunDecodeVideo(clip, true);
+			const DecodeVideoRun off = RunDecodeVideo(clip, false);
+			CHECK(on.loaded && off.loaded);
+			CHECK(on.hasVideo && !on.videoSkipped && on.presented > 250);
+			CHECK(!off.hasVideo);
+			CHECK(off.videoSkipped);
+			CHECKF(off.presented == 0, "%llu frames presented", (unsigned long long)off.presented);
+			CHECK(!off.gotFrame);
+			CHECK(!off.videoBuffered);
+			CHECK(off.ended);
+			CHECK(off.decodeErrors == 0);
+			CHECKF(std::fabs(off.endTime - off.duration) < 1e-6, "ended at %.4f s, duration %.4f s", off.endTime, off.duration);
+			const double ratio = static_cast<double>(off.realFrames) / (clip.duration * 48000.0);
+			CHECKF(std::fabs(ratio - 1.0) <= 0.005, "audio length ratio %.4f", ratio);
+			CHECKF(off.realFrames == on.realFrames, "audio frames %llu with video, %llu without", (unsigned long long)on.realFrames,
+				(unsigned long long)off.realFrames);
+			// A 1080p FrameRing slot is several MB: with the video ignored nothing that big may be allocated.
+			CHECKF(on.maxAlloc > (3u << 20), "control run: largest allocation only %zu bytes", on.maxAlloc);
+			CHECKF(off.maxAlloc < (1u << 20), "largest allocation %zu bytes: a frame buffer was allocated", off.maxAlloc);
+			Log("  %-34s ok: 0 frames presented, audio %.4f of the duration, largest allocation %zu bytes (with video: %zu)\n",
+				g_context.c_str(), ratio, off.maxAlloc, on.maxAlloc);
+		}
+
+		// 2. audio-only clip: the flag changes nothing
+		{
+			const Clip& clip = *FindClip("audio_en.webm");
+			g_context = "decodeVideo=false audio_en";
+			const DecodeVideoRun on = RunDecodeVideo(clip, true);
+			const DecodeVideoRun off = RunDecodeVideo(clip, false);
+			CHECK(on.loaded && off.loaded);
+			CHECK(!on.hasVideo && !off.hasVideo);
+			CHECK(!on.videoSkipped && !off.videoSkipped);
+			CHECK(on.ended && off.ended);
+			CHECK(on.presented == 0 && off.presented == 0);
+			CHECK(on.realFrames == off.realFrames);
+			CHECK(on.duration == off.duration);
+			const double ratio = static_cast<double>(off.realFrames) / (clip.duration * 48000.0);
+			CHECKF(std::fabs(ratio - 1.0) <= 0.005, "audio length ratio %.4f", ratio);
+			Log("  %-34s ok: identical to the default (%llu audio frames, %.3f s)\n", g_context.c_str(),
+				(unsigned long long)off.realFrames, off.duration);
+		}
+
+		// 3. nothing to play once the video is ignored: the load fails cleanly
+		{
+			g_context = "decodeVideo=false video only";
+			PlayerConfig cfg;
+			cfg.decodeVideo = false;
+			PlayerCore p(cfg);
+			std::unique_ptr<IByteSource> src = OpenSource(ClipPath(*FindClip("vp9_alpha.webm")), false);
+			CHECK(src != nullptr);
+			if (src)
+			{
+				CHECK(Succeeded(p.Load(std::move(src))));
+				CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+				CHECK(p.GetLoadState() == LoadState::Failed);
+				CHECK(p.GetLoadError().status == Status::Unsupported);
+				CHECK(p.GetLoadError().detail == StatusDetail::NoSupportedTrack);
+				CHECK(!p.Update());
+			}
+		}
+
+		// 4. steady state: no allocation / free while an audio-only player plays
+		{
+			const Clip& clip = *FindClip("vp9_1080p30_opus.webm");
+			g_context = "allocs decodeVideo=false";
+			VirtualTime vt;
+			AudioClock clk(48000);
+			PlayerConfig cfg = MakeResampledConfig(clk);
+			cfg.decodeVideo = false;
+			PlayerCore p(cfg);
+			if (!LoadAndWait(p, ClipPath(clip), true))
+				return;
+			AvSim s;
+			s.Init(p, clk, vt);
+			p.Update();
+			CHECK(Succeeded(p.Play()));
+			CHECK(s.RunUntilMediaTime(2.0));
+			const uint64_t n0 = g_newCount.load();
+			const uint64_t d0 = g_deleteCount.load();
+			const uint64_t audio0 = s.realFrames;
+			CHECK(s.RunUntilMediaTime(6.0));
+			const uint64_t n1 = g_newCount.load();
+			const uint64_t d1 = g_deleteCount.load();
+			CHECK(!s.timedOut);
+			CHECKF(n1 == n0, "%llu allocations in the steady state window", (unsigned long long)(n1 - n0));
+			CHECKF(d1 == d0, "%llu frees in the steady state window", (unsigned long long)(d1 - d0));
+			CHECK(s.realFrames > audio0 + 3 * 48000);
+			CHECK(s.presented == 0);
+			Log("  %-34s ok: %llu allocations / %llu frees over %llu audio frames\n", g_context.c_str(),
+				(unsigned long long)(n1 - n0), (unsigned long long)(d1 - d0), (unsigned long long)(s.realFrames - audio0));
+		}
+	}
+
+	// Mean (flash presented - beep heard) over the flash / beep pairs of av_sync_flash_beep.
+	struct AvOffsetResult
+	{
+		bool ok = false;
+		int compared = 0;
+		double meanMs = 0.0;
+		double minMs = 0.0;
+		double maxMs = 0.0;
+		bool ended = false;
+		double endTime = 0.0;
+	};
+
+	// cfgOffset goes through PlayerConfig, setter (if not NaN) through SetAvOffset() after the load.
+	AvOffsetResult MeasureAvOffset(double cfgOffset, double setter)
+	{
+		AvOffsetResult r;
+		const Clip& clip = *FindClip("av_sync_flash_beep.webm");
+		VirtualTime vt;
+		AudioClock clk(48000);
+		PlayerConfig cfg = MakeResampledConfig(clk);
+		cfg.avOffsetSeconds = cfgOffset;
+		PlayerCore p(cfg);
+		if (!LoadAndWait(p, ClipPath(clip), true))
+			return r;
+		if (setter == setter)
+			CHECK(Succeeded(p.SetAvOffset(setter)));
+		AvSim s;
+		s.Init(p, clk, vt);
+		s.detectFlash = true;
+		CHECK(p.Update());
+		CHECK(Succeeded(p.Play()));
+		r.ended = s.RunToEnd(clip.duration + 3.0);
+		r.endTime = p.GetTime();
+		CHECK(r.ended);
+		CHECK(!s.timedOut);
+		CHECK(p.GetState() == PlayerState::Ended);
+		CHECKF(s.onsetCount >= 9, "beep onsets %d", s.onsetCount);
+		double sum = 0.0;
+		r.minMs = 1e9;
+		r.maxMs = -1e9;
+		for (int f = 0; f < s.flashCount; ++f)
+		{
+			const int sec = static_cast<int>(std::lround(s.flashPts[f]));
+			if (sec < 1)
+				continue;
+			int onset = -1;
+			for (int o = 0; o < s.onsetCount; ++o)
+				if (std::llround(static_cast<double>(s.onsetFrame[o]) / 48000.0) == sec)
+					onset = o;
+			if (onset < 0)
+				continue;
+			const double ms = static_cast<double>(s.flashPresentedNs[f] - s.HeardNs(s.onsetFrame[onset])) * 1e-6;
+			sum += ms;
+			r.minMs = std::min(r.minMs, ms);
+			r.maxMs = std::max(r.maxMs, ms);
+			++r.compared;
+		}
+		CHECKF(r.compared >= 8, "only %d flash/beep pairs compared", r.compared);
+		if (r.compared > 0)
+			r.meanMs = sum / r.compared;
+		const double ratio = static_cast<double>(s.realFrames) / (clip.duration * 48000.0);
+		CHECKF(std::fabs(ratio - 1.0) <= 0.005, "audio length ratio %.4f (the offset must not touch the audio)", ratio);
+		r.ok = r.compared >= 8;
+		return r;
+	}
+
+	void TestAvOffset()
+	{
+		g_context = "avoffset api";
+		{
+			PlayerCore p;
+			CHECK(p.GetAvOffset() == 0.0);
+			CHECK(Succeeded(p.SetAvOffset(0.25)));
+			CHECK(p.GetAvOffset() == 0.25);
+			CHECK(Succeeded(p.SetAvOffset(-9.0)));
+			CHECK(p.GetAvOffset() == -PlayerCore::kMaxAvOffsetSeconds);
+			CHECK(Succeeded(p.SetAvOffset(9.0)));
+			CHECK(p.GetAvOffset() == PlayerCore::kMaxAvOffsetSeconds);
+			CHECK(p.SetAvOffset(std::nan("")) == Status::InvalidArgument);
+			CHECK(p.SetAvOffset(HUGE_VAL) == Status::InvalidArgument);
+			CHECK(p.GetAvOffset() == PlayerCore::kMaxAvOffsetSeconds);
+			PlayerConfig cfg;
+			cfg.avOffsetSeconds = 50.0;
+			PlayerCore q(cfg);
+			CHECK(q.GetAvOffset() == PlayerCore::kMaxAvOffsetSeconds);
+			cfg.avOffsetSeconds = std::nan("");
+			PlayerCore n(cfg);
+			CHECK(n.GetAvOffset() == 0.0);
+		}
+
+		g_context = "avoffset flash/beep";
+		const AvOffsetResult base = MeasureAvOffset(0.0, std::nan(""));
+		const AvOffsetResult plus = MeasureAvOffset(0.1, std::nan(""));     // through the config
+		const AvOffsetResult minus = MeasureAvOffset(0.0, -0.1);            // through SetAvOffset()
+		CHECK(base.ok && plus.ok && minus.ok);
+		const double frameMs = 1000.0 / 30.0;
+		const double dPlus = plus.meanMs - base.meanMs;
+		const double dMinus = minus.meanMs - base.meanMs;
+		CHECKF(std::fabs(base.meanMs) < frameMs, "baseline offset %.2f ms", base.meanMs);
+		CHECKF(std::fabs(dPlus - 100.0) < frameMs, "+100 ms moved the picture by %+.2f ms", dPlus);
+		CHECKF(std::fabs(dMinus + 100.0) < frameMs, "-100 ms moved the picture by %+.2f ms", dMinus);
+		// the audio / clock end is not shifted: playback still ends at the duration
+		CHECKF(std::fabs(plus.endTime - 10.008) < 1e-6 && std::fabs(minus.endTime - 10.008) < 1e-6, "end times %.4f / %.4f", plus.endTime,
+			minus.endTime);
+		Log("  avoffset: baseline %+.2f ms (min %+.2f, max %+.2f), +100 ms -> %+.2f ms (shift %+.2f), -100 ms -> %+.2f ms (shift %+.2f)\n",
+			base.meanMs, base.minMs, base.maxMs, plus.meanMs, dPlus, minus.meanMs, dMinus);
+	}
+
+	void TestM2Fix()
+	{
+		TestDecodeVideoOff();
+		TestAvOffset();
+	}
 }
 
 // =====================================================================================================================
@@ -2713,6 +2980,8 @@ int main(int argc, char** argv)
 	}
 	if (wanted("audio2"))
 		TestAudio2();
+	if (wanted("m2fix"))
+		TestM2Fix();
 	if (wanted("harden"))
 	{
 		TestMalformedIndex();

@@ -37,6 +37,13 @@ namespace cev
 		uint32_t ringSlots = 4;              // frame ring size (>= 3 recommended: 1 held by the consumer)
 		bool outputRgba = true;              // convert to premultiplied RGBA on the worker
 		bool decodeAudio = true;
+		// false: the video track (if any) is ignored entirely: no video decoder, no FrameRing / frame buffers, no
+		// video decode work, GetInfo().hasVideo == false (MediaInfo::videoSkipped tells that a track was ignored),
+		// Update() presents nothing and GetFrame() returns false. The player is audio only: GetTime() / the end of
+		// playback follow the clock and the container duration. Meant for external language audio files. A file
+		// without a playable stream after skipping (video only, or decodeAudio == false as well) fails to load
+		// with Unsupported / StatusDetail::NoSupportedTrack.
+		bool decodeVideo = true;
 		uint32_t videoThreads = 0;           // libvpx threads, 0 = auto from the resolution
 		uint32_t audioBufferMs = 500;        // PCM ring size
 		ColorStandard colorStandard = ColorStandard::Auto;
@@ -46,12 +53,15 @@ namespace cev
 		// Device rate for ReadAudioResampled(): 0 = disabled, otherwise the audio is converted to this rate and
 		// to stereo (the engine's SDL device uses 48000). ReadAudio() is not affected.
 		uint32_t outputSampleRate = 0;
+		// Initial value of SetAvOffset() (seconds, clamped to +-kMaxAvOffsetSeconds).
+		double avOffsetSeconds = 0.0;
 	};
 
 	struct MediaInfo
 	{
 		bool hasVideo = false;
 		bool hasAudio = false;
+		bool videoSkipped = false;           // the file has a video track but PlayerConfig::decodeVideo == false
 		VideoCodec videoCodec = VideoCodec::None;
 		AudioCodec audioCodec = AudioCodec::None;
 		int width = 0;
@@ -87,6 +97,8 @@ namespace cev
 	class PlayerCore
 	{
 	public:
+		static constexpr double kMaxAvOffsetSeconds = 2.0;
+
 		explicit PlayerCore(const PlayerConfig& config = PlayerConfig());
 		~PlayerCore();
 		PlayerCore(const PlayerCore&) = delete;
@@ -110,6 +122,17 @@ namespace cev
 		Status Seek(double seconds);
 		Status SetLoop(bool loop);
 		Status SetRate(double rate);
+		// A/V offset, seconds, consumer thread, applied in Update() only (the audio path is not touched).
+		// Update() looks the picture up at   clockTime - offset:
+		//   offset > 0: the picture waits `offset` longer, i.e. it is shown that much later relative to the clock
+		//               (use it when the audio output has `offset` of latency the clock does not account for: the
+		//               sound is heard offset later than the clock says, so the picture must wait as well);
+		//   offset < 0: the picture is shown earlier.
+		// Clamped to +-kMaxAvOffsetSeconds; NaN / infinity -> InvalidArgument (value unchanged). Works before Load()
+		// and survives Load() / Unload(). GetTime() and the clock are not shifted; playback ends when the clock
+		// reaches the duration and the queued frames (up to offset late) have been presented.
+		Status SetAvOffset(double seconds);
+		double GetAvOffset() const;
 		PlayerState GetState() const;
 		bool IsLooping() const;
 		double GetTime() const;              // media clock, clamped to the duration

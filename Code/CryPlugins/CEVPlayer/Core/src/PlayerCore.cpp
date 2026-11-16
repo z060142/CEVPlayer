@@ -39,6 +39,7 @@ namespace cev
 		explicit Impl(const PlayerConfig& config) : cfg(config)
 		{
 			clock = cfg.externalClock != nullptr ? cfg.externalClock : &ownClock;
+			avOffset = ClampOffset(cfg.avOffsetSeconds);
 			stats.SetEnabled(cfg.enableStats);
 		}
 
@@ -107,8 +108,16 @@ namespace cev
 		// ---------------------------------------------------------------- consumer state
 		std::atomic<uint8_t> state{static_cast<uint8_t>(PlayerState::Stopped)};
 		bool loop = false;
+		double avOffset = 0.0;                 // seconds, see PlayerCore::SetAvOffset()
 		uint32_t loopCount = 0;
 		uint64_t serial = 0;
+
+		static double ClampOffset(double v)
+		{
+			if (!(v == v))
+				return 0.0;
+			return std::min(std::max(v, -PlayerCore::kMaxAvOffsetSeconds), PlayerCore::kMaxAvOffsetSeconds);
+		}
 
 		PlayerState State() const { return static_cast<PlayerState>(state.load(std::memory_order_acquire)); }
 		void SetState(PlayerState s) { state.store(static_cast<uint8_t>(s), std::memory_order_release); }
@@ -207,12 +216,16 @@ namespace cev
 
 			const VideoStreamInfo& v = demux->Video();
 			const AudioStreamInfo& a = demux->Audio();
-			hasVideo = demux->HasVideo();
+			const bool videoPresent = demux->HasVideo();
+			hasVideo = videoPresent && cfg.decodeVideo;
 			hasAudio = demux->HasAudio() && cfg.decodeAudio;
+			if (!cfg.decodeVideo && !hasAudio)
+				return Fail(Status::Unsupported, StatusDetail::NoSupportedTrack); // nothing left to play
 
 			info = MediaInfo();
 			info.hasVideo = hasVideo;
-			info.videoCodec = v.codec;
+			info.videoSkipped = videoPresent && !hasVideo;
+			info.videoCodec = hasVideo ? v.codec : VideoCodec::None;
 			info.durationSeconds = demux->DurationSeconds();
 
 			if (hasVideo)
@@ -790,6 +803,16 @@ namespace cev
 		return Status::Ok;
 	}
 
+	Status PlayerCore::SetAvOffset(double seconds)
+	{
+		if (!std::isfinite(seconds))
+			return Status::InvalidArgument;
+		m_impl->avOffset = Impl::ClampOffset(seconds);
+		return Status::Ok;
+	}
+
+	double PlayerCore::GetAvOffset() const { return m_impl->avOffset; }
+
 	PlayerState PlayerCore::GetState() const { return m_impl->State(); }
 	bool PlayerCore::IsLooping() const { return m_impl->loop; }
 	uint32_t PlayerCore::GetLoopCount() const { return m_impl->loopCount; }
@@ -810,11 +833,12 @@ namespace cev
 
 		bool newFrame = false;
 		const double t = d.clock->NowSeconds();
+		const double tVideo = t - d.avOffset; // presentation time lookup (see SetAvOffset)
 
 		if (d.hasVideo)
 		{
 			uint32_t dropped = 0;
-			const int slot = d.ring.PopForTime(std::max(t, d.firstVideoPts), kPresentEpsilon, dropped);
+			const int slot = d.ring.PopForTime(std::max(tVideo, d.firstVideoPts), kPresentEpsilon, dropped);
 			if (dropped > 0)
 				d.stats.NoteDropped(dropped);
 			if (slot >= 0)
@@ -837,7 +861,8 @@ namespace cev
 				// Frames that stay queued long after the duration (bogus timestamps) must not hold the end back:
 				// once the clock is a grace period past the duration the decoder is done, drop what is left.
 				const double period = d.info.frameRate > 0.0 ? 1.0 / d.info.frameRate : 0.0;
-				if (t >= d.info.durationSeconds + std::max(kEndGraceMin, period))
+				// (measured on the picture time line: a late picture, offset > 0, gets its extra time)
+				if (tVideo >= d.info.durationSeconds + std::max(kEndGraceMin, period))
 				{
 					d.ring.FlushReady();
 					videoDone = true;
