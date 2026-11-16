@@ -5,11 +5,17 @@
 
 #include <string>
 
+#include <CEVPlayer/IVideoPlayer.h>
+
 namespace CEVPlayer
 {
+	//! EVideoPlayerCaps bits of this build (IVideoPlugin::GetVideoPlayerCaps and the API table's Caps query).
+	constexpr uint32_t kPluginCaps = eVideoCap_Alpha | eVideoCap_Premultiplied | eVideoCap_Variants;
+
 	class CPlayerManager;
 	class CLegacyPlayback;
 	class CInputDispatcher;
+	namespace Api { class CApiPlayers; }
 
 #define TITLE "[CEVPlayer] "
 
@@ -23,6 +29,7 @@ namespace CEVPlayer
 		CPlayerManager* pManager = nullptr;
 		CLegacyPlayback* pLegacy = nullptr;
 		CInputDispatcher* pInputDispatcher = nullptr;
+		Api::CApiPlayers* pApi = nullptr;  // handle registry of the script API (FlowGraph / Schematyc / CryVS)
 
 		// Console variables (bound to the cvar system, written on the main thread, read anywhere)
 		int m_bDebugLog = 0;      // vp_debug_log (legacy)

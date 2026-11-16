@@ -55,6 +55,28 @@ add_sources("NoUberFile"
 		"FlowNodes/FlowNodes.cpp"
 )
 add_sources("NoUberFile"
+    SOURCE_GROUP "Bindings"
+		"Bindings/ApiTable.cpp"
+		"Bindings/ApiPlayers.cpp"
+		"Bindings/ApiTest.cpp"
+		"Bindings/ApiTest.h"
+		"Bindings/FlowApiNodes.cpp"
+		"Bindings/ApiTable.h"
+		"Bindings/ApiPlayers.h"
+		"Bindings/CryVSEnv.h"
+)
+# CryVS (the community tree's Schematyc2 fork): only built when the tree ships its public headers. The vanilla engine
+# has none of them, so CryVSEnv.cpp is not compiled and no CryVS header is ever included there (CEV_HAVE_CRYVS stays
+# undefined, Plugin.cpp only includes the header-free Bindings/CryVSEnv.h under #if CEV_HAVE_CRYVS).
+set(CEV_HAVE_CRYVS OFF)
+if(EXISTS "${CRYENGINE_DIR}/Code/CryEngine/CryCommon/CryVS")
+	set(CEV_HAVE_CRYVS ON)
+	add_sources("NoUberFile"
+	    SOURCE_GROUP "Bindings"
+			"Bindings/CryVSEnv.cpp"
+	)
+endif()
+add_sources("NoUberFile"
     SOURCE_GROUP "Input"
 		"Input/InputDispatcher.cpp"
 		"Input/InputDispatcher.h"
@@ -63,6 +85,8 @@ add_sources("NoUberFile"
     SOURCE_GROUP "Components"
 		"Components/TextureVideoPlayerComponent.cpp"
 		"Components/TextureVideoPlayerComponent.h"
+		"Components/VideoPlayerComponent.cpp"
+		"Components/VideoPlayerComponent.h"
 		"Components/ILightComponent.h"
 )
 end_sources()
@@ -79,6 +103,12 @@ target_include_directories(${THIS_PROJECT}
 )
 
 add_definitions("/wd4996 /wd4800")
+if(CEV_HAVE_CRYVS)
+	message(STATUS "CEVPlayer: CryVS headers found, building the CryVS bindings (CEV_HAVE_CRYVS=1)")
+	target_compile_definitions(${THIS_PROJECT} PRIVATE CEV_HAVE_CRYVS=1)
+else()
+	message(STATUS "CEVPlayer: no CryVS headers, building without the CryVS bindings")
+endif()
 set_target_properties(${THIS_PROJECT} PROPERTIES LINK_FLAGS "/ignore:4099 /ignore:4075 /ignore:4098")
 
 # CEVPlayerCore: CE independent decoding core (static library). It links the imported SDK targets libvpx / libwebm /

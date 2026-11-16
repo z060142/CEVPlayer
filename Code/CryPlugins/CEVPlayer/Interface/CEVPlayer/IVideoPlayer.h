@@ -1,4 +1,4 @@
-// CEVPlayer public player API (interface version 3).
+// CEVPlayer public player API (interface version 4).
 //
 // This header is the contract for other plug-ins (CryXTUI, game code, ...): it contains no CRYENGINE includes
 // and no implementation details. Obtain the factory through IVideoPlugin (CEVPlayer/IVideoPlugin.h):
@@ -45,7 +45,8 @@ namespace CEVPlayer
 {
 	//! Version of this header. Bumped when a virtual is appended / a struct is extended.
 	//! 3: IVideoPlayerListener::OnMarker, IVideoPlayer::SetLanguage / GetLanguage, Load() accepts .cevvideo.
-	constexpr uint32_t kVideoPlayerInterfaceVersion = 3;
+	//! 4: IVideoPlayer::SetVariant / GetVariant (per player variant choice of a .cevvideo descriptor).
+	constexpr uint32_t kVideoPlayerInterfaceVersion = 4;
 
 	//! Bits returned by IVideoPlugin::GetVideoPlayerCaps().
 	enum EVideoPlayerCaps : uint32_t
@@ -53,6 +54,7 @@ namespace CEVPlayer
 		eVideoCap_Alpha           = 1u << 0, //!< files with an alpha channel (VP8/VP9 BlockAdditional alpha) are supported
 		eVideoCap_Premultiplied   = 1u << 1, //!< the output texture is premultiplied RGBA (always set)
 		eVideoCap_MultiResolution = 1u << 2, //!< resolution changes inside one stream (not supported yet: 0)
+		eVideoCap_Variants        = 1u << 3, //!< IVideoPlayer::SetVariant / GetVariant work (interface version 4)
 	};
 
 	enum class EVideoPlayerState : uint8_t
@@ -72,6 +74,9 @@ namespace CEVPlayer
 		Fit,        //!< keep the aspect ratio, whole picture visible, the scene stays visible in the bars
 		Letterbox,  //!< like Fit, with opaque black bars
 	};
+
+	//! SetVariant() argument that hands the choice back to the cvar cev_variant (the default).
+	constexpr int kVariantFollowCvar = -2;
 
 	struct IVideoPlayer;
 
@@ -176,5 +181,15 @@ namespace CEVPlayer
 		virtual void SetLanguage(const char* name) = 0;
 		//! The language in use (descriptor name), empty for a video without languages (the embedded track).
 		virtual const char* GetLanguage() const = 0;
+
+		// ---- appended in version 4 (variants) ----
+		//! Chooses the variant of a .cevvideo descriptor for this player: kVariantFollowCvar (default) = the cvar
+		//! cev_variant decides, -1 = automatic (smallest variant not below the screen height when fullscreen, else the
+		//! main video), 0 = main video, n = the n-th <Variant> of the descriptor. Applies to the next Load(); while a
+		//! descriptor video is loaded the media is reloaded in place and continues at the same position (a short
+		//! glitch is possible). Videos without variants ignore it.
+		virtual void SetVariant(int variant) = 0;
+		//! Variant in use: 0 = main video (also without a descriptor), n = n-th <Variant>.
+		virtual int GetVariant() const = 0;
 	};
 }

@@ -7,6 +7,12 @@
 #include "Console.h"
 
 #include "Components/TextureVideoPlayerComponent.h"
+#include "Components/VideoPlayerComponent.h"
+#include "Bindings/ApiTable.h"
+#include "Bindings/ApiTest.h"
+#if CEV_HAVE_CRYVS
+#include "Bindings/CryVSEnv.h"
+#endif
 
 #include <CrySchematyc/Env/IEnvRegistry.h>
 #include <CrySchematyc/Env/EnvPackage.h>
@@ -39,6 +45,13 @@ namespace CEVPlayer
 				Schematyc::CEnvRegistrationScope componentScope = scope.Register(SCHEMATYC_MAKE_ENV_COMPONENT(CTextureVideoPlayerComponent));
 				CTextureVideoPlayerComponent::Register(componentScope);
 			}
+			// Video Player component (functions and signals generated from the API table)
+			{
+				Schematyc::CEnvRegistrationScope componentScope = scope.Register(SCHEMATYC_MAKE_ENV_COMPONENT(CVideoPlayerComponent));
+				CVideoPlayerComponent::Register(componentScope);
+				LogAlways("Schematyc: registered component 'Video Player' (%u control and %u query functions, %u signals)",
+					static_cast<unsigned>(Api::Controls().size()) - 2u, static_cast<unsigned>(Api::Queries().size()), static_cast<unsigned>(Api::Events().size()));
+			}
 		}
 	}
 
@@ -62,6 +75,8 @@ namespace CEVPlayer
 
 		mEnv->pInputDispatcher = nullptr;
 		m_pInputDispatcher.reset();
+		mEnv->pApi = nullptr;
+		m_pApi.reset();
 		mEnv->pLegacy = nullptr;
 		mEnv->pManager = nullptr;
 		m_pLegacy.reset();
@@ -77,8 +92,12 @@ namespace CEVPlayer
 		m_pLegacy = std::make_unique<CLegacyPlayback>(*m_pManager);
 		mEnv->pManager = m_pManager.get();
 		mEnv->pLegacy = m_pLegacy.get();
+		m_pApi = std::make_unique<Api::CApiPlayers>(*m_pManager);
+		mEnv->pApi = m_pApi.get();
 
 		RegisterConsole();
+		Api::SelfCheck(); // duplicate GUIDs / names in the API table -> warning (assert in debug)
+		LogAlways("API table: %u FlowGraph node classes generated (CEVPlayer:Video:*)", Api::FlowNodeCount());
 
 		if (gEnv->pSystem != nullptr)
 		{
@@ -106,6 +125,9 @@ namespace CEVPlayer
 	{
 		if (m_pManager)
 			m_pManager->UpdateBeforeRender();
+		if (m_pApi)
+			m_pApi->Update(); // Skipped events, records destroyed from inside a callback
+		Api::TickApiTest();
 	}
 
 	void CVideoPlugin::UpdateAfterRender()
@@ -116,6 +138,14 @@ namespace CEVPlayer
 
 	void CVideoPlugin::ShutdownBridge()
 	{
+#if CEV_HAVE_CRYVS
+		CryVSBind::Shutdown();
+#endif
+		// The script API goes first: it removes its player listeners and the skip input listener while the players
+		// still exist (the manager destroys them below).
+		Api::ShutdownApiTest();
+		if (m_pApi)
+			m_pApi->Shutdown();
 		// Order matters: the legacy layer owns players of the manager, the manager releases the textures (the
 		// renderer is still alive at ESYSTEM_EVENT_FULL_SHUTDOWN / FAST_SHUTDOWN) and the audio device.
 		if (m_pLegacy)
@@ -175,6 +205,9 @@ namespace CEVPlayer
 			RegisterLegacyInput();
 			if (m_pManager)
 				m_pManager->RegisterLevelListener();
+#if CEV_HAVE_CRYVS
+			CryVSBind::Initialize(); // community tree only: gEnv->pCryVS exists from here on (nullptr = skipped)
+#endif
 			break;
 		}
 		case ESYSTEM_EVENT_REGISTER_SCHEMATYC_ENV:

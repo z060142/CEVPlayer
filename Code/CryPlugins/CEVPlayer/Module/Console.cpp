@@ -7,6 +7,7 @@
 
 #include <CrySystem/ConsoleRegistration.h>
 
+#include "Bindings/ApiTest.h"
 #include "Compat/LegacyPlayback.h"
 #include "Player/PlayerManager.h"
 
@@ -72,6 +73,11 @@ namespace CEVPlayer
 			mEnv->pManager->ConsoleSetLanguage(args->GetArgCount() > 1 ? args->GetArg(1) : nullptr);
 		}
 
+		void CmdApiTest(IConsoleCmdArgs* args)
+		{
+			Api::StartApiTest(args != nullptr && args->GetArgCount() > 1 ? args->GetArg(1) : nullptr);
+		}
+
 		void CmdList(IConsoleCmdArgs*)
 		{
 			if (mEnv->pManager != nullptr)
@@ -117,6 +123,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_resume", CmdResume, VF_NULL, "Resume the video started by cev_play");
 		REGISTER_COMMAND("cev_seek", CmdSeek, VF_NULL, "Seek the video started by cev_play. cev_seek <seconds>");
 		REGISTER_COMMAND("cev_lang", CmdLang, VF_NULL, "Select the audio language of the video started by cev_play. cev_lang <name> (without a name: show the current one)");
+		REGISTER_COMMAND("cev_apitest", CmdApiTest, VF_NULL, "Self test of the script API table: creates a player through the table functions, plays [path] (default Videos/vp9_alpha.webm), checks state / time after 2 s, stops and destroys it, logs PASS / FAIL");
 		REGISTER_COMMAND("cev_list", CmdList, VF_NULL, "List all CEVPlayer players with state, time and upload count");
 
 		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log and draw a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");
@@ -147,7 +154,7 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_list", "vp_play", "vp_pause", "vp_resume", "vp_stop" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_apitest", "cev_list", "vp_play", "vp_pause", "vp_resume", "vp_stop" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 

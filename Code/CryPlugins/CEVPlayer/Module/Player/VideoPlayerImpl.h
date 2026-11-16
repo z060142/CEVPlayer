@@ -59,6 +59,8 @@ namespace CEVPlayer
 		void RemoveListener(IVideoPlayerListener* pListener) override;
 		void SetLanguage(const char* name) override;
 		const char* GetLanguage() const override { return m_language.c_str(); }
+		void SetVariant(int variant) override;
+		int GetVariant() const override { return m_variantIndex < 0 ? 0 : m_variantIndex; }
 
 		// ---- manager side (main thread) ----
 		uint32_t Id() const { return m_id; }
@@ -181,6 +183,7 @@ namespace CEVPlayer
 		std::string m_requestedLanguage; // SetLanguage(), empty = default choice
 		std::string m_language;          // language in use
 		int m_variantIndex = -1;         // -1 = main video
+		int m_variantRequest = kVariantFollowCvar; // SetVariant()
 		bool m_reloading = false;        // Load() in progress because of a language change
 		double m_reloadTime = 0.0;
 		ERestore m_reloadRestore = ERestore::None;

@@ -8,6 +8,9 @@
 #include <CryEntitySystem/IEntityClass.h>
 #include <CEVPlayer/IVideoPlugin.h>
 
+#include "PluginEnv.h"
+
+#include "Bindings/ApiPlayers.h"
 #include "Compat/LegacyPlayback.h"
 #include "Input/InputDispatcher.h"
 #include "Player/PlayerManager.h"
@@ -52,7 +55,7 @@ namespace CEVPlayer
 		virtual void StopVideo(EVideoType videoType, const char* textureName = nullptr) override;
 		// IVideoPlugin (player API)
 		virtual uint32_t GetVideoPlayerInterfaceVersion() const override { return kVideoPlayerInterfaceVersion; }
-		virtual uint32_t GetVideoPlayerCaps() const override { return eVideoCap_Alpha | eVideoCap_Premultiplied; }
+		virtual uint32_t GetVideoPlayerCaps() const override { return kPluginCaps; }
 		virtual IVideoPlayer* CreatePlayer(const char* textureName = nullptr) override;
 		virtual void DestroyPlayer(IVideoPlayer* pPlayer) override;
 		virtual uint32_t GetPlayerCount() const override;
@@ -64,6 +67,7 @@ namespace CEVPlayer
 		void        ShutdownBridge();
 	private:
 		std::unique_ptr<CPlayerManager> m_pManager;
+		std::unique_ptr<Api::CApiPlayers> m_pApi; // after the manager: destroyed before it
 		std::unique_ptr<CLegacyPlayback> m_pLegacy;
 		std::unique_ptr<CInputDispatcher> m_pInputDispatcher;
 		bool m_listenerRegistered = false;

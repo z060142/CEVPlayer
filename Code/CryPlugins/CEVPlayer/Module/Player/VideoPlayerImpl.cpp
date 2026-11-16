@@ -324,7 +324,7 @@ namespace CEVPlayer
 			return m_desc.video;
 
 		int chosen = -1; // index into variants
-		const int forced = mEnv->m_cevVariant;
+		const int forced = m_variantRequest != kVariantFollowCvar ? m_variantRequest : mEnv->m_cevVariant;
 		if (forced >= 0)
 		{
 			if (forced >= 1 && static_cast<size_t>(forced) <= variants.size())
@@ -781,7 +781,21 @@ namespace CEVPlayer
 		ReloadForLanguage();
 	}
 
-	//! Remembers time and state, loads the media again with the new language and continues there.
+	void CVideoPlayerImpl::SetVariant(int variant)
+	{
+		if (m_destroyed)
+			return;
+		if (variant < kVariantFollowCvar)
+			variant = kVariantFollowCvar;
+		if (variant == m_variantRequest)
+			return;
+		m_variantRequest = variant;
+		if (!m_descValid || m_desc.variants.empty() || (m_phase != EPhase::Ready && m_phase != EPhase::Loading))
+			return; // applied by the next Load()
+		ReloadForLanguage();
+	}
+
+	//! Remembers time and state, loads the media again (new language or variant) and continues there.
 	void CVideoPlayerImpl::ReloadForLanguage()
 	{
 		const bool wasReady = m_phase == EPhase::Ready;
@@ -802,7 +816,7 @@ namespace CEVPlayer
 		const bool seekPending = m_seekPending;
 		const double seekTime = m_seekTime;
 		const std::string path = m_path;
-		Log("player %u: language change, reloading <%s> at %.2fs", m_id, path.c_str(), time);
+		Log("player %u: language / variant change, reloading <%s> at %.2fs", m_id, path.c_str(), time);
 
 		if (!LoadInternal(path.c_str(), true))
 			return; // OnError is queued

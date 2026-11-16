@@ -107,7 +107,7 @@ namespace CEVPlayer
 				{ 0 }
 			};
 
-			config.sDescription = _HELP("You can play 2D video files to viewport in .webm format from 'Videos' folder");
+			config.sDescription = _HELP("(deprecated, use CEVPlayer:Video:*) You can play 2D video files to viewport in .webm format from 'Videos' folder");
 			config.pInputPorts = in_config;
 			config.pOutputPorts = out_config;
 			config.SetCategory(EFLN_APPROVED);
@@ -285,7 +285,7 @@ namespace CEVPlayer
 				{ 0 }
 			};
 
-			config.sDescription = _HELP("You can play 2D video files to texture in .webm format from 'Videos' folder");
+			config.sDescription = _HELP("(deprecated, use CEVPlayer:Video:*) You can play 2D video files to texture in .webm format from 'Videos' folder");
 			config.pInputPorts = in_config;
 			config.pOutputPorts = out_config;
 			config.SetCategory(EFLN_APPROVED);
@@ -500,7 +500,7 @@ namespace CEVPlayer
 				{ 0 }
 			};
 
-			config.sDescription = _HELP("You can play 2D video files to flash movie clip in .webm format from 'Videos' folder");
+			config.sDescription = _HELP("(deprecated, use CEVPlayer:Video:*) You can play 2D video files to flash movie clip in .webm format from 'Videos' folder");
 			config.pInputPorts = in_config;
 			config.pOutputPorts = out_config;
 			config.SetCategory(EFLN_APPROVED);
