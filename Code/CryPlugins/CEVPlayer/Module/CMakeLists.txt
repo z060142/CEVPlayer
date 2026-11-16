@@ -115,9 +115,13 @@ set_target_properties(${THIS_PROJECT} PROPERTIES LINK_FLAGS "/ignore:4099 /ignor
 
 # CEVPlayerCore: CE independent decoding core (static library). It links the imported SDK targets libvpx / libwebm /
 # libogg / libvorbis / libopus (Tools/CMake/modules/*.cmake, included by Core/CMakeLists.txt when they do not exist yet).
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../Core" "${CMAKE_CURRENT_BINARY_DIR}/CEVPlayerCore")
+# The Sandbox plug-in EditorCEVPlayer adds the same sub directory (BuildSandbox.cmake is processed before Code/CryPlugins),
+# so whoever comes first creates the target and the other one skips: both sides use this guard.
+if(NOT TARGET CEVPlayerCore)
+	add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../Core" "${CMAKE_CURRENT_BINARY_DIR}/CEVPlayerCore")
+	set_target_properties(CEVPlayerCore PROPERTIES FOLDER "Project/Plugins")
+endif()
 target_link_libraries(${THIS_PROJECT} PRIVATE CEVPlayerCore)
-set_target_properties(CEVPlayerCore PROPERTIES FOLDER "Project/Plugins")
 
 # SDL2 (audio output): the engine's own SDK/module (2.0.8)
 if(NOT TARGET SDL2)
