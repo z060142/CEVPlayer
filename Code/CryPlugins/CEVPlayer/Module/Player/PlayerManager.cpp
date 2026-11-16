@@ -44,6 +44,14 @@ namespace CEVPlayer
 		{
 			LogAlways("cev_play: ready <%s> %dx%d %.2fs%s", player.GetPath(), player.GetWidth(), player.GetHeight(), player.GetDuration(), player.HasAlpha() ? " alpha" : "");
 		}
+		void OnMarker(IVideoPlayer& player, const char* name, double time) override
+		{
+			LogAlways("cev_play: marker <%s> time=%.3f (player time %.3f)", name != nullptr ? name : "", time, player.GetTime());
+		}
+		void OnLooped(IVideoPlayer& player) override
+		{
+			LogAlways("cev_play: looped <%s>", player.GetPath());
+		}
 		void OnEnded(IVideoPlayer& player) override
 		{
 			LogAlways("cev_play: ended <%s>", player.GetPath());
@@ -421,21 +429,27 @@ namespace CEVPlayer
 			const uint64_t uploads = p->UploadCount();
 			const uint64_t perSecond = uploads - p->StatsMark();
 			p->StatsMark() = uploads;
+			double avOffsetMs = 0.0;
+			const bool haveAvOffset = p->GetAvOffsetMs(avOffsetMs);
 			std::snprintf(line, sizeof(line),
-				"[CEV stats] #%u t=%.1f/%.1f decodeMs avg=%.2f p99=%.2f convertMs avg=%.2f p99=%.2f uploads=%llu (+%llu/s) dropped=%llu allocs=%llu ring=%.1f",
+				"[CEV stats] #%u t=%.1f/%.1f decodeMs avg=%.2f p99=%.2f convertMs avg=%.2f p99=%.2f uploads=%llu (+%llu/s) dropped=%llu allocs=%llu ring=%.1f clock=%s avOffsetMs=%.1f",
 				p->Id(), p->GetTime(), p->GetDuration(), s.decodeMs.avg, s.decodeMs.p99, s.convertMs.avg, s.convertMs.p99,
 				static_cast<unsigned long long>(uploads), static_cast<unsigned long long>(perSecond),
-				static_cast<unsigned long long>(s.framesDropped), static_cast<unsigned long long>(s.allocs), s.ringOccupancy.avg);
+				static_cast<unsigned long long>(s.framesDropped), static_cast<unsigned long long>(s.allocs), s.ringOccupancy.avg,
+				p->ClockSourceName(), haveAvOffset ? avOffsetMs : 0.0);
 			s_statsLines.push_back(line);
 			CryLogAlways("%s", line);
 		}
 	}
 
 	// ------------------------------------------------------------------------------------------------ engine events
-	void CPlayerManager::OnSystemEvent(ESystemEvent event)
+	void CPlayerManager::OnSystemEvent(ESystemEvent event, UINT_PTR wparam)
 	{
 		switch (event)
 		{
+		case ESYSTEM_EVENT_CHANGE_FOCUS:
+			m_audio.SetFocus(wparam != 0); // muted while unfocused when cev_muteOnFocusLoss is set
+			break;
 		case ESYSTEM_EVENT_LEVEL_LOAD_START_LOADINGSCREEN:
 			BeginLevelLoading("loading screen started");
 			break;
@@ -485,8 +499,9 @@ namespace CEVPlayer
 	// ------------------------------------------------------------------------------------------------ console
 	void CPlayerManager::ListPlayers() const
 	{
-		LogAlways("cev_list: %u player(s), render stage %d, audio voices %u (device %s), level loading %s",
-			GetPlayerCount(), RenderBridge::Stage(), m_audio.VoiceCount(), m_audio.IsDeviceOpen() ? "open" : "closed", m_levelLoading ? "yes" : "no");
+		LogAlways("cev_list: %u player(s), render stage %d, audio voices %u (device %s%s%s), level loading %s",
+			GetPlayerCount(), RenderBridge::Stage(), m_audio.VoiceCount(), m_audio.IsDeviceOpen() ? "open" : "closed",
+			mEnv->m_cevDisableEmbeddedAudio != 0 ? ", cev_disableEmbeddedAudio" : "", m_audio.DeviceFailed() ? ", device failed" : "", m_levelLoading ? "yes" : "no");
 		char line[512];
 		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
 		{
@@ -551,6 +566,22 @@ namespace CEVPlayer
 			LogAlways("cev_resume: no cev_play video is running");
 		else
 			m_pConsolePlayer->Resume();
+	}
+
+	void CPlayerManager::ConsoleSetLanguage(const char* name)
+	{
+		if (m_pConsolePlayer == nullptr)
+		{
+			LogAlways("cev_lang: no cev_play video is running");
+			return;
+		}
+		if (name == nullptr || name[0] == '\0')
+		{
+			LogAlways("cev_lang: current language <%s>", m_pConsolePlayer->GetLanguage());
+			return;
+		}
+		LogAlways("cev_lang: <%s> (was <%s>)", name, m_pConsolePlayer->GetLanguage());
+		m_pConsolePlayer->SetLanguage(name);
 	}
 
 	void CPlayerManager::ConsoleSeek(double seconds)

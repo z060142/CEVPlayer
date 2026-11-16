@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- M2a test: route="cue" is not implemented before M3 -> no audio, one warning, the video plays silently. -->
+<CEVVideo version="1" route="cue" video="vp8_vorbis.webm">
+  <Languages default="english">
+    <Language name="english" trigger="Play_Intro_EN"/>
+  </Languages>
+</CEVVideo>

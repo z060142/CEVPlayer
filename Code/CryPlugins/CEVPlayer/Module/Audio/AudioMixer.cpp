@@ -3,8 +3,10 @@
 #include "AudioMixer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
+#include "CEVCore/AudioClock.h"
 #include "CEVCore/PlayerCore.h"
 
 #ifndef NOMINMAX
@@ -28,10 +30,17 @@ namespace CEVPlayer
 			const uint32_t frames = static_cast<uint32_t>(len) / (2u * sizeof(float));
 			pMixer->Mix(reinterpret_cast<float*>(stream), frames);
 		}
+
+		inline float Clamp01(float v)
+		{
+			return std::min(1.f, std::max(0.f, v));
+		}
 	}
 
 	CAudioMixer::CAudioMixer()
 	{
+		for (std::atomic<float>& p : m_peak)
+			p.store(0.f, std::memory_order_relaxed);
 		std::memset(m_scratch, 0, sizeof(m_scratch));
 	}
 
@@ -52,6 +61,7 @@ namespace CEVPlayer
 		// every failure path, so the calls stay balanced.
 		if (!m_subsystemInit)
 		{
+			m_everInit = true;
 			if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0)
 			{
 				LogError("SDL audio init failed (%s), video audio disabled", SDL_GetError());
@@ -86,26 +96,30 @@ namespace CEVPlayer
 			return false;
 		}
 		SDL_PauseAudioDevice(m_device, 1); // unpaused when the first voice arrives
-		LogDebug("audio device opened: %d Hz, %d channels, %d samples", obtained.freq, static_cast<int>(obtained.channels), static_cast<int>(obtained.samples));
+		// Frames queued in the device after a callback returned, including the block just delivered: with the
+		// SDL callback model that is one to two device buffers; take the middle.
+		m_latencyFrames = static_cast<uint32_t>(std::max(0, static_cast<int>(obtained.samples))) * 3u / 2u;
+		Log("audio device opened: %d Hz, %d channels, %d samples (latency estimate %u frames)", obtained.freq, static_cast<int>(obtained.channels),
+			static_cast<int>(obtained.samples), m_latencyFrames);
 		return true;
 	}
 
-	int CAudioMixer::AddVoice(cev::PlayerCore* pCore, uint32_t sampleRate, uint32_t channels)
+	int CAudioMixer::AddVoice(cev::PlayerCore* pCore, cev::AudioClock* pClock)
 	{
-		if (pCore == nullptr)
+		if (pCore == nullptr || pClock == nullptr)
 			return kInvalidVoice;
-		if (sampleRate != kDeviceRate)
+		if (mEnv != nullptr && mEnv->m_cevDisableEmbeddedAudio != 0)
+			return kInvalidVoice; // the SDL audio subsystem must stay untouched
+		if (pCore->GetInfo().outputAudioSampleRate != kDeviceRate)
 		{
-			LogWarning("audio stream has %u Hz, the M1 audio device is %u Hz without a resampler: no audio for this video", sampleRate, kDeviceRate);
-			return kInvalidVoice;
-		}
-		if (channels < 1 || channels > 2)
-		{
-			LogWarning("audio stream has %u channels, M1 plays mono and stereo only: no audio for this video", channels);
+			LogWarning("audio stream cannot be converted to the %u Hz device format: no audio for this video", kDeviceRate);
 			return kInvalidVoice;
 		}
 		if (!EnsureDevice())
 			return kInvalidVoice;
+
+		pClock->SetOutputSampleRate(kDeviceRate);
+		pClock->SetOutputLatencyFrames(m_latencyFrames);
 
 		int handle = kInvalidVoice;
 		{
@@ -114,9 +128,9 @@ namespace CEVPlayer
 			{
 				if (!m_voices[i].used)
 				{
+					m_voices[i] = SVoice();
 					m_voices[i].pCore = pCore;
-					m_voices[i].channels = channels;
-					m_voices[i].volume = 1.f;
+					m_voices[i].pClock = pClock;
 					m_voices[i].used = true;
 					++m_voiceCount;
 					handle = i;
@@ -138,7 +152,14 @@ namespace CEVPlayer
 		if (voice < 0 || voice >= kMaxVoices)
 			return;
 		std::lock_guard<std::mutex> lock(m_mutex);
-		m_voices[voice].volume = std::min(1.f, std::max(0.f, volume));
+		m_voices[voice].volume = Clamp01(volume);
+	}
+
+	float CAudioMixer::TakeVoicePeak(int voice)
+	{
+		if (voice < 0 || voice >= kMaxVoices)
+			return 0.f;
+		return m_peak[voice].exchange(0.f, std::memory_order_relaxed);
 	}
 
 	void CAudioMixer::RemoveVoice(int voice)
@@ -147,8 +168,8 @@ namespace CEVPlayer
 			return;
 		bool none = false;
 		{
-			// The audio callback holds this mutex while it reads from the core, so once the lock is taken the
-			// callback is not inside ReadAudio() of this voice any more.
+			// The audio callback holds this mutex while it reads from the core and advances the clock, so once the
+			// lock is taken the callback is not inside this voice any more.
 			std::lock_guard<std::mutex> lock(m_mutex);
 			if (m_voices[voice].used)
 			{
@@ -179,6 +200,14 @@ namespace CEVPlayer
 			SDL_QuitSubSystem(SDL_INIT_AUDIO);
 			m_subsystemInit = false;
 		}
+		if (!m_shutdownLogged)
+		{
+			m_shutdownLogged = true;
+			if (!m_everInit)
+				LogAlways("SDL audio subsystem was never initialized");
+			else
+				Log("SDL audio subsystem was initialized%s", m_deviceFailed ? " (the device could not be opened)" : "");
+		}
 	}
 
 	uint32_t CAudioMixer::VoiceCount() const
@@ -191,46 +220,62 @@ namespace CEVPlayer
 	{
 		std::memset(out, 0, static_cast<size_t>(frames) * 2u * sizeof(float));
 
-		const bool enabled = mEnv != nullptr && mEnv->m_cevAudioEnable != 0;
-		const float master = mEnv != nullptr ? std::min(1.f, std::max(0.f, mEnv->m_audioVolume)) : 1.f;
+		// Plain reads of cvars written by the main thread: a torn / stale value only changes the volume for a block.
+		float master = 1.f;
+		bool enabled = true;
+		if (mEnv != nullptr)
+		{
+			enabled = mEnv->m_cevAudioEnable != 0;
+			master = Clamp01(mEnv->m_cevVolume) * Clamp01(mEnv->m_audioVolume);
+			if (mEnv->m_cevMuteOnFocusLoss != 0 && !m_focused.load(std::memory_order_relaxed))
+				master = 0.f;
+		}
+		if (!enabled)
+			master = 0.f;
 
 		std::lock_guard<std::mutex> lock(m_mutex);
-		for (SVoice& v : m_voices)
+		for (int voiceIndex = 0; voiceIndex < kMaxVoices; ++voiceIndex)
 		{
+			SVoice& v = m_voices[voiceIndex];
 			if (!v.used || v.pCore == nullptr)
 				continue;
-			const float gain = enabled ? master * v.volume : 0.f;
+			float peak = 0.f;
+			const float target = master * v.volume;
+			const float startGain = v.gain;
 
 			uint32_t done = 0;
-			while (done < frames)
+			bool starved = false;
+			while (done < frames && !starved)
 			{
 				const uint32_t n = std::min(frames - done, kChunkFrames);
 				// Always pull, even when muted, so that the PCM ring keeps draining at playback speed.
-				const uint32_t got = v.pCore->ReadAudio(m_scratch, n);
+				const uint32_t got = v.pCore->ReadAudioResampled(m_scratch, n);
 				if (got == 0)
-					break; // silence (not playing / underrun / seeking)
-				if (gain > 0.f)
+					break; // silence (not playing / underrun / seeking / no audio)
+				for (uint32_t i = 0; i < got * 2u; ++i)
+					peak = std::max(peak, std::fabs(m_scratch[i]));
+				if (startGain > 0.f || target > 0.f)
 				{
 					float* dst = out + static_cast<size_t>(done) * 2u;
-					if (v.channels == 2)
+					// Linear ramp from the previous block's gain to the target across the whole block.
+					const float step = (target - startGain) / static_cast<float>(frames);
+					float g = startGain + step * static_cast<float>(done);
+					for (uint32_t i = 0; i < got; ++i)
 					{
-						for (uint32_t i = 0; i < got * 2u; ++i)
-							dst[i] += m_scratch[i] * gain;
-					}
-					else
-					{
-						for (uint32_t i = 0; i < got; ++i)
-						{
-							const float s = m_scratch[i] * gain;
-							dst[2u * i] += s;
-							dst[2u * i + 1u] += s;
-						}
+						g += step;
+						dst[2u * i] += m_scratch[2u * i] * g;
+						dst[2u * i + 1u] += m_scratch[2u * i + 1u] * g;
 					}
 				}
 				done += n;
-				if (got < n)
-					break;
+				starved = got < n;
 			}
+			v.gain = target;
+			if (peak > m_peak[voiceIndex].load(std::memory_order_relaxed))
+				m_peak[voiceIndex].store(peak, std::memory_order_relaxed);
+			// The clock counts every block handed to the device, also silence (underrun, paused, ended).
+			if (v.pClock != nullptr)
+				v.pClock->OnFramesConsumed(frames);
 		}
 
 		for (uint32_t i = 0; i < frames * 2u; ++i)

@@ -62,7 +62,7 @@ namespace CEVPlayer
 		virtual uint32_t GetPlayerCount() const = 0;
 
 		// ---------------------------------------------------------------------------------------------
-		// Appended in player interface version 2 (kVideoPlayerInterfaceVersion): do not reorder.
+		// Appended in player interface version 2 (kVideoPlayerInterfaceVersion; version 3 appended no plug-in virtuals): do not reorder.
 		// ---------------------------------------------------------------------------------------------
 
 		//! Detaches `pListener` from every legacy video (main window, queued, texture videos). Legacy events are

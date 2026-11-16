@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 #include <CrySystem/File/ICryPak.h>
+#include <CryRenderer/IRenderer.h>
 #include <CryRenderer/IShader.h>
 #include <Cry3DEngine/IMaterial.h>
 
@@ -36,19 +38,32 @@ namespace CEVPlayer
 		{
 			cev::PlayerConfig cfg;
 			cfg.outputRgba = true;
-			cfg.decodeAudio = mEnv->m_cevAudioEnable != 0 && gEnv != nullptr && !gEnv->IsDedicated();
+			cfg.decodeAudio = false; // BuildCores() decides per media
 			cfg.videoThreads = static_cast<uint32_t>(std::max(0, mEnv->m_cevDecodeThreads));
 			cfg.enableStats = manager.GlobalStatsEnabled();
 			cfg.pool = manager.AcquirePool();
 			return cfg;
 		}
+
+		bool FileExists(const std::string& path)
+		{
+			return !path.empty() && gEnv != nullptr && gEnv->pCryPak != nullptr && gEnv->pCryPak->IsFileExist(path.c_str());
+		}
+
+		//! cvar string value, empty when the cvar does not exist.
+		const char* CVarString(const char* name)
+		{
+			ICVar* const pVar = gEnv != nullptr && gEnv->pConsole != nullptr ? gEnv->pConsole->GetCVar(name) : nullptr;
+			const char* const value = pVar != nullptr ? pVar->GetString() : nullptr;
+			return value != nullptr ? value : "";
+		}
 	}
 
 	CVideoPlayerImpl::CVideoPlayerImpl(CPlayerManager& manager, uint32_t id, const char* textureName)
 		: m_manager(manager)
-		, m_core(MakeConfig(manager))
 		, m_id(id)
 	{
+		m_core = std::make_unique<cev::PlayerCore>(MakeConfig(manager)); // replaced by BuildCores() at every Load()
 		if (textureName != nullptr && textureName[0] != '\0')
 		{
 			bool changed = false;
@@ -93,6 +108,20 @@ namespace CEVPlayer
 		m_events[m_eventCount].code = code;
 		m_events[m_eventCount].value = value;
 		++m_eventCount;
+	}
+
+	void CVideoPlayerImpl::EmitMarker(const SVideoDescriptor::SMarker& marker)
+	{
+		if (m_destroyed)
+			return;
+		if (m_eventCount >= kMaxEvents)
+			m_eventCount = kMaxEvents - 1; // a marker outranks the newest queued event
+		SEvent& ev = m_events[m_eventCount++];
+		ev = SEvent();
+		ev.type = EEvent::Marker;
+		ev.time = marker.time;
+		std::strncpy(ev.name, marker.name.c_str(), kMarkerNameLength - 1);
+		ev.name[kMarkerNameLength - 1] = '\0';
 	}
 
 	void CVideoPlayerImpl::AddListener(IVideoPlayerListener* pListener)
@@ -147,6 +176,7 @@ namespace CEVPlayer
 				case EEvent::Paused:   pListener->OnPaused(*this); break;
 				case EEvent::Resumed:  pListener->OnResumed(*this); break;
 				case EEvent::Stopped:  pListener->OnStopped(*this); break;
+				case EEvent::Marker:   pListener->OnMarker(*this, ev.name, ev.time); break;
 				}
 			}
 		}
@@ -158,23 +188,40 @@ namespace CEVPlayer
 	// ------------------------------------------------------------------------------------------------ media
 	bool CVideoPlayerImpl::Load(const char* path)
 	{
+		return LoadInternal(path, false);
+	}
+
+	bool CVideoPlayerImpl::LoadInternal(const char* path, bool reload)
+	{
 		if (m_destroyed)
 			return false;
 
-		StopVoice();
-		m_core.Unload();
+		StopVoice(); // before any core goes away: the audio callback must not touch them
+		m_audioCore.reset();
+		m_core->Unload();
 		m_phase = EPhase::None;
 		m_info = cev::MediaInfo();
+		m_hasAudio = false;
 		m_seenLoops = 0;
 		m_endedSent = false;
 		m_pausedByLevelLoad = false;
 		m_needUpload = false;
 		m_frameSerial = 0;
 		m_seekPending = false;
-		m_eventCount = 0;
+		m_silentWarned = false;
+		m_markerResync = true;
+		m_markerNext = 0;
+		m_markerPrev = 0.0;
+		if (!reload)
+			m_eventCount = 0;
 
 		const bool pathOk = path != nullptr && path[0] != '\0';
 		m_path = pathOk ? path : "";
+		m_plan = SPlan();
+		m_desc = SVideoDescriptor();
+		m_descValid = false;
+		m_variantIndex = -1;
+		m_language.clear();
 		if (!pathOk || gEnv == nullptr || gEnv->pCryPak == nullptr || !gEnv->pCryPak->IsFileExist(path))
 		{
 			m_phase = EPhase::Failed;
@@ -184,28 +231,217 @@ namespace CEVPlayer
 			return false;
 		}
 
-		const cev::Status status = m_core.Load(std::make_unique<CCryPakByteSource>(path));
+		SPlan plan;
+		if (!ChoosePlan(path, plan))
+		{
+			m_phase = EPhase::Failed;
+			m_loadStatus = cev::Status::InvalidData;
+			LogError("player %u: cannot load <%s>: unusable descriptor or missing video file", m_id, m_path.c_str());
+			Emit(EEvent::Error, static_cast<int>(m_loadStatus));
+			return false;
+		}
+		m_plan = plan;
+		m_language = plan.language;
+
+		BuildCores(plan);
+		const cev::Status status = m_core->Load(std::make_unique<CCryPakByteSource>(plan.videoPath.c_str()));
 		if (cev::Failed(status))
 		{
 			m_phase = EPhase::Failed;
 			m_loadStatus = status;
-			LogError("player %u: cannot start loading <%s>: %s", m_id, path, cev::StatusToString(status));
+			LogError("player %u: cannot start loading <%s>: %s", m_id, plan.videoPath.c_str(), cev::StatusToString(status));
 			Emit(EEvent::Error, static_cast<int>(status));
 			return false;
 		}
+		if (m_audioCore)
+		{
+			const cev::Status astatus = m_audioCore->Load(std::make_unique<CCryPakByteSource>(plan.externalPath.c_str()));
+			if (cev::Failed(astatus))
+			{
+				LogWarning("player %u: cannot start loading the audio file <%s>: %s, playing without audio", m_id, plan.externalPath.c_str(), cev::StatusToString(astatus));
+				m_audioCore.reset();
+			}
+		}
 		m_phase = EPhase::Loading;
 		m_loadStatus = cev::Status::Ok;
-		LogDebug("player %u: loading <%s>", m_id, path);
+		LogDebug("player %u: loading <%s>%s%s%s", m_id, plan.videoPath.c_str(), m_audioCore ? " + audio <" : "", m_audioCore ? plan.externalPath.c_str() : "", m_audioCore ? ">" : "");
 		return true;
+	}
+
+	//! Fills language, external file and cue flag from the descriptor and the language requests.
+	void CVideoPlayerImpl::ResolveAudio(SPlan& plan, bool report) const
+	{
+		plan.externalPath.clear();
+		plan.language.clear();
+		plan.cue = false;
+		if (!m_descValid)
+			return;
+
+		if (m_desc.route == EVideoRoute::Cue)
+		{
+			plan.cue = true;
+			if (report)
+				LogWarning("player %u: <%s> uses route=\"cue\", which is not implemented before M3: playing without audio", m_id, m_path.c_str());
+			return;
+		}
+
+		// request chain: SetLanguage, g_languageAudio, g_language, descriptor default
+		const char* const candidates[4] = { m_requestedLanguage.c_str(), CVarString("g_languageAudio"), CVarString("g_language"), m_desc.defaultLanguage.c_str() };
+		int index = -1;
+		for (const char* name : candidates)
+		{
+			index = FindLanguage(m_desc, name);
+			if (index >= 0)
+				break;
+		}
+		if (index < 0)
+			return; // no language matches: the embedded track
+		const SVideoDescriptor::SLanguage& lang = m_desc.languages[static_cast<size_t>(index)];
+		plan.language = lang.name;
+		if (m_desc.route != EVideoRoute::Mixed)
+			return; // route "embedded": the embedded track whatever the language entry says
+
+		if (!lang.file.empty())
+		{
+			if (FileExists(lang.file))
+				plan.externalPath = lang.file;
+			else if (report)
+				LogWarning("player %u: audio file <%s> of language <%s> not found, using the embedded track", m_id, lang.file.c_str(), lang.name.c_str());
+		}
+		else if (!lang.embedded && !lang.trigger.empty())
+		{
+			plan.cue = true;
+			if (report)
+				LogWarning("player %u: language <%s> is a cue trigger (<%s>), not implemented before M3: playing without audio", m_id, lang.name.c_str(), lang.trigger.c_str());
+		}
+	}
+
+	std::string CVideoPlayerImpl::PickVariantPath()
+	{
+		m_variantIndex = -1;
+		const std::vector<SVideoDescriptor::SVariant>& variants = m_desc.variants;
+		if (variants.empty())
+			return m_desc.video;
+
+		int chosen = -1; // index into variants
+		const int forced = mEnv->m_cevVariant;
+		if (forced >= 0)
+		{
+			if (forced >= 1 && static_cast<size_t>(forced) <= variants.size())
+				chosen = forced - 1;
+			else if (forced > 0)
+				LogWarning("player %u: cev_variant %d does not exist in <%s> (%u variants), using the main video", m_id, forced, m_path.c_str(), static_cast<unsigned>(variants.size()));
+		}
+		else if (m_fullscreen && gEnv != nullptr && gEnv->pRenderer != nullptr)
+		{
+			// smallest variant not below the output; none big enough: the main video (the biggest picture)
+			const int outputHeight = gEnv->pRenderer->GetHeight();
+			for (size_t i = 0; i < variants.size(); ++i)
+			{
+				if (variants[i].height >= outputHeight && (chosen < 0 || variants[i].height < variants[static_cast<size_t>(chosen)].height))
+					chosen = static_cast<int>(i);
+			}
+		}
+		if (chosen >= 0 && !FileExists(variants[static_cast<size_t>(chosen)].file))
+		{
+			LogWarning("player %u: variant file <%s> not found, using the main video", m_id, variants[static_cast<size_t>(chosen)].file.c_str());
+			chosen = -1;
+		}
+		if (chosen < 0)
+			return m_desc.video;
+		m_variantIndex = chosen + 1;
+		Log("player %u: variant %d <%s> %dx%d chosen", m_id, m_variantIndex, variants[static_cast<size_t>(chosen)].file.c_str(),
+			variants[static_cast<size_t>(chosen)].width, variants[static_cast<size_t>(chosen)].height);
+		return variants[static_cast<size_t>(chosen)].file;
+	}
+
+	bool CVideoPlayerImpl::ChoosePlan(const char* path, SPlan& plan)
+	{
+		plan = SPlan();
+		plan.videoPath = path;
+		if (IsDescriptorPath(path))
+		{
+			if (!LoadVideoDescriptor(path, m_desc))
+				return false;
+			m_descValid = true;
+			plan.videoPath = PickVariantPath();
+			ResolveAudio(plan, true);
+			Log("player %u: descriptor <%s> route=%s video=<%s> language=<%s>%s%s markers=%u", m_id, path, RouteName(m_desc.route), plan.videoPath.c_str(),
+				plan.language.c_str(), plan.externalPath.empty() ? "" : " external=", plan.externalPath.c_str(), static_cast<unsigned>(m_desc.markers.size()));
+			if (m_desc.avOffsetMs != 0.0)
+				LogWarning("player %u: avOffsetMs=%.1f of <%s> is not applied yet (the audio clock is the master)", m_id, m_desc.avOffsetMs, path);
+		}
+		if (!FileExists(plan.videoPath))
+		{
+			LogError("player %u: video file <%s> not found", m_id, plan.videoPath.c_str());
+			return false;
+		}
+		return true;
+	}
+
+	//! (Re)creates the clock and the cores for `plan`. Clock rule, decided here once per media (never swapped while
+	//! it plays): the player runs on an AudioClock when its audio can reach the mixer (audio enabled, SDL audio not
+	//! disabled by cev_disableEmbeddedAudio and not failed, route is not cue); otherwise on the InternalClock. An
+	//! AudioClock whose voice never starts (no audio track, device failure at the first open) degrades to the wall
+	//! clock by itself; ClockSourceName() then reports "internal".
+	void CVideoPlayerImpl::BuildCores(const SPlan& plan)
+	{
+		StopVoice();
+		m_audioCore.reset();
+		m_core.reset();
+		m_audioClock.reset();
+
+		const bool dedicated = gEnv == nullptr || gEnv->IsDedicated();
+		const bool audioWanted = mEnv->m_cevAudioEnable != 0 && !dedicated && !plan.cue;
+		const bool embedDisabled = mEnv->m_cevDisableEmbeddedAudio != 0;
+		const bool deviceOk = !m_manager.Audio().DeviceFailed();
+		const bool useClock = audioWanted && !embedDisabled && deviceOk;
+		const bool external = useClock && !plan.externalPath.empty();
+
+		cev::PlayerConfig cfg = MakeConfig(m_manager);
+		if (useClock)
+			m_audioClock = std::make_unique<cev::AudioClock>(CAudioMixer::kDeviceRate);
+		cfg.externalClock = m_audioClock.get();
+		if (embedDisabled && audioWanted)
+		{
+			// Decode just enough to know that the video has audio (reported once), nothing is ever played.
+			cfg.decodeAudio = true;
+			cfg.audioBufferMs = 50;
+		}
+		else
+		{
+			cfg.decodeAudio = useClock && !external; // the external file replaces the embedded track
+			if (cfg.decodeAudio)
+				cfg.outputSampleRate = CAudioMixer::kDeviceRate;
+		}
+		m_core = std::make_unique<cev::PlayerCore>(cfg);
+
+		if (external)
+		{
+			cev::PlayerConfig acfg = MakeConfig(m_manager);
+			acfg.outputRgba = false;
+			acfg.enableStats = false;
+			acfg.decodeAudio = true;
+			acfg.externalClock = m_audioClock.get(); // the same clock as the video: the audio is the master
+			acfg.outputSampleRate = CAudioMixer::kDeviceRate;
+			m_audioCore = std::make_unique<cev::PlayerCore>(acfg);
+		}
 	}
 
 	void CVideoPlayerImpl::Unload()
 	{
 		StopVoice();
-		m_core.Unload();
+		m_audioCore.reset();
+		m_core->Unload();
 		m_phase = EPhase::None;
 		m_info = cev::MediaInfo();
+		m_hasAudio = false;
 		m_path.clear();
+		m_desc = SVideoDescriptor();
+		m_descValid = false;
+		m_plan = SPlan();
+		m_language.clear();
+		m_reloading = false;
 		m_playPending = false;
 		m_seekPending = false;
 		m_pausedByLevelLoad = false;
@@ -224,30 +460,71 @@ namespace CEVPlayer
 
 	void CVideoPlayerImpl::OnLoaded()
 	{
-		m_info = m_core.GetInfo();
+		m_info = m_core->GetInfo();
 		m_phase = EPhase::Ready;
 		m_loadStatus = cev::Status::Ok;
-		Log("player %u ready: <%s> %dx%d %.2fs%s%s", m_id, m_path.c_str(), m_info.width, m_info.height, m_info.durationSeconds,
-			m_info.hasAlpha ? " alpha" : "", m_info.hasAudio ? " audio" : "");
 
-		m_core.SetLoop(m_loop);
-		m_core.SetRate(static_cast<double>(m_rate));
-		m_core.SetStatsEnabled(m_manager.GlobalStatsEnabled());
+		// The external audio file: usable only when it has audio; otherwise the video plays silently.
+		if (m_audioCore)
+		{
+			if (m_audioCore->GetLoadState() == cev::LoadState::Ready && m_audioCore->GetInfo().hasAudio)
+			{
+				m_hasAudio = true;
+			}
+			else
+			{
+				LogWarning("player %u: audio file <%s> could not be loaded or has no audio, playing without audio", m_id, m_plan.externalPath.c_str());
+				m_audioCore.reset();
+			}
+		}
+		else
+		{
+			m_hasAudio = m_info.hasAudio;
+		}
+		Log("player %u ready: <%s> %dx%d %.2fs%s%s", m_id, m_plan.videoPath.c_str(), m_info.width, m_info.height, m_info.durationSeconds,
+			m_info.hasAlpha ? " alpha" : "", m_hasAudio ? " audio" : "");
+
+		m_core->SetLoop(m_loop);
+		CoresSetRate(static_cast<double>(m_rate));
+		m_core->SetStatsEnabled(m_manager.GlobalStatsEnabled());
 		EnsureTexture();
 		if (m_phase != EPhase::Ready)
 			return; // the texture was refused: the player failed (OnError queued)
-		StartVoice();
-		Emit(EEvent::Ready);
 
+		if (mEnv->m_cevDisableEmbeddedAudio != 0 && !m_silentWarned && (m_info.hasAudio || !m_plan.externalPath.empty()))
+		{
+			m_silentWarned = true;
+			LogWarning("player %u: <%s> has audio but cev_disableEmbeddedAudio is set: playing silently", m_id, m_path.c_str());
+		}
+		StartVoice();
+
+		if (m_reloading)
+		{
+			// Language change: continue where the old media was, without reporting a new Ready / Started.
+			m_reloading = false;
+			CoresSeek(m_reloadTime);
+			m_needUpload = true;
+			if (m_reloadRestore != ERestore::None)
+			{
+				CoresPlay();
+				if (m_reloadRestore == ERestore::Paused)
+					CoresPause();
+				else
+					ReapplyLevelLoadPause();
+			}
+			return;
+		}
+
+		Emit(EEvent::Ready);
 		if (m_seekPending)
 		{
 			m_seekPending = false;
-			m_core.Seek(m_seekTime);
+			CoresSeek(m_seekTime);
 		}
 		if (m_playPending)
 		{
 			m_playPending = false;
-			if (cev::Succeeded(m_core.Play()))
+			if (cev::Succeeded(CoresPlay()))
 			{
 				Emit(EEvent::Started);
 				ReapplyLevelLoadPause();
@@ -257,11 +534,12 @@ namespace CEVPlayer
 
 	void CVideoPlayerImpl::OnLoadFailed()
 	{
-		const cev::LoadError err = m_core.GetLoadError();
+		const cev::LoadError err = m_core->GetLoadError();
 		m_phase = EPhase::Failed;
 		m_loadStatus = err.status;
 		m_playPending = false;
-		LogError("player %u: loading <%s> failed: %s (%s)", m_id, m_path.c_str(), cev::StatusToString(err.status), cev::StatusDetailToString(err.detail));
+		m_reloading = false;
+		LogError("player %u: loading <%s> failed: %s (%s)", m_id, m_plan.videoPath.c_str(), cev::StatusToString(err.status), cev::StatusDetailToString(err.detail));
 		Emit(EEvent::Error, static_cast<int>(err.status));
 	}
 
@@ -269,15 +547,66 @@ namespace CEVPlayer
 	{
 		LogError("player %u: <%s> failed: %s (%s)", m_id, m_path.c_str(), cev::StatusToString(status), reason != nullptr ? reason : "");
 		StopVoice();
-		m_core.Unload();
+		m_audioCore.reset();
+		m_core->Unload();
 		m_phase = EPhase::Failed;
 		m_loadStatus = status;
 		m_playPending = false;
 		m_seekPending = false;
+		m_reloading = false;
 		m_pausedByLevelLoad = false;
 		m_needUpload = false;
 		m_endedSent = false;
 		Emit(EEvent::Error, static_cast<int>(status));
+	}
+
+	// ------------------------------------------------------------------------------------------------ core group
+	// The video core and the external audio core share one clock (the audio core's AudioClock): every control
+	// call goes to both so that their states never diverge. The audio core is never Update()d to its own end (see
+	// Tick), it is only a PCM source.
+	cev::Status CVideoPlayerImpl::CoresPlay()
+	{
+		if (m_audioCore && m_core->GetState() == cev::PlayerState::Ended)
+			m_audioCore->Seek(0.0); // the video core rewinds inside Play(); the audio follows
+		const cev::Status st = m_core->Play();
+		if (m_audioCore && cev::Succeeded(st))
+			m_audioCore->Play();
+		return st;
+	}
+
+	void CVideoPlayerImpl::CoresPause()
+	{
+		m_core->Pause();
+		if (m_audioCore)
+			m_audioCore->Pause();
+	}
+
+	void CVideoPlayerImpl::CoresResume()
+	{
+		m_core->Resume();
+		if (m_audioCore)
+			m_audioCore->Resume();
+	}
+
+	void CVideoPlayerImpl::CoresStop()
+	{
+		if (m_audioCore)
+			m_audioCore->Stop();
+		m_core->Stop(); // last: it leaves the shared clock at 0
+	}
+
+	cev::Status CVideoPlayerImpl::CoresSeek(double seconds)
+	{
+		if (m_audioCore)
+			m_audioCore->Seek(seconds); // clamps to its own duration and moves the clock: the video seek goes last
+		return m_core->Seek(seconds);
+	}
+
+	void CVideoPlayerImpl::CoresSetRate(double rate)
+	{
+		m_core->SetRate(rate);
+		if (m_audioCore)
+			m_audioCore->SetRate(rate);
 	}
 
 	// ------------------------------------------------------------------------------------------------ control
@@ -292,12 +621,14 @@ namespace CEVPlayer
 		}
 		if (m_phase != EPhase::Ready)
 			return;
-		const cev::PlayerState before = m_core.GetState();
+		const cev::PlayerState before = m_core->GetState();
 		if (before == cev::PlayerState::Playing)
 			return;
-		if (cev::Succeeded(m_core.Play()))
+		if (cev::Succeeded(CoresPlay()))
 		{
 			m_endedSent = false;
+			if (before == cev::PlayerState::Ended || before == cev::PlayerState::Stopped)
+				m_markerResync = true;
 			Emit(before == cev::PlayerState::Paused ? EEvent::Resumed : EEvent::Started);
 			ReapplyLevelLoadPause();
 		}
@@ -312,8 +643,11 @@ namespace CEVPlayer
 			m_playPending = false;
 			return;
 		}
-		if (m_core.GetState() == cev::PlayerState::Playing && cev::Succeeded(m_core.Pause()))
+		if (m_core->GetState() == cev::PlayerState::Playing)
+		{
+			CoresPause();
 			Emit(EEvent::Paused);
+		}
 		m_pausedByLevelLoad = false;
 	}
 
@@ -321,8 +655,9 @@ namespace CEVPlayer
 	{
 		if (m_destroyed || m_phase != EPhase::Ready)
 			return;
-		if (m_core.GetState() == cev::PlayerState::Paused && cev::Succeeded(m_core.Resume()))
+		if (m_core->GetState() == cev::PlayerState::Paused)
 		{
+			CoresResume();
 			m_pausedByLevelLoad = false;
 			Emit(EEvent::Resumed);
 			ReapplyLevelLoadPause();
@@ -338,13 +673,12 @@ namespace CEVPlayer
 			m_playPending = false;
 			return;
 		}
-		if (cev::Succeeded(m_core.Stop()))
-		{
-			m_needUpload = true; // the first frame is shown again
-			m_endedSent = false;
-			m_pausedByLevelLoad = false;
-			Emit(EEvent::Stopped);
-		}
+		CoresStop();
+		m_needUpload = true; // the first frame is shown again
+		m_endedSent = false;
+		m_pausedByLevelLoad = false;
+		m_markerResync = true;
+		Emit(EEvent::Stopped);
 	}
 
 	void CVideoPlayerImpl::Seek(double seconds)
@@ -353,10 +687,11 @@ namespace CEVPlayer
 			return;
 		if (m_phase == EPhase::Ready)
 		{
-			if (cev::Succeeded(m_core.Seek(seconds)))
+			if (cev::Succeeded(CoresSeek(seconds)))
 			{
 				m_endedSent = false;
 				m_needUpload = true;
+				m_markerResync = true;
 			}
 		}
 		else if (m_phase == EPhase::Loading || m_phase == EPhase::None)
@@ -369,7 +704,7 @@ namespace CEVPlayer
 	void CVideoPlayerImpl::SetLoop(bool loop)
 	{
 		m_loop = loop;
-		m_core.SetLoop(loop);
+		m_core->SetLoop(loop);
 	}
 
 	void CVideoPlayerImpl::SetRate(float rate)
@@ -377,7 +712,7 @@ namespace CEVPlayer
 		if (!(rate > 0.f) || rate > 16.f)
 			return;
 		m_rate = rate;
-		m_core.SetRate(static_cast<double>(rate));
+		CoresSetRate(static_cast<double>(rate));
 	}
 
 	void CVideoPlayerImpl::SetVolume(float volume)
@@ -396,7 +731,7 @@ namespace CEVPlayer
 		case EPhase::Failed:  return EVideoPlayerState::Error;
 		case EPhase::Ready:   break;
 		}
-		switch (m_core.GetState())
+		switch (m_core->GetState())
 		{
 		case cev::PlayerState::Stopped: return EVideoPlayerState::Stopped;
 		case cev::PlayerState::Playing: return EVideoPlayerState::Playing;
@@ -408,17 +743,135 @@ namespace CEVPlayer
 
 	double CVideoPlayerImpl::GetTime() const
 	{
-		return m_phase == EPhase::Ready ? m_core.GetTime() : 0.0;
+		return m_phase == EPhase::Ready ? m_core->GetTime() : 0.0;
+	}
+
+	bool CVideoPlayerImpl::GetAvOffsetMs(double& ms) const
+	{
+		if (m_phase != EPhase::Ready || !m_info.hasVideo)
+			return false;
+		cev::FrameView view;
+		if (!m_core->GetFrame(view))
+			return false;
+		ms = (m_core->GetTime() - view.pts) * 1000.0;
+		return true;
+	}
+
+	// ------------------------------------------------------------------------------------------------ languages
+	void CVideoPlayerImpl::SetLanguage(const char* name)
+	{
+		if (m_destroyed)
+			return;
+		const std::string requested = name != nullptr ? name : "";
+		if (!requested.empty() && m_descValid && FindLanguage(m_desc, requested.c_str()) < 0)
+		{
+			LogWarning("player %u: language <%s> is not listed in <%s>, ignored", m_id, requested.c_str(), m_path.c_str());
+			return;
+		}
+		if (!requested.empty() && !m_descValid && (m_phase == EPhase::Ready || m_phase == EPhase::Loading))
+			LogWarning("player %u: <%s> has no descriptor and therefore no languages, language <%s> ignored", m_id, m_path.c_str(), requested.c_str());
+		m_requestedLanguage = requested;
+		if (!m_descValid || (m_phase != EPhase::Ready && m_phase != EPhase::Loading))
+			return; // applied by the next Load()
+
+		SPlan next = m_plan;
+		ResolveAudio(next, false);
+		if (next.language == m_plan.language && next.externalPath == m_plan.externalPath && next.cue == m_plan.cue)
+			return; // same audio source
+		ReloadForLanguage();
+	}
+
+	//! Remembers time and state, loads the media again with the new language and continues there.
+	void CVideoPlayerImpl::ReloadForLanguage()
+	{
+		const bool wasReady = m_phase == EPhase::Ready;
+		double time = 0.0;
+		ERestore restore = ERestore::None;
+		if (wasReady)
+		{
+			const cev::PlayerState state = m_core->GetState();
+			time = m_core->GetTime();
+			if (state == cev::PlayerState::Playing || m_pausedByLevelLoad)
+				restore = ERestore::Playing;
+			else if (state == cev::PlayerState::Paused)
+				restore = ERestore::Paused;
+			else if (state == cev::PlayerState::Ended)
+				time = 0.0;
+		}
+		const bool playPending = m_playPending;
+		const bool seekPending = m_seekPending;
+		const double seekTime = m_seekTime;
+		const std::string path = m_path;
+		Log("player %u: language change, reloading <%s> at %.2fs", m_id, path.c_str(), time);
+
+		if (!LoadInternal(path.c_str(), true))
+			return; // OnError is queued
+		m_playPending = playPending;
+		m_seekPending = seekPending;
+		m_seekTime = seekTime;
+		if (wasReady)
+		{
+			m_reloading = true;
+			m_reloadTime = time;
+			m_reloadRestore = restore;
+		}
+	}
+
+	// ------------------------------------------------------------------------------------------------ markers
+	void CVideoPlayerImpl::ResyncMarkers()
+	{
+		// next marker = first one at or after the current time (those before count as passed)
+		const double t = m_core->GetTime() - 1e-6;
+		size_t i = 0;
+		while (i < m_desc.markers.size() && m_desc.markers[i].time < t)
+			++i;
+		m_markerNext = i;
+		m_markerResync = false;
+		m_markerPrev = m_core->GetTime();
+	}
+
+	void CVideoPlayerImpl::UpdateMarkers(bool looped)
+	{
+		const std::vector<SVideoDescriptor::SMarker>& markers = m_desc.markers;
+		if (markers.empty())
+			return;
+		if (looped)
+		{
+			// The loop restarted the clock: markers up to the end of the video that were not reached yet fire
+			// now, then the list starts over.
+			while (m_markerNext < markers.size() && markers[m_markerNext].time <= m_info.durationSeconds)
+				EmitMarker(markers[m_markerNext++]);
+			m_markerResync = true;
+		}
+		if (m_markerResync)
+			ResyncMarkers();
+		const double t = m_core->GetTime();
+		if (t < m_markerPrev - 1e-3)
+		{
+			ResyncMarkers(); // went backwards without a seek call (e.g. the core rewound)
+		}
+		while (m_markerNext < markers.size() && markers[m_markerNext].time <= t + 1e-6)
+			EmitMarker(markers[m_markerNext++]);
+		m_markerPrev = t;
 	}
 
 	// ------------------------------------------------------------------------------------------------ audio
 	void CVideoPlayerImpl::StartVoice()
 	{
-		if (m_voice >= 0 || !m_info.hasAudio || mEnv->m_cevAudioEnable == 0 || gEnv == nullptr || gEnv->IsDedicated())
+		if (m_voice >= 0 || !m_audioClock || !m_hasAudio || mEnv->m_cevAudioEnable == 0 || mEnv->m_cevDisableEmbeddedAudio != 0
+			|| gEnv == nullptr || gEnv->IsDedicated())
 			return;
-		m_voice = m_manager.Audio().AddVoice(&m_core, m_info.audioSampleRate, m_info.audioChannels);
+		cev::PlayerCore* const pSource = m_audioCore ? m_audioCore.get() : m_core.get();
+		m_voice = m_manager.Audio().AddVoice(pSource, m_audioClock.get());
 		if (m_voice >= 0)
+		{
 			m_manager.Audio().SetVoiceVolume(m_voice, m_volume);
+			Log("player %u: audio voice %d (%s), clock = audio", m_id, m_voice, m_audioCore ? "external file" : "embedded track");
+		}
+		else
+		{
+			Log("player %u: no audio voice, clock = internal (wall clock)", m_id);
+		}
 	}
 
 	void CVideoPlayerImpl::StopVoice()
@@ -504,7 +957,7 @@ namespace CEVPlayer
 	void CVideoPlayerImpl::UploadFrame()
 	{
 		cev::FrameView view;
-		if (!m_core.GetFrame(view) || view.rgba == nullptr)
+		if (!m_core->GetFrame(view) || view.rgba == nullptr)
 			return;
 		if (view.width != m_textureWidth || view.height != m_textureHeight)
 			return;
@@ -522,7 +975,7 @@ namespace CEVPlayer
 		{
 			++m_uploads;
 			m_frameSerial = view.serial;
-			m_core.NoteUpload(static_cast<uint64_t>(view.width) * static_cast<uint64_t>(view.height) * 4u);
+			m_core->NoteUpload(static_cast<uint64_t>(view.width) * static_cast<uint64_t>(view.height) * 4u);
 			m_needUpload = false;
 			Emit(EEvent::NewFrame, 0, view.serial);
 		}
@@ -646,16 +1099,16 @@ namespace CEVPlayer
 
 		if (m_phase == EPhase::Loading)
 		{
-			const cev::LoadState ls = m_core.GetLoadState();
+			const cev::LoadState ls = m_core->GetLoadState();
 			if (ls == cev::LoadState::Ready)
 				OnLoaded();
 			else if (ls == cev::LoadState::Failed)
 				OnLoadFailed();
 		}
-		if (m_phase == EPhase::Ready && m_core.GetLoadState() == cev::LoadState::Failed)
+		if (m_phase == EPhase::Ready && m_core->GetLoadState() == cev::LoadState::Failed)
 		{
 			// The core gave up while playing (stream changed resolution, internal error): stop presenting.
-			const cev::LoadError err = m_core.GetLoadError();
+			const cev::LoadError err = m_core->GetLoadError();
 			FailPlayer(err.status, cev::StatusDetailToString(err.detail));
 			return;
 		}
@@ -673,15 +1126,34 @@ namespace CEVPlayer
 			}
 		}
 
-		const bool fresh = m_core.Update();
+		const bool fresh = m_core->Update();
 
-		const uint32_t loops = m_core.GetLoopCount();
+		const uint32_t loops = m_core->GetLoopCount();
+		const bool looped = m_seenLoops < loops;
 		while (m_seenLoops < loops)
 		{
 			++m_seenLoops;
 			Emit(EEvent::Looped);
 		}
-		const cev::PlayerState state = m_core.GetState();
+		const cev::PlayerState state = m_core->GetState();
+		if (m_audioCore)
+		{
+			// The video core ran first. The audio file follows the loop; it is never Update()d to its own end
+			// (that would pause the shared clock): only while the clock is clearly before its duration, which is
+			// all the worker wake-up inside Update() is needed for.
+			if (looped)
+				m_audioCore->Seek(0.0);
+			if (state == cev::PlayerState::Ended)
+			{
+				if (m_audioCore->GetState() == cev::PlayerState::Playing)
+					m_audioCore->Pause();
+			}
+			else if (state == cev::PlayerState::Playing && m_audioCore->GetState() == cev::PlayerState::Playing
+				&& m_core->GetTime() < m_audioCore->GetInfo().durationSeconds - 0.05)
+			{
+				m_audioCore->Update();
+			}
+		}
 		if (state == cev::PlayerState::Ended)
 		{
 			if (!m_endedSent)
@@ -694,6 +1166,7 @@ namespace CEVPlayer
 		{
 			m_endedSent = false;
 		}
+		UpdateMarkers(looped);
 
 		if ((fresh || m_needUpload) && m_pTexture != nullptr)
 			UploadFrame();
@@ -702,18 +1175,18 @@ namespace CEVPlayer
 	// ------------------------------------------------------------------------------------------------ level loading
 	void CVideoPlayerImpl::ReapplyLevelLoadPause()
 	{
-		if (m_manager.IsLevelLoading() && m_phase == EPhase::Ready && m_core.GetState() == cev::PlayerState::Playing)
+		if (m_manager.IsLevelLoading() && m_phase == EPhase::Ready && m_core->GetState() == cev::PlayerState::Playing)
 		{
-			m_core.Pause();
+			CoresPause();
 			m_pausedByLevelLoad = true;
 		}
 	}
 
 	void CVideoPlayerImpl::OnLevelLoadBegin()
 	{
-		if (m_phase == EPhase::Ready && m_core.GetState() == cev::PlayerState::Playing)
+		if (m_phase == EPhase::Ready && m_core->GetState() == cev::PlayerState::Playing)
 		{
-			m_core.Pause();
+			CoresPause();
 			m_pausedByLevelLoad = true;
 		}
 	}
@@ -723,8 +1196,8 @@ namespace CEVPlayer
 		if (m_pausedByLevelLoad)
 		{
 			m_pausedByLevelLoad = false;
-			if (m_phase == EPhase::Ready && m_core.GetState() == cev::PlayerState::Paused)
-				m_core.Resume(); // continues from the paused position: the clock is re-synchronised
+			if (m_phase == EPhase::Ready && m_core->GetState() == cev::PlayerState::Paused)
+				CoresResume(); // continues from the paused position: the clock is re-synchronised
 		}
 	}
 
@@ -741,14 +1214,18 @@ namespace CEVPlayer
 			m_manager.SetFullscreen(this, false);
 		}
 		StopVoice();
-		m_core.Unload();
+		m_audioCore.reset();
+		m_core->Unload();
 		m_phase = EPhase::None;
 	}
 
 	void CVideoPlayerImpl::ListState(char* buffer, size_t size) const
 	{
-		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  uploads=%llu  tex=%s(%d)%s  <%s>",
+		const float peak = m_voice >= 0 ? m_manager.Audio().TakeVoicePeak(m_voice) : 0.f;
+		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  uploads=%llu  tex=%s(%d)%s  audio=%s  peak=%.3f  clock=%s  lang=%s  variant=%s  <%s>",
 			m_id, StateName(GetState()), GetTime(), GetDuration(), GetWidth(), GetHeight(), HasAlpha() ? " alpha" : "",
-			static_cast<unsigned long long>(m_uploads), m_textureName.c_str(), m_textureId, m_fullscreen ? "  fullscreen" : "", m_path.c_str());
+			static_cast<unsigned long long>(m_uploads), m_textureName.c_str(), m_textureId, m_fullscreen ? "  fullscreen" : "",
+			!m_hasAudio ? "none" : (m_voice >= 0 ? (m_audioCore ? "external" : "embedded") : "silent"), peak, ClockSourceName(),
+			m_language.empty() ? "-" : m_language.c_str(), m_variantIndex < 0 ? "main" : std::to_string(m_variantIndex).c_str(), m_path.c_str());
 	}
 }

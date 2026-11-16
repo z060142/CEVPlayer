@@ -39,7 +39,7 @@ namespace CEVPlayer
 		void UpdateAfterRender();
 
 		// ---- engine events ----
-		void OnSystemEvent(ESystemEvent event);
+		void OnSystemEvent(ESystemEvent event, UINT_PTR wparam = 0);
 		//! Level system callbacks (failed loads only report OnLoadingError, no system event): registered once the
 		//! game framework exists, removed at shutdown. Both are idempotent.
 		void RegisterLevelListener();
@@ -69,6 +69,8 @@ namespace CEVPlayer
 		void ConsolePause();
 		void ConsoleResume();
 		void ConsoleSeek(double seconds);
+		//! cev_lang: nullptr / empty only reports the current language and the ones the descriptor offers.
+		void ConsoleSetLanguage(const char* name);
 
 	private:
 		class CConsoleListener;

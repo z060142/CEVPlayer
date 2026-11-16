@@ -65,6 +65,13 @@ namespace CEVPlayer
 			mEnv->pManager->ConsoleSeek(std::atof(args->GetArg(1)));
 		}
 
+		void CmdLang(IConsoleCmdArgs* args)
+		{
+			if (args == nullptr || mEnv->pManager == nullptr)
+				return;
+			mEnv->pManager->ConsoleSetLanguage(args->GetArgCount() > 1 ? args->GetArg(1) : nullptr);
+		}
+
 		void CmdList(IConsoleCmdArgs*)
 		{
 			if (mEnv->pManager != nullptr)
@@ -104,17 +111,23 @@ namespace CEVPlayer
 			return;
 		s_registered = true;
 
-		REGISTER_COMMAND("cev_play", CmdPlay, VF_NULL, "Play a video fullscreen. cev_play <path> [loop], e.g. cev_play Videos/intro.webm 1");
+		REGISTER_COMMAND("cev_play", CmdPlay, VF_NULL, "Play a video fullscreen. cev_play <path> [loop], e.g. cev_play Videos/intro.webm 1 (.webm or .cevvideo)");
 		REGISTER_COMMAND("cev_stop", CmdStop, VF_NULL, "Stop and remove the video started by cev_play");
 		REGISTER_COMMAND("cev_pause", CmdPause, VF_NULL, "Pause the video started by cev_play");
 		REGISTER_COMMAND("cev_resume", CmdResume, VF_NULL, "Resume the video started by cev_play");
 		REGISTER_COMMAND("cev_seek", CmdSeek, VF_NULL, "Seek the video started by cev_play. cev_seek <seconds>");
+		REGISTER_COMMAND("cev_lang", CmdLang, VF_NULL, "Select the audio language of the video started by cev_play. cev_lang <name> (without a name: show the current one)");
 		REGISTER_COMMAND("cev_list", CmdList, VF_NULL, "List all CEVPlayer players with state, time and upload count");
 
 		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log and draw a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");
 		REGISTER_CVAR2("cev_decodeThreads", &mEnv->m_cevDecodeThreads, 0, VF_NULL, "Decode worker threads of the shared pool and libvpx threads per video; 0 = automatic. Applies to new pools / players");
 		REGISTER_CVAR2("cev_log", &mEnv->m_cevLog, 0, VF_NULL, "1 = verbose CEVPlayer log");
 		REGISTER_CVAR2("cev_audio_enable", &mEnv->m_cevAudioEnable, 1, VF_NULL, "0 = no audio output from videos (audio is not even decoded for players created afterwards)");
+
+		REGISTER_CVAR2("cev_muteOnFocusLoss", &mEnv->m_cevMuteOnFocusLoss, 1, VF_NULL, "1 = video audio is muted while the game window has no focus");
+		REGISTER_CVAR2("cev_disableEmbeddedAudio", &mEnv->m_cevDisableEmbeddedAudio, 0, VF_NULL, "1 = videos play silently and the plug-in never initialises the SDL audio subsystem (set it in the .cryproject console_variables to cover the whole run)");
+		REGISTER_CVAR2("cev_variant", &mEnv->m_cevVariant, -1, VF_NULL, "Variant of a .cevvideo descriptor for players loaded afterwards: -1 = automatic (smallest not below the screen height when fullscreen, else the main video), 0 = main video, n = n-th <Variant>");
+		ConsoleRegistrationHelper::Register("cev_volume", &mEnv->m_cevVolume, 1.f, VF_NULL, "Master volume of all videos (0.0 - 1.0), multiplied with the player volume and vp_audio_volume");
 
 		// Legacy (kept for existing projects)
 		REGISTER_COMMAND("vp_play", CmdLegacyPlay, VF_NULL, "Play video file. Ex. vp_play logo (without extension name)");
@@ -134,11 +147,11 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_list", "vp_play", "vp_pause", "vp_resume", "vp_stop" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_list", "vp_play", "vp_pause", "vp_resume", "vp_stop" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 
-		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "vp_debug_log", "vp_debug_draw", "vp_disableLogs", "vp_audio_volume" };
+		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_volume", "vp_debug_log", "vp_debug_draw", "vp_disableLogs", "vp_audio_volume" };
 		for (const char* name : variables)
 			pConsole->UnregisterVariable(name, true);
 	}

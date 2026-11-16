@@ -161,7 +161,7 @@ namespace CEVPlayer
 		}
 
 		if (m_pManager)
-			m_pManager->OnSystemEvent(event); // level loading pause / resume
+			m_pManager->OnSystemEvent(event, wparam); // level loading pause / resume, window focus
 
 		if (gEnv->IsDedicated())
 		{

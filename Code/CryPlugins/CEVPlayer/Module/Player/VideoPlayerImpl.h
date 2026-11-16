@@ -9,7 +9,9 @@
 
 #include <CEVPlayer/IVideoPlayer.h>
 
+#include "CEVCore/AudioClock.h"
 #include "CEVCore/PlayerCore.h"
+#include "Player/VideoDescriptor.h"
 
 namespace CEVPlayer
 {
@@ -44,7 +46,7 @@ namespace CEVPlayer
 		int GetHeight() const override { return m_phase == EPhase::Ready ? m_info.height : 0; }
 		bool HasAlpha() const override { return m_phase == EPhase::Ready && m_info.hasAlpha; }
 		bool IsPremultiplied() const override { return true; }
-		bool HasAudio() const override { return m_phase == EPhase::Ready && m_info.hasAudio; }
+		bool HasAudio() const override { return m_phase == EPhase::Ready && m_hasAudio; }
 		uint64_t GetFrameSerial() const override { return m_frameSerial; }
 		const char* GetTextureName() const override { return m_textureName.c_str(); }
 		int GetTextureId() const override { return m_textureId; }
@@ -55,6 +57,8 @@ namespace CEVPlayer
 		void UnbindMaterial(IMaterial* pMaterial) override;
 		void AddListener(IVideoPlayerListener* pListener) override;
 		void RemoveListener(IVideoPlayerListener* pListener) override;
+		void SetLanguage(const char* name) override;
+		const char* GetLanguage() const override { return m_language.c_str(); }
 
 		// ---- manager side (main thread) ----
 		uint32_t Id() const { return m_id; }
@@ -77,23 +81,39 @@ namespace CEVPlayer
 		uint64_t& StatsMark() { return m_statsMark; }
 		uint64_t UploadCount() const { return m_uploads; }
 		EVideoFit Fit() const { return m_fit; }
-		cev::PlayerCore& Core() { return m_core; }
+		cev::PlayerCore& Core() { return *m_core; }
+		//! "audio" while an audio voice drives the clock (AudioClock), otherwise "internal" (wall clock).
+		const char* ClockSourceName() const { return m_voice >= 0 ? "audio" : "internal"; }
+		//! Lateness of the picture on screen against the clock (clock time - presented frame timestamp, ms).
+		bool GetAvOffsetMs(double& ms) const;
 		bool IsDestroyed() const { return m_destroyed; }
 		void MarkDestroyed() { m_destroyed = true; }
-		void SetStatsEnabled(bool enabled) { m_core.SetStatsEnabled(enabled); }
+		void SetStatsEnabled(bool enabled) { m_core->SetStatsEnabled(enabled); }
 		const std::string& Name() const { return m_textureName; }
 		//! The texture this player owns (valid for name clash checks of the manager).
 		bool HasTexture() const { return m_pTexture != nullptr; }
 
 	private:
 		enum class EPhase : uint8_t { None, Loading, Ready, Failed };
-		enum class EEvent : uint8_t { Ready, Started, NewFrame, Looped, Ended, Error, Paused, Resumed, Stopped };
+		enum class EEvent : uint8_t { Ready, Started, NewFrame, Looped, Ended, Error, Paused, Resumed, Stopped, Marker };
+		static constexpr size_t kMarkerNameLength = 48;
 		struct SEvent
 		{
 			EEvent type = EEvent::Ready;
 			int code = 0;
 			uint64_t value = 0;
+			double time = 0.0;                 // Marker: media time
+			char name[kMarkerNameLength] = {}; // Marker: name (truncated)
 		};
+		//! What Load() decided for one media: files, language and audio route.
+		struct SPlan
+		{
+			std::string videoPath;
+			std::string externalPath; // external audio file (mixed route), empty = none
+			std::string language;
+			bool cue = false;         // route cue / trigger language: no audio before M3
+		};
+		enum class ERestore : uint8_t { None, Playing, Paused };
 		struct SBinding
 		{
 			IMaterial* pMaterial = nullptr; // reference held while bound
@@ -107,6 +127,22 @@ namespace CEVPlayer
 		static constexpr uint32_t kMaxEvents = 32;
 
 		void Emit(EEvent type, int code = 0, uint64_t value = 0);
+		void EmitMarker(const SVideoDescriptor::SMarker& marker);
+		bool LoadInternal(const char* path, bool reload);
+		bool ChoosePlan(const char* path, SPlan& plan);
+		void ResolveAudio(SPlan& plan, bool report) const;
+		std::string PickVariantPath();
+		void BuildCores(const SPlan& plan);
+		void ReloadForLanguage();
+		void UpdateMarkers(bool looped);
+		void ResyncMarkers();
+		// ---- the video core and the optional external audio core always move together
+		cev::Status CoresPlay();
+		void CoresPause();
+		void CoresResume();
+		void CoresStop();
+		cev::Status CoresSeek(double seconds);
+		void CoresSetRate(double rate);
 		void OnLoaded();
 		void OnLoadFailed();
 		bool EnsureTexture();
@@ -123,7 +159,11 @@ namespace CEVPlayer
 		void ReapplyLevelLoadPause();
 
 		CPlayerManager& m_manager;
-		cev::PlayerCore m_core;
+		// Order matters: the clock is referenced by the cores, so it is declared first (destroyed last); the
+		// voice is removed from the mixer before any of them is reset (StopVoice).
+		std::unique_ptr<cev::AudioClock> m_audioClock; // null: the cores run on their InternalClock
+		std::unique_ptr<cev::PlayerCore> m_core;       // video (and the embedded audio track)
+		std::unique_ptr<cev::PlayerCore> m_audioCore;  // external audio file of a language, audio only
 		uint32_t m_id;
 		std::string m_textureName;
 		bool m_autoName = true;  // generated "$cev_video_<w>x<h>_<k>" (reusable, see CPlayerManager::MakeAutoTextureName)
@@ -132,6 +172,24 @@ namespace CEVPlayer
 		EPhase m_phase = EPhase::None;
 		cev::MediaInfo m_info;
 		cev::Status m_loadStatus = cev::Status::Ok;
+		bool m_hasAudio = false;       // audible audio exists (embedded track or external file)
+
+		// descriptor / language / variant
+		SVideoDescriptor m_desc;
+		bool m_descValid = false;
+		SPlan m_plan;
+		std::string m_requestedLanguage; // SetLanguage(), empty = default choice
+		std::string m_language;          // language in use
+		int m_variantIndex = -1;         // -1 = main video
+		bool m_reloading = false;        // Load() in progress because of a language change
+		double m_reloadTime = 0.0;
+		ERestore m_reloadRestore = ERestore::None;
+		bool m_silentWarned = false;
+
+		// markers
+		size_t m_markerNext = 0;
+		bool m_markerResync = true;
+		double m_markerPrev = 0.0;
 
 		// requests made before the media is ready
 		bool m_playPending = false;

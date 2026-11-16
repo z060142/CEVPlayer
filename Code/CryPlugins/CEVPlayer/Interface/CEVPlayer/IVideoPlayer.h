@@ -1,4 +1,4 @@
-// CEVPlayer public player API (interface version 2).
+// CEVPlayer public player API (interface version 3).
 //
 // This header is the contract for other plug-ins (CryXTUI, game code, ...): it contains no CRYENGINE includes
 // and no implementation details. Obtain the factory through IVideoPlugin (CEVPlayer/IVideoPlugin.h):
@@ -7,7 +7,7 @@
 //     CEVPlayer::IVideoPlayer* pPlayer = pPlugin->CreatePlayer("$my_video");
 //     pPlayer->AddListener(&myListener);
 //     pPlayer->SetLoop(true);
-//     pPlayer->Load("Videos/intro.webm");   // asynchronous
+//     pPlayer->Load("Videos/intro.webm");   // asynchronous; also "Videos/intro.cevvideo" (runtime descriptor)
 //     pPlayer->Play();                      // may be called before the file is ready: starts when it is
 //     ...
 //     pPlugin->DestroyPlayer(pPlayer);
@@ -44,7 +44,8 @@ struct IMaterial;
 namespace CEVPlayer
 {
 	//! Version of this header. Bumped when a virtual is appended / a struct is extended.
-	constexpr uint32_t kVideoPlayerInterfaceVersion = 2;
+	//! 3: IVideoPlayerListener::OnMarker, IVideoPlayer::SetLanguage / GetLanguage, Load() accepts .cevvideo.
+	constexpr uint32_t kVideoPlayerInterfaceVersion = 3;
 
 	//! Bits returned by IVideoPlugin::GetVideoPlayerCaps().
 	enum EVideoPlayerCaps : uint32_t
@@ -96,6 +97,11 @@ namespace CEVPlayer
 		virtual void OnPaused(IVideoPlayer& player) { (void)player; }
 		virtual void OnResumed(IVideoPlayer& player) { (void)player; }
 		virtual void OnStopped(IVideoPlayer& player) { (void)player; }
+		// ---- appended in version 3 ----
+		//! The playback position reached a marker of the .cevvideo descriptor. `time` is the marker's media
+		//! timestamp in seconds (not the time of the dispatch). Markers fire again after a loop and after a seek
+		//! backwards; a seek forwards skips the markers it jumps over.
+		virtual void OnMarker(IVideoPlayer& player, const char* name, double time) { (void)player; (void)name; (void)time; }
 	};
 
 	//! One player = one video file = one RGBA texture. Create / destroy through IVideoPlugin.
@@ -104,9 +110,10 @@ namespace CEVPlayer
 		virtual ~IVideoPlayer() {}
 
 		// ---- media ----
-		//! Starts loading `path` (any CryPak path, e.g. "Videos/intro.webm"). Returns false when the request is
-		//! rejected immediately (empty path, file does not exist); OnError is then also sent. Replaces a
-		//! previously loaded video (the texture is kept when the size does not change).
+		//! Starts loading `path` (any CryPak path, e.g. "Videos/intro.webm" or the runtime descriptor
+		//! "Videos/intro.cevvideo": video file, languages, variants, markers). Returns false when the request is
+		//! rejected immediately (empty path, file does not exist, unusable descriptor); OnError is then also sent.
+		//! Replaces a previously loaded video (the texture is kept when the size does not change).
 		virtual bool Load(const char* path) = 0;
 		//! Stops, releases the media and the texture. The player object stays valid.
 		virtual void Unload() = 0;
@@ -120,7 +127,7 @@ namespace CEVPlayer
 		virtual void Seek(double seconds) = 0;
 		virtual void SetLoop(bool loop) = 0;
 		virtual void SetRate(float rate) = 0;     //!< playback speed (0 < rate <= 16)
-		virtual void SetVolume(float volume) = 0; //!< 0..1, multiplied with the global volume (vp_audio_volume)
+		virtual void SetVolume(float volume) = 0; //!< 0..1, multiplied with the global volumes (cev_volume, vp_audio_volume)
 
 		// ---- queries ----
 		virtual EVideoPlayerState GetState() const = 0;
@@ -158,5 +165,16 @@ namespace CEVPlayer
 		// ---- events ----
 		virtual void AddListener(IVideoPlayerListener* pListener) = 0;
 		virtual void RemoveListener(IVideoPlayerListener* pListener) = 0;
+
+		// ---- appended in version 3 (languages) ----
+		//! Selects the audio language by the name used in the .cevvideo descriptor (case insensitive). Without a
+		//! call the language comes from the cvars g_languageAudio / g_language, then the descriptor default, then
+		//! the embedded audio track. Allowed at any time: while a video plays, the media is reloaded in place and
+		//! continues at the same position (a short glitch is possible). nullptr / empty = back to the default
+		//! choice. A name the descriptor does not list is ignored with a warning; videos without a descriptor
+		//! have no languages.
+		virtual void SetLanguage(const char* name) = 0;
+		//! The language in use (descriptor name), empty for a video without languages (the embedded track).
+		virtual const char* GetLanguage() const = 0;
 	};
 }

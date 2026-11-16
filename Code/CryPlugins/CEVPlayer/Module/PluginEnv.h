@@ -33,6 +33,10 @@ namespace CEVPlayer
 		int m_cevStats = 0;       // cev_stats: 1 = stats line every second (log + on screen)
 		int m_cevDecodeThreads = 0; // cev_decodeThreads: 0 = auto
 		int m_cevAudioEnable = 1; // cev_audio_enable
+		float m_cevVolume = 1.f;  // cev_volume (master volume 0..1, multiplied with vp_audio_volume)
+		int m_cevMuteOnFocusLoss = 1; // cev_muteOnFocusLoss
+		int m_cevDisableEmbeddedAudio = 0; // cev_disableEmbeddedAudio: never initialise the SDL audio subsystem
+		int m_cevVariant = -1;    // cev_variant: -1 = automatic, 0 = main video, n = n-th <Variant> of the descriptor
 	};
 
 	extern SPluginEnv* mEnv;

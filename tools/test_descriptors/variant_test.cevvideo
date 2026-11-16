@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- M2a test: main video is 1080p; fullscreen picks the smallest variant not below the screen height
+     (the test project renders 540 high -> the 720p variant), cev_variant overrides (0 = main, n = n-th variant). -->
+<CEVVideo version="1" route="embedded" video="vp9_1080p30_opus.webm">
+  <Variants rule="smallestNotBelowOutput">
+    <Variant file="audio_start_offset.webm" width="640" height="360"/>
+    <Variant file="av_sync_flash_beep.webm" width="1280" height="720"/>
+  </Variants>
+</CEVVideo>
