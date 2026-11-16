@@ -52,6 +52,13 @@ namespace CEVEditor
 	bool SaveDescriptor(const std::string& absPath, const SDescriptor& desc, std::string& error);
 	//! The XML text SaveDescriptor writes.
 	std::string DescriptorToXml(const SDescriptor& desc);
+	//! Same content (compared through the XML text).
+	bool DescriptorsEqual(const SDescriptor& a, const SDescriptor& b);
+	//! Three way merge for "the file changed on disk (a job rewrote it) while the user has unsaved edits in memory":
+	//! `base` = what was last read from / written to the file, `mine` = the edited copy, `theirs` = the file now.
+	//! Every field the user changed (mine != base) keeps the user's value, every other field takes the file's.
+	//! Languages are matched by name; lists (markers, variants) are taken as a whole from whoever changed them.
+	SDescriptor MergeDescriptors(const SDescriptor& base, const SDescriptor& mine, const SDescriptor& theirs);
 	//! Rewrites every file name (video, languages, variants) that starts with `oldPrefix` (case insensitive, like
 	//! CAssetType::RenameAsset does for the files) so that it starts with `newPrefix`. Returns the number of changes.
 	int RenameDescriptorFiles(SDescriptor& desc, const std::string& oldPrefix, const std::string& newPrefix);

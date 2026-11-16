@@ -1,13 +1,17 @@
 // Small job system for the long operations (split audio, WAV, Ogg, source verification, ...): one std::thread per job,
 // independent of the engine's single background queue (docs/research/04 §5). Jobs only do plain C++ (Core / file I/O /
 // IOfflineOps); their completion callback runs on the main thread (a Qt queued call into this object). The runner is
-// owned by the plug-in and joins its threads on destruction (cancelling them first).
+// owned by the plug-in and joins its threads on destruction (cancelling them first); no thread is ever detached.
+//
+// Thread rules: Submit / Cancel* / CancelAndWait are main thread calls. A job function must not touch Qt, the engine
+// (gEnv) or the asset manager; it reports through the SOpContext (progress / log are marshalled to the main thread).
 #pragma once
 
 #include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -43,10 +47,16 @@ namespace CEVEditor
 		using TDone = std::function<void(const SOpResult&)>;
 
 		//! Starts `work` on a new thread. `onDone` (optional) runs on the main thread once the job has finished.
-		//! Callable from any thread. Returns the job id.
-		int Submit(const QString& title, TWork work, TDone onDone = TDone());
+		//! `owner` (optional, e.g. the GUID of an asset) lets the asset operations that move or delete files wait for
+		//! the jobs that have those files open (CancelAndWait). Returns the job id.
+		int Submit(const QString& title, TWork work, TDone onDone = TDone(), const std::string& owner = std::string());
 		void Cancel(int id);
 		void CancelAll();
+		//! True while a job of `owner` has not finished its work function (its files may still be open).
+		bool HasRunningFor(const std::string& owner) const;
+		//! Cancels the jobs of `owner` and waits (at most `timeoutMs`) until their work functions have returned.
+		//! Returns false when one of them is still running afterwards.
+		bool CancelAndWait(const std::string& owner, int timeoutMs);
 
 		std::vector<SJobInfo> Jobs() const;
 		int RunningCount() const;
@@ -62,7 +72,11 @@ namespace CEVEditor
 			std::atomic<bool> cancel{ false };
 			std::atomic<float> progress{ 0.f };
 			std::thread thread;
-			bool finished = false;
+			std::string owner;
+			std::atomic<bool> threadDone{ false };   //!< the work function returned (no file is open any more)
+			std::atomic<bool> changePending{ false };//!< a JobChanged notification for this job is queued already
+			std::atomic<long long> lastNotifyMs{ 0 };//!< steady clock time of the last queued notification
+			bool finished = false;                   //!< the completion ran on the main thread
 		};
 
 		void Finish(int id, const SOpResult& result, const TDone& onDone);

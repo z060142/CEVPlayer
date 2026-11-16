@@ -39,7 +39,7 @@ namespace CEVEditor
 
 	CryIcon CVideoAssetType::GetIconInternal() const
 	{
-		return CryIcon("icons:common/assets_animation.ico");
+		return CryIcon(":/EditorCEVPlayer/icons/assets_video.ico"); // Qt resource of this plug-in (EditorCEVPlayer.qrc)
 	}
 
 	std::vector<CItemModelAttribute*> CVideoAssetType::GetDetails() const
@@ -69,6 +69,63 @@ namespace CEVEditor
 		return GetVariantFromDetail(pAsset->GetDetailValue(key), pDetail);
 	}
 
+	namespace
+	{
+		// The engine makes a Sound asset (<file>.cryasset) of the .wav / .ogg files under Assets. Those metadata files are
+		// not Files of the video asset: when the files are renamed, moved or deleted they would stay behind and describe
+		// files that are gone (the engine creates fresh ones for the new names / places by itself).
+		void RemoveSoundAssetMetadata(const CAsset& asset)
+		{
+			for (const string& file : asset.GetFiles())
+			{
+				const std::string f = file.c_str();
+				const size_t dot = f.find_last_of('.');
+				if (dot == std::string::npos)
+					continue;
+				const std::string ext = f.substr(dot + 1);
+				if (_stricmp(ext.c_str(), "wav") == 0 || _stricmp(ext.c_str(), "ogg") == 0)
+				{
+					std::error_code ec;
+					fs::remove(fs::u8path(AssetsAbsolute(f + ".cryasset")), ec);
+				}
+			}
+		}
+
+		// Files are about to be renamed / moved / deleted: nobody may hold them open (preview player, background jobs).
+		bool ReleaseForFileChange(const CAsset& asset, const char* what, int timeoutMs)
+		{
+			std::string error;
+			if (ReleaseAssetFiles(asset.GetMetadataFile().c_str(), asset.GetGUID(), timeoutMs, error))
+				return true;
+			CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_ERROR, "[CEVEditor] cannot %s '%s': %s", what, asset.GetName().c_str(), error.c_str());
+			return false;
+		}
+	}
+
+	bool CVideoAssetType::MoveAsset(CAsset* pAsset, const char* szDestinationFolder, bool bMoveSourcefile) const
+	{
+		if (pAsset == nullptr || szDestinationFolder == nullptr)
+			return false;
+		if (!ReleaseForFileChange(*pAsset, "move", 10000))
+			return false;
+		RemoveSoundAssetMetadata(*pAsset);
+		const std::string oldSourcePath = CDetails(*pAsset).Get(DetailKey::kSourcePath);
+
+		// moves the metadata and every file of the asset (wav / ogg / webm too) into the folder
+		if (!CAssetType::MoveAsset(pAsset, szDestinationFolder, bMoveSourcefile))
+			return false;
+
+		// the Details name the source copy by path: follow it (the descriptor names files relative to itself, the SDL_mixer
+		// copies and the ACE library do not depend on the folder)
+		if (!oldSourcePath.empty())
+		{
+			CDetails details(*pAsset);
+			details.Set(DetailKey::kSourcePath, FolderOf(pAsset->GetMetadataFile().c_str()) + FileNameOf(oldSourcePath));
+			WriteAssetFilesAndDetails(*pAsset, nullptr, &details);
+		}
+		return true;
+	}
+
 	bool CVideoAssetType::RenameAsset(CAsset* pAsset, const char* szNewName) const
 	{
 		if (pAsset == nullptr || szNewName == nullptr)
@@ -76,6 +133,12 @@ namespace CEVEditor
 		const std::string oldName = pAsset->GetName().c_str();
 		const std::string newName = szNewName;
 		const bool hadAce = !CDetails(*pAsset).Get(DetailKey::kAceLibrary).empty();
+		if (oldName != newName)
+		{
+			if (!ReleaseForFileChange(*pAsset, "rename", 10000))
+				return false;
+			RemoveSoundAssetMetadata(*pAsset);
+		}
 
 		// Renames the files whose names start with the old asset name (CAssetType::RenameAsset); the content of the
 		// descriptor and the Details still carry the old names afterwards.
@@ -130,24 +193,16 @@ namespace CEVEditor
 
 	void CVideoAssetType::PreDeleteAssetFiles(const CAsset& asset) const
 	{
+		// The files are deleted right after this (on the engine's file operation queue): the preview player and the jobs of
+		// the asset must have let go of them. Deleting goes on in any case, the log says when something was still open.
+		ReleaseForFileChange(asset, "release the files of", 5000);
+
 		// The SDL_mixer copies and the ACE library are not Files of the asset: remove them with it.
 		if (!CDetails(asset).Get(DetailKey::kAceLibrary).empty() || !CDetails(asset).Get(DetailKey::kSdlFiles).empty())
 			RemoveAssetSounds(asset.GetName().c_str());
 
 		// The engine makes a Sound asset (<file>.cryasset) of every .wav / .ogg under Assets: do not leave those behind
 		// (the files themselves are deleted with the video asset).
-		for (const string& file : asset.GetFiles())
-		{
-			const std::string f = file.c_str();
-			const size_t dot = f.find_last_of('.');
-			if (dot == std::string::npos)
-				continue;
-			const std::string ext = f.substr(dot + 1);
-			if (_stricmp(ext.c_str(), "wav") == 0 || _stricmp(ext.c_str(), "ogg") == 0)
-			{
-				std::error_code ec;
-				fs::remove(fs::u8path(AssetsAbsolute(f + ".cryasset")), ec);
-			}
-		}
+		RemoveSoundAssetMetadata(asset);
 	}
 }

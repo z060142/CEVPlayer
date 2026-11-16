@@ -28,6 +28,11 @@ namespace CEVEditor
 {
 	class CVideoViewport;
 
+	//! True between eNotify_OnMainFrameInitialized and eNotify_OnQuit. A pane restored from the saved layout is created
+	//! before the main frame is complete: its viewport (swap chain) is only created once this is true.
+	bool IsEditorReady();
+	void SetEditorReady(bool ready);
+
 	class CVideoPreviewPanel : public QWidget, public IAutoEditorNotifyListener
 	{
 		Q_OBJECT
@@ -67,6 +72,7 @@ namespace CEVEditor
 
 	private:
 		void CreateViewport();
+		void ReleaseCheckerOnce();
 		void DestroyViewport();
 		void Tick();
 		void Render(const SRenderContext& rc);
@@ -84,6 +90,8 @@ namespace CEVEditor
 		bool m_recreatePending = false;
 		bool m_createScheduled = false;
 		bool m_shutdown = false;
+		bool m_checkerHeld = false;
+		bool m_waitingForMainFrame = false;
 		bool m_sliderUpdating = false;
 		bool m_loggedFirstDraw = false;
 		bool m_fit = true;

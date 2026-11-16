@@ -32,10 +32,44 @@ namespace CEVEditor
 
 		SImportOptions options;
 		options.assetName = ctx.GetAssetName().c_str();
-		if (!CImportOptionsDialog::Ask(QString::fromUtf8(source.c_str()), options))
+		// the engine already asked about overwriting for the original name (GetAssetNames / CanWrite); a name changed in
+		// the dialog is checked by Ask (it prompts and may send the user back to the dialog)
+		const std::string confirmedName = SanitizeAssetName(options.assetName);
+		if (!CImportOptionsDialog::Ask(QString::fromUtf8(source.c_str()), options, folder, confirmedName))
 			return {}; // cancelled
 
-		SImportResult result = ImportVideoFile(source, folder, options);
+		// the plan (asset manager lookups) and the preparation of an overwrite run on the main thread: this function
+		// runs on the engine's background queue. Waiting here is fine, the main thread does not wait for us.
+		SImportPlan plan;
+		std::string prepareError;
+		bool prepared = true;
+		auto planOnMain = [&]()
+		{
+			plan = PlanImport(source, folder, options);
+			if (plan.ok && plan.exists)
+			{
+				if (plan.assetName == confirmedName)
+					options.overwrite = true; // the engine's own confirmation covers the original name
+				if (options.overwrite)
+					prepared = PrepareOverwrite(plan, prepareError);
+			}
+		};
+		if (QThread::currentThread() == QCoreApplication::instance()->thread())
+			planOnMain();
+		else
+			ThreadingUtils::PostOnMainThread(planOnMain).get();
+		if (plan.ok && plan.exists && !options.overwrite)
+		{
+			CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_ERROR, "[CEVEditor] import of '%s' refused: %s", source.c_str(), plan.detail.c_str());
+			return {};
+		}
+		if (!plan.ok || !prepared)
+		{
+			CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_ERROR, "[CEVEditor] import of '%s' failed: %s", source.c_str(), plan.ok ? prepareError.c_str() : plan.error.c_str());
+			return {};
+		}
+
+		SImportResult result = ImportVideoFile(source, plan, options);
 		if (!result.ok)
 		{
 			CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_ERROR, "[CEVEditor] import of '%s' failed: %s", source.c_str(), result.error.c_str());

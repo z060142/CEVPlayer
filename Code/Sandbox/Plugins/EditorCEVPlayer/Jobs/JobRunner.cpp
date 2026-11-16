@@ -1,8 +1,13 @@
 #include "StdAfx.h"
 #include "Jobs/JobRunner.h"
 
+#include <algorithm>
+#include <chrono>
+
+#include <QCoreApplication>
 #include <QMetaObject>
 #include <QPointer>
+#include <QThread>
 #include <QTimer>
 
 namespace CEVEditor
@@ -33,6 +38,7 @@ namespace CEVEditor
 				job->cancel = true;
 			jobs.swap(m_jobs);
 		}
+		// every thread is joined here, none outlives the plug-in (the work functions poll the cancel flag)
 		for (auto& job : jobs)
 		{
 			if (job->thread.joinable())
@@ -40,7 +46,7 @@ namespace CEVEditor
 		}
 	}
 
-	int CJobRunner::Submit(const QString& title, TWork work, TDone onDone)
+	int CJobRunner::Submit(const QString& title, TWork work, TDone onDone, const std::string& owner)
 	{
 		int id = 0;
 		SJob* pJob = nullptr;
@@ -60,21 +66,40 @@ namespace CEVEditor
 			id = m_nextId++;
 			job->info.id = id;
 			job->info.title = title;
+			job->owner = owner;
 			pJob = job.get();
 			m_jobs.push_back(std::move(job));
 		}
 
-		QPointer<CJobRunner> self(this);
-		pJob->thread = std::thread([self, this, id, pJob, work = std::move(work), onDone = std::move(onDone)]()
+		pJob->thread = std::thread([this, id, pJob, work = std::move(work), onDone = std::move(onDone)]()
 		{
 			SOpContext ctx;
 			ctx.cancel = &pJob->cancel;
-			ctx.progress = [self, this, id, pJob](float p)
+			ctx.progress = [this, id, pJob](float p)
 			{
 				pJob->progress = p;
 				if (m_shuttingDown)
 					return;
-				QMetaObject::invokeMethod(this, [this, id]() { Q_EMIT JobChanged(id); }, Qt::QueuedConnection);
+				// The offline library reports progress for every block it processes (tens of thousands of calls for a long
+				// clip): one queued notification per job at a time, or the main thread drowns in them.
+				const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+				if (nowMs - pJob->lastNotifyMs.load() < 100) // at most ten updates per second per job
+					return;
+				if (pJob->changePending.exchange(true))
+					return;
+				pJob->lastNotifyMs = nowMs;
+				QMetaObject::invokeMethod(this, [this, id]()
+				{
+					{
+						std::lock_guard<std::mutex> lock(m_mutex);
+						for (auto& job : m_jobs)
+						{
+							if (job->info.id == id)
+								job->changePending = false;
+						}
+					}
+					Q_EMIT JobChanged(id);
+				}, Qt::QueuedConnection);
 			};
 			ctx.log = [this, id](const std::string& line)
 			{
@@ -86,7 +111,15 @@ namespace CEVEditor
 			SOpResult result;
 			try
 			{
-				result = work(ctx);
+				if (!m_shuttingDown)
+				{
+					result = work(ctx);
+				}
+				else
+				{
+					result.status = EOpStatus::Cancelled;
+					result.message = "cancelled (shutting down)";
+				}
 			}
 			catch (const std::exception& e)
 			{
@@ -98,11 +131,13 @@ namespace CEVEditor
 				result.status = EOpStatus::Failed;
 				result.message = "unknown exception";
 			}
+			pJob->threadDone = true; // from here on the job holds no file any more
 			if (m_shuttingDown)
 				return;
 			QMetaObject::invokeMethod(this, [this, id, result, onDone]() { Finish(id, result, onDone); }, Qt::QueuedConnection);
 		});
-		Q_EMIT JobChanged(id);
+		// queued: Submit may run inside a signal handler of a panel that listens to JobChanged
+		QMetaObject::invokeMethod(this, [this, id]() { Q_EMIT JobChanged(id); }, Qt::QueuedConnection);
 		return id;
 	}
 
@@ -126,6 +161,41 @@ namespace CEVEditor
 		Q_EMIT JobChanged(id);
 		if (onDone)
 			onDone(result);
+	}
+
+	bool CJobRunner::HasRunningFor(const std::string& owner) const
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		for (const auto& job : m_jobs)
+		{
+			if (job->owner == owner && !job->threadDone)
+				return true;
+		}
+		return false;
+	}
+
+	bool CJobRunner::CancelAndWait(const std::string& owner, int timeoutMs)
+	{
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			for (auto& job : m_jobs)
+			{
+				if (job->owner == owner)
+					job->cancel = true;
+			}
+		}
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		while (HasRunningFor(owner))
+		{
+			if (std::chrono::steady_clock::now() >= deadline)
+				return false;
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		// The completions of the finished jobs are queued calls: run them now, so that their results (files they made,
+		// state of the asset) are applied before the caller renames / moves / deletes the files.
+		if (QThread::currentThread() == QCoreApplication::instance()->thread())
+			QCoreApplication::sendPostedEvents(this, 0);
+		return true;
 	}
 
 	void CJobRunner::Cancel(int id)

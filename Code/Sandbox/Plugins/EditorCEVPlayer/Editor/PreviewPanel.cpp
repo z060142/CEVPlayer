@@ -54,11 +54,13 @@ namespace CEVEditor
 			if (--g_checkerUsers > 0)
 				return;
 			g_checkerUsers = 0;
-			if (g_pChecker != nullptr)
+			if (g_pChecker != nullptr && gEnv != nullptr && gEnv->pRenderer != nullptr) // the renderer owns the texture: nothing to release once it is gone
 				g_pChecker->Release();
 			g_pChecker = nullptr;
 			g_checkerId = 0;
 		}
+
+		bool g_editorReady = false;
 
 		struct SRectF { float x, y, w, h; };
 
@@ -113,11 +115,19 @@ namespace CEVEditor
 		}
 	}
 
+	bool IsEditorReady() { return g_editorReady; }
+	void SetEditorReady(bool ready) { g_editorReady = ready; }
+
 	CVideoPreviewPanel::CVideoPreviewPanel(QWidget* pParent)
 		: QWidget(pParent)
 	{
 		setWindowTitle(tr("Preview"));
-		AcquireChecker();
+		// the checkerboard texture needs the renderer: not while a restored pane is created before the main frame is up
+		if (IsEditorReady())
+		{
+			AcquireChecker();
+			m_checkerHeld = true;
+		}
 
 		QVBoxLayout* const pMain = new QVBoxLayout(this);
 		pMain->setContentsMargins(4, 4, 4, 4);
@@ -192,8 +202,16 @@ namespace CEVEditor
 		GetIEditor()->UnregisterNotifyListener(this);
 		// order of docs/research/04 §4.7: player first, then the shared texture, then the viewport (its destructor flushes the render thread)
 		m_session.Release();
-		ReleaseChecker();
+		ReleaseCheckerOnce();
 		DestroyViewport();
+	}
+
+	void CVideoPreviewPanel::ReleaseCheckerOnce()
+	{
+		if (!m_checkerHeld)
+			return;
+		m_checkerHeld = false;
+		ReleaseChecker();
 	}
 
 	void CVideoPreviewPanel::showEvent(QShowEvent* pEvent)
@@ -206,16 +224,27 @@ namespace CEVEditor
 			QTimer::singleShot(0, this, [this]()
 			{
 				m_createScheduled = false;
-				if (!m_pViewport && !m_shutdown && isVisible())
-					CreateViewport();
+				if (m_pViewport || m_shutdown || !isVisible())
+					return;
+				if (!IsEditorReady())
+				{
+					m_waitingForMainFrame = true; // restored pane: wait for eNotify_OnMainFrameInitialized
+					return;
+				}
+				CreateViewport();
 			});
 		}
 	}
 
 	void CVideoPreviewPanel::CreateViewport()
 	{
-		if (gEnv == nullptr || gEnv->pRenderer == nullptr)
+		if (gEnv == nullptr || gEnv->pRenderer == nullptr || m_shutdown || !IsEditorReady())
 			return;
+		if (!m_checkerHeld)
+		{
+			AcquireChecker();
+			m_checkerHeld = true;
+		}
 		m_pViewport = new CVideoViewport(m_pViewportHost);
 		m_pViewportHost->layout()->addWidget(m_pViewport);
 		connect(m_pViewport, &QViewport::SignalRender, this, [this](const SRenderContext& rc) { Render(rc); });
@@ -251,11 +280,29 @@ namespace CEVEditor
 
 	void CVideoPreviewPanel::OnEditorNotifyEvent(EEditorNotifyEvent event)
 	{
+		if (event == eNotify_OnMainFrameInitialized)
+		{
+			SetEditorReady(true);
+			if (m_waitingForMainFrame && !m_pViewport && !m_shutdown)
+			{
+				m_waitingForMainFrame = false;
+				QTimer::singleShot(0, this, [this]()
+				{
+					if (!m_pViewport && !m_shutdown && isVisible())
+						CreateViewport();
+				});
+			}
+			return;
+		}
 		if (event == eNotify_OnQuit)
 		{
-			// the engine shuts down after this: no IVideoPlayer may be used later
+			// The engine shuts down after this (renderer and runtime plug-in go): release everything that needs them now,
+			// in the order player, shared texture, viewport. The panel itself may live on until Qt deletes it.
+			SetEditorReady(false);
 			m_shutdown = true;
 			m_session.Release();
+			ReleaseCheckerOnce();
+			DestroyViewport();
 			return;
 		}
 		if (event == eNotify_OnIdleUpdate)
@@ -447,7 +494,7 @@ namespace CEVEditor
 			}
 		}
 
-		if (m_pViewport && !m_recreatePending && m_pViewport->isVisible())
+		if (m_pViewport && !m_recreatePending && !m_pViewport->IsStale() && m_pViewport->isVisible())
 			m_pViewport->Update(); // renders through Render() below (every idle: a swap chain that is not drawn goes stale)
 	}
 

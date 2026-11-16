@@ -5,6 +5,7 @@
 
 #include <string>
 
+#include <CrySystem/ISystem.h>
 #include <CEVPlayer/IVideoPlayer.h>
 
 namespace CEVEditor
@@ -16,7 +17,10 @@ namespace CEVEditor
 		Muted,         //!< as authored, volume 0
 	};
 
-	class CPreviewSession final : public CEVPlayer::IVideoPlayerListener
+	//! Deletes the leftovers of an earlier run in Assets/.cevpreview (temporary descriptors of the "embedded track" preview).
+	void RemoveStalePreviewFiles();
+
+	class CPreviewSession final : public CEVPlayer::IVideoPlayerListener, public ISystemEventListener
 	{
 	public:
 		CPreviewSession();
@@ -46,7 +50,12 @@ namespace CEVEditor
 		void OnError(CEVPlayer::IVideoPlayer&, int code, const char* message) override;
 		void OnNewFrame(CEVPlayer::IVideoPlayer&, uint64_t) override { ++m_frames; }
 
+		// ISystemEventListener: the runtime plug-in destroys every player at FULL / FAST_SHUTDOWN, after that the pointer
+		// must not be touched (not even to remove the listener).
+		void OnSystemEvent(ESystemEvent event, UINT_PTR wparam, UINT_PTR lparam) override;
+
 	private:
+		bool m_listening = false;
 		CEVPlayer::IVideoPlayer* m_pPlayer = nullptr;
 		bool m_ready = false;
 		bool m_error = false;

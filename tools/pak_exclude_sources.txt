@@ -1,0 +1,16 @@
+# Wildcard patterns of CEV files that never belong in a pak (one per line, `#` starts a comment).
+# tools/pak_cev_assets.sh joins them with ';' into rc.exe's /exclude= (patterns match the path relative to the Assets
+# folder, case-insensitive, '*' also crosses folders). Use them yourself the same way in a custom RC job:
+#     <Job Zip="${TargetRoot}/CEVVideos.pak" Input="*.cevvideo;*.webm" Exclude="*.cryasset;.cevpreview/*.*" />
+#
+# Editor metadata (the engine's own game_assets.xml already skips *.cryasset)
+*.cryasset
+# temporary descriptors of the "embedded track" preview and half written files
+.cevpreview/*.*
+*.tmp
+*.$pak
+#
+# NOT listed here, on purpose: the per-asset source copies. The copy of an imported video is called <name>.webm, like the
+# video the descriptor plays, so only the asset knows whether it is a pure source file. Those exact files (source
+# copies, and the WAV / Ogg exports in the asset folders) come from tools/list_unshipped_cev_files.py, which
+# tools/pak_cev_assets.sh passes to rc.exe as /exclude_listfile=.

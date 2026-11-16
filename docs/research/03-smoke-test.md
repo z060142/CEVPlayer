@@ -204,3 +204,10 @@ System:Quit
 - 腳本不驗證畫面內容，只驗證「指令有被執行、外掛有回應、沒有當機、能乾淨結束」。要驗證畫面需另外加截圖（例如在 `--exec` 裡用 `r_` 截圖指令，或外部螢幕擷取）。
 - Sandbox 無法送時序化的外掛指令（§2.3）。要在 Sandbox 內測外掛指令，需另設計（`-runpython`＋Qt 計時器，或 `-edCommand`）。
 - 若要把 `<engine-root>` 換成別棵樹，注意該樹需有完整 `Engine/`（含 `Config`、`EngineAssets`、`Fonts`、`Shaders`）以及 `bin/win_x64/CEVPlayer.dll`；腳本會先檢查 EXE 是否存在，但不檢查 `Engine/`（缺了就會看到 §5(c) 的 FATAL ERROR 對話框，被 watcher 抓到並判 FAIL）。
+
+## 7. Sandbox 腳本與浮動視窗（M4 審查補充）
+
+- `CEV_EDITOR_SCRIPT=<檔>`（`CEV_EDITOR_SCRIPT_DELAY=<秒>`）讓 EditorCEVPlayer 在編輯器 idle 內逐行執行主控台指令（`wait_seconds N`、`#` 註解）；腳本內 `name=x` 會被主控台當成變數設定，匯入指令請用 `name:x`。
+- 版面（`%APPDATA%/Crytek/CRYENGINE/1/Layout.json`，全使用者共用）會在每次視窗變動時存檔，冒煙測試會改寫它。測「還原視窗」：先讓腳本開著 `CEV Video Editor` 並在視窗還開著時關閉 Sandbox，再不帶腳本啟動兩次。
+- 若版面裡有浮動工具視窗，`Process.MainWindowTitle` 會變成該視窗的標題（例如 `CEV Video Editor`），`smoke_dialog_watch.ps1 -CloseAfter` 比對 `Sandbox` 失敗而不會關閉編輯器。用 `tools/smoke_close_main.ps1 -After <秒>`（UI Automation 找標題為 `CRYENGINE Sandbox*` 的主框架並送 WM_CLOSE）另外啟動即可，`smoke_test.sh --seconds 600` 讓內建監看不介入。
+- 「關閉時有作業在跑」：用一支約 25 分鐘音訊的 1080p 影片匯入並勾 wav ogg，主框架關閉要在 2 秒內完成。（審查前的版本：作業的進度回呼每個區塊送一個佇列呼叫，主執行緒被灌爆約 70 秒；已改成每個作業每 100 毫秒最多一個。）

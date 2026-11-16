@@ -20,6 +20,7 @@ namespace CEVEditor
 		// MUST be false: otherwise the asset generator runs rc.exe for every .cevvideo without a .cryasset (docs/research/04 §2.5).
 		bool CanAutoRepairMetadata() const override { return false; }
 		bool RenameAsset(CAsset* pAsset, const char* szNewName) const override;
+		bool MoveAsset(CAsset* pAsset, const char* szDestinationFolder, bool bMoveSourcefile) const override;
 		void PreDeleteAssetFiles(const CAsset& asset) const override;
 		std::vector<CItemModelAttribute*> GetDetails() const override;
 		QVariant GetDetailValue(const CAsset* pAsset, const CItemModelAttribute* pDetail) const override;

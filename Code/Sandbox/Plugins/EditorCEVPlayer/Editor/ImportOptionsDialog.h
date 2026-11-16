@@ -24,7 +24,10 @@ namespace CEVEditor
 		//! on a background thread (the engine runs importers there) the dialog is posted to the main thread and this
 		//! call waits for its result; on the main thread it simply runs. NEVER wait for the main thread while the main
 		//! thread waits for you (docs/research/04 §2.6, "PostOnMainThread().get() deadlock").
-		static bool Ask(const QString& sourceFile, SImportOptions& options);
+		//! `folderRel` = destination folder. After OK the target is checked again (the user may have renamed the asset):
+		//! when an asset of that name exists the user is asked and may refuse (the dialog comes back); a yes sets
+		//! options.overwrite. `alreadyConfirmedName` = name the engine's own import dialog already asked about.
+		static bool Ask(const QString& sourceFile, SImportOptions& options, const std::string& folderRel, const std::string& alreadyConfirmedName = std::string());
 
 	private:
 		QLineEdit* m_pName = nullptr;

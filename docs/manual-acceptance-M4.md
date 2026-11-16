@@ -83,12 +83,23 @@
 7. 匯入時在選項視窗勾選 WAV / Ogg / 分離音訊 / 路線 cue：匯入完成後同樣自動執行上述操作，完成時右下角通知。
 8. 刪除資產（Asset Browser 右鍵 Delete）：資料夾內所有檔案、`audio/sdlmixer/assets/cev/<名稱>/`、ACE 的 `cev_<名稱>.xml` 一併移除。
 
-已知現象：引擎會替 Assets 下的每個 `.wav` / `.ogg` 自動建立 Sound 資產（資產內 WAV／Ogg 是檔案，同時也會冒出 Sound 資產）；影片資產的檔案表標示了這些檔案。
+已知現象：引擎會替 Assets 下的每個 `.wav` / `.ogg` 自動建立 Sound 資產（資產內 WAV／Ogg 是檔案，同時也會冒出 Sound 資產）；影片資產的檔案表標示了這些檔案。影片資產改名、搬移、刪除時會一併移除這些 `<檔案>.cryasset`（引擎會替新名稱／新位置重新建立）。
+
+## 6b. 審查後新增的行為（請人工確認）
+
+1. **同名匯入**：匯入時把資產名稱改成一個已存在的資產名 → 出現「已存在，要取代嗎？」（預設否）；按否回到選項視窗；按是才覆蓋（保留該資產的其他檔案與 GUID）。拖進編輯器視窗的匯入走同一條路。
+2. **未儲存的描述檔編輯**：在資訊欄改語言／標記點，按 `Apply to descriptor`（先不要存檔），再按 `Export WAV` 等操作。作業完成後你的編輯仍在，並出現通知「descriptor was changed on disk … merged」；Save 後兩邊的改動都在 `.cevvideo` 裡。
+3. **表格編輯不被洗掉**：在語言表打字（未按 Apply）時，背景檢查（來源雜湊）完成不會把表格重設。
+4. **作業中改名／刪除**：開始一個長的 `Export Ogg`，立刻在 Asset Browser 改名或刪除該資產 → 作業被取消、檔案不留殘骸、改名／刪除成功。預覽中的資產改名、搬移後預覽自動重新載入。
+5. **搬移資產**：把資產拖到另一個資料夾 → 所有檔案一起搬，資訊欄的「source copy」路徑跟著更新，雙擊仍可播放。
+6. **還原視窗**：開著 `CEV Video Editor`（含浮動）關閉 Sandbox，再啟動：視窗還原為空的（不會自動載入上次資產），之後雙擊資產可以預覽；上次的資產被刪除也不影響。
+7. **關閉 Sandbox 時作業仍在跑**（匯入一支很長的影片並勾選 WAV + Ogg 後立刻關閉）：Sandbox 在一兩秒內退出，不卡住。
 
 ## 7. 主控台指令（自動化用）
 
 在 Sandbox 主控台（`~`）：
-- `cev_editor_import <原始檔絕對路徑> <Assets 內資料夾>`：不經 UI 匯入（可再加 `name=` `lang=` `wav` `ogg` `split` `strip` `cue`）。
+- `cev_editor_import <原始檔絕對路徑> <Assets 內資料夾>`：不經 UI 匯入（可再加 `name=` `lang=` `wav` `ogg` `split` `strip` `cue`；腳本裡用 `name:` `lang:`，因為主控台把 `a=b` 當成變數設定；同名資產預設拒絕並記一行 log，加 `overwrite` 才覆蓋）。
+- `cev_editor_rename <資產.cevvideo> <新名稱>`、`cev_editor_move <資產.cevvideo> <資料夾>`、`cev_editor_delete <資產.cevvideo>`：走 Asset Manager（與 Asset Browser 相同路徑）。
 - `cev_editor_open <資產.cevvideo>`：開啟工具視窗並載入資產；不帶參數只開視窗。
 - `cev_editor_close`、`cev_editor_status`（log 一行：視口建立／銷毀數、工作數）、`cev_editor_script <檔>`。
 

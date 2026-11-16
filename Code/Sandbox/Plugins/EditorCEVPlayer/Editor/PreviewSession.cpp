@@ -24,11 +24,39 @@ namespace CEVEditor
 		int g_tempCounter = 0;
 	}
 
-	CPreviewSession::CPreviewSession() = default;
+	void RemoveStalePreviewFiles()
+	{
+		std::error_code ec;
+		const std::filesystem::path dir = std::filesystem::u8path(AssetsAbsolute(".cevpreview"));
+		if (std::filesystem::is_directory(dir, ec))
+			std::filesystem::remove_all(dir, ec);
+	}
+
+	CPreviewSession::CPreviewSession()
+	{
+		if (gEnv != nullptr && gEnv->pSystem != nullptr && gEnv->pSystem->GetISystemEventDispatcher() != nullptr)
+		{
+			gEnv->pSystem->GetISystemEventDispatcher()->RegisterListener(this, "CEVEditor_PreviewSession");
+			m_listening = true;
+		}
+	}
 
 	CPreviewSession::~CPreviewSession()
 	{
 		Release();
+		if (m_listening && gEnv != nullptr && gEnv->pSystem != nullptr && gEnv->pSystem->GetISystemEventDispatcher() != nullptr)
+			gEnv->pSystem->GetISystemEventDispatcher()->RemoveListener(this);
+		m_listening = false;
+	}
+
+	void CPreviewSession::OnSystemEvent(ESystemEvent event, UINT_PTR, UINT_PTR)
+	{
+		if (event == ESYSTEM_EVENT_FULL_SHUTDOWN || event == ESYSTEM_EVENT_FAST_SHUTDOWN)
+		{
+			// The runtime plug-in's manager frees all players right now (possibly before this listener runs): forget the
+			// pointer without calling it. The temporary descriptor file is still ours to delete.
+			m_pPlayer = nullptr;
+		}
 	}
 
 	bool CPreviewSession::RuntimeAvailable()
@@ -46,7 +74,8 @@ namespace CEVEditor
 	bool CPreviewSession::Load(const std::string& descriptorRel, EPreviewAudio audio, const std::string& videoRelPath, double avOffsetMs)
 	{
 		CEVPlayer::IVideoPlugin* const pPlugin = Plugin();
-		if (pPlugin == nullptr)
+		// not before the runtime plug-in and the renderer exist, not while the engine quits
+		if (pPlugin == nullptr || gEnv->pRenderer == nullptr || gEnv->pSystem->IsQuitting())
 			return false;
 		if (m_pPlayer == nullptr)
 		{

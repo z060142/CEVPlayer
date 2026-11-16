@@ -20,6 +20,10 @@ namespace CEVEditor
 		explicit CVideoViewport(QWidget* pParent);
 		~CVideoViewport() override;
 
+		//! True once Qt re-created the native window under the swap chain: this viewport must not be rendered any more
+		//! (the owner replaces it). Set synchronously in the event, before the queued signal reaches the owner.
+		bool IsStale() const { return m_notified; }
+
 		static int LiveCount() { return s_live; }
 		static int CreatedCount() { return s_created; }
 		static int DestroyedCount() { return s_destroyed; }

@@ -58,5 +58,6 @@ namespace CEVEditor
 		QPushButton* m_pCancelJob = nullptr;
 		QWidget* m_pOpButtons = nullptr;
 		bool m_filling = false;
+		int m_filledRevision = -1;   //!< CVideoEditor::DescriptorRevision() the descriptor tables were filled from
 	};
 }

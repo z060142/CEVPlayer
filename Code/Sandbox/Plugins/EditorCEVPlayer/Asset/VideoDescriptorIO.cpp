@@ -251,6 +251,95 @@ namespace CEVEditor
 		return out;
 	}
 
+	bool DescriptorsEqual(const SDescriptor& a, const SDescriptor& b)
+	{
+		return DescriptorToXml(a) == DescriptorToXml(b);
+	}
+
+	namespace
+	{
+		bool SameLanguage(const SDescriptor::SLanguage& a, const SDescriptor::SLanguage& b)
+		{
+			return a.name == b.name && a.embedded == b.embedded && a.file == b.file && a.trigger == b.trigger
+				&& a.pauseTrigger == b.pauseTrigger && a.resumeTrigger == b.resumeTrigger;
+		}
+
+		template<typename T>
+		const T& Pick(const T& base, const T& mine, const T& theirs)
+		{
+			return mine == base ? theirs : mine;
+		}
+
+		const SDescriptor::SLanguage* FindByName(const std::vector<SDescriptor::SLanguage>& list, const std::string& name)
+		{
+			for (const SDescriptor::SLanguage& l : list)
+			{
+				if (_stricmp(l.name.c_str(), name.c_str()) == 0)
+					return &l;
+			}
+			return nullptr;
+		}
+	}
+
+	SDescriptor MergeDescriptors(const SDescriptor& base, const SDescriptor& mine, const SDescriptor& theirs)
+	{
+		SDescriptor out;
+		out.route = Pick(base.route, mine.route, theirs.route);
+		out.video = Pick(base.video, mine.video, theirs.video);
+		out.avOffsetMs = mine.avOffsetMs == base.avOffsetMs ? theirs.avOffsetMs : mine.avOffsetMs;
+		out.trigger = Pick(base.trigger, mine.trigger, theirs.trigger);
+		out.pauseTrigger = Pick(base.pauseTrigger, mine.pauseTrigger, theirs.pauseTrigger);
+		out.resumeTrigger = Pick(base.resumeTrigger, mine.resumeTrigger, theirs.resumeTrigger);
+		out.defaultLanguage = Pick(base.defaultLanguage, mine.defaultLanguage, theirs.defaultLanguage);
+		out.variantRule = Pick(base.variantRule, mine.variantRule, theirs.variantRule);
+
+		// variants / markers: whole list from whoever changed it (the user wins when both did)
+		{
+			SDescriptor probeBase, probeMine;
+			probeBase.variants = base.variants;
+			probeMine.variants = mine.variants;
+			out.variants = DescriptorsEqual(probeBase, probeMine) ? theirs.variants : mine.variants;
+			SDescriptor markerBase, markerMine;
+			markerBase.markers = base.markers;
+			markerMine.markers = mine.markers;
+			out.markers = DescriptorsEqual(markerBase, markerMine) ? theirs.markers : mine.markers;
+		}
+
+		// languages by name
+		for (const SDescriptor::SLanguage& m : mine.languages)
+		{
+			const SDescriptor::SLanguage* const b = FindByName(base.languages, m.name);
+			const SDescriptor::SLanguage* const t = FindByName(theirs.languages, m.name);
+			if (b != nullptr && SameLanguage(*b, m))
+			{
+				if (t != nullptr)
+					out.languages.push_back(*t);   // untouched by the user: the file's version (a job may have filled the file / triggers)
+				// else: the file dropped it and the user did not edit it
+			}
+			else
+			{
+				out.languages.push_back(m);        // edited or added by the user
+			}
+		}
+		for (const SDescriptor::SLanguage& b : base.languages)
+		{
+			if (FindByName(mine.languages, b.name) != nullptr)
+				continue;
+			// the user removed it: stays removed unless the file changed that entry meanwhile
+			const SDescriptor::SLanguage* const t = FindByName(theirs.languages, b.name);
+			if (t != nullptr && !SameLanguage(*t, b))
+				out.languages.push_back(*t);
+		}
+		for (const SDescriptor::SLanguage& t : theirs.languages)
+		{
+			if (FindByName(base.languages, t.name) == nullptr && FindByName(mine.languages, t.name) == nullptr)
+				out.languages.push_back(t);        // added by a job
+		}
+		if (!out.defaultLanguage.empty() && out.FindLanguage(out.defaultLanguage) < 0)
+			out.defaultLanguage.clear();
+		return out;
+	}
+
 	bool SaveDescriptor(const std::string& absPath, const SDescriptor& desc, std::string& error)
 	{
 		const std::filesystem::path path = std::filesystem::u8path(absPath);

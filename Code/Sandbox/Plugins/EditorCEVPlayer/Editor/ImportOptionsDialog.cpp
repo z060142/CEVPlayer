@@ -11,6 +11,7 @@
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QThread>
 #include <QVBoxLayout>
 
@@ -95,14 +96,39 @@ namespace CEVEditor
 		return o;
 	}
 
-	bool CImportOptionsDialog::Ask(const QString& sourceFile, SImportOptions& options)
+	bool CImportOptionsDialog::Ask(const QString& sourceFile, SImportOptions& options, const std::string& folderRel, const std::string& alreadyConfirmedName)
 	{
-		auto run = [sourceFile](SImportOptions in) -> std::pair<bool, SImportOptions>
+		auto run = [sourceFile, folderRel, alreadyConfirmedName](SImportOptions in) -> std::pair<bool, SImportOptions>
 		{
-			CImportOptionsDialog dialog(sourceFile, in, QApplication::activeWindow());
-			if (dialog.exec() != QDialog::Accepted)
-				return { false, in };
-			return { true, dialog.Options() };
+			for (;;)
+			{
+				CImportOptionsDialog dialog(sourceFile, in, QApplication::activeWindow());
+				if (dialog.exec() != QDialog::Accepted)
+					return { false, in };
+				SImportOptions chosen = dialog.Options();
+				// The name can be changed in the dialog after the engine checked the original one: look again, and never
+				// replace an existing asset without the user's explicit yes.
+				const SImportPlan plan = PlanImport(std::string(sourceFile.toUtf8().constData()), folderRel, chosen);
+				if (!plan.ok)
+				{
+					QMessageBox::warning(QApplication::activeWindow(), tr("Import video"), QString::fromUtf8(plan.error.c_str()));
+					in = chosen;
+					continue;
+				}
+				chosen.overwrite = false;
+				if (plan.exists && plan.assetName != alreadyConfirmedName)
+				{
+					const QMessageBox::StandardButton answer = QMessageBox::warning(QApplication::activeWindow(), tr("Import video"),
+						QString::fromUtf8(plan.detail.c_str()) + tr("\n\nReplace it?"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+					if (answer != QMessageBox::Yes)
+					{
+						in = chosen; // back to the dialog: pick another name
+						continue;
+					}
+				}
+				chosen.overwrite = plan.exists;
+				return { true, chosen };
+			}
 		};
 
 		std::pair<bool, SImportOptions> result;

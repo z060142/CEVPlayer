@@ -308,6 +308,7 @@ namespace CEVEditor
 
 		if (!has)
 		{
+			m_filledRevision = -1;
 			m_pTitle->setText(tr("No video asset opened. Double click one in the asset browser, or drop a .webm file here to import it."));
 			m_pInfo->clear();
 			m_pSource->clear();
@@ -371,7 +372,13 @@ namespace CEVEditor
 		}
 
 		FillFiles();
-		FillDescriptor();
+		// The tables hold what the user is typing: refill them only when the descriptor in the state was replaced
+		// (asset opened / reloaded / merged), not on every state change (e.g. when a background check finishes).
+		if (m_filledRevision != m_pEditor->DescriptorRevision())
+		{
+			m_filledRevision = m_pEditor->DescriptorRevision();
+			FillDescriptor();
+		}
 	}
 
 	void CVideoInfoPanel::FillFiles()

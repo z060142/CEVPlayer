@@ -21,6 +21,8 @@ namespace CEVEditor
 		//! Reads `file` (absolute or relative to the current directory / the project). False + log when unreadable.
 		bool Start(const std::string& file);
 		bool IsRunning() const { return m_running; }
+		//! Drops the rest of the script (also done when the editor quits).
+		void Stop();
 
 		void OnEditorNotifyEvent(EEditorNotifyEvent event) override;
 
@@ -31,6 +33,7 @@ namespace CEVEditor
 		std::vector<std::string> m_lines;
 		size_t m_next = 0;
 		bool m_running = false;
+		bool m_stepping = false;
 		bool m_envChecked = false;
 		bool m_mainFrameUp = false;
 		Clock::time_point m_mainFrameTime;

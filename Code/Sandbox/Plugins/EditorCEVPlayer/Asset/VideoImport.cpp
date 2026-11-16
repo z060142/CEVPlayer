@@ -194,44 +194,143 @@ namespace CEVEditor
 	}
 
 	// ---------------------------------------------------------------------------------------------------------------
-	SImportResult ImportVideoFile(const std::string& absSrc, const std::string& folderRel, const SImportOptions& options)
+	std::string AssetOwnerKey(const CryGUID& guid)
 	{
-		SImportResult r;
+		return std::string(guid.ToString().c_str());
+	}
+
+	SImportPlan PlanImport(const std::string& absSrc, const std::string& folderRel, const SImportOptions& options)
+	{
+		SImportPlan p;
 		const fs::path src = fs::u8path(absSrc);
 		std::error_code ec;
 		if (!fs::is_regular_file(src, ec))
 		{
-			r.error = "source file not found: " + absSrc;
-			return r;
+			p.error = "source file not found: " + absSrc;
+			return p;
 		}
 		if (!HasExt(absSrc, "webm"))
 		{
-			r.error = "only .webm files can be imported (other formats come with the FFmpeg stage): " + absSrc;
-			return r;
+			p.error = "only .webm files can be imported (other formats come with the FFmpeg stage): " + absSrc;
+			return p;
 		}
-		const std::string folder = NormalizeFolder(folderRel);
-		if (!SafeFolder(folder))
+		p.folder = NormalizeFolder(folderRel);
+		if (!SafeFolder(p.folder))
 		{
-			r.error = "invalid destination folder: " + folderRel;
-			return r;
+			p.error = "invalid destination folder: " + folderRel;
+			return p;
 		}
-		const std::string name = options.assetName.empty() ? SanitizeAssetName(src.stem().u8string()) : SanitizeAssetName(options.assetName);
-		r.assetName = name;
-		r.metadataRel = folder + name + ".cevvideo.cryasset";
+		p.assetName = options.assetName.empty() ? SanitizeAssetName(src.stem().u8string()) : SanitizeAssetName(options.assetName);
+		p.metadataRel = p.folder + p.assetName + ".cevvideo.cryasset";
 		{
 			string reason;
-			if (!CAssetType::IsValidAssetPath(r.metadataRel.c_str(), reason))
+			if (!CAssetType::IsValidAssetPath(p.metadataRel.c_str(), reason))
 			{
-				r.error = std::string("invalid asset path ") + r.metadataRel + ": " + reason.c_str();
-				return r;
+				p.error = std::string("invalid asset path ") + p.metadataRel + ": " + reason.c_str();
+				return p;
 			}
 		}
 
+		// what is already there? (asset manager: main thread only)
+		if (CAsset* const pExisting = FindAssetByMetadata(p.metadataRel))
+		{
+			p.exists = true;
+			p.inAssetManager = true;
+			p.guid = pExisting->GetGUID();
+			p.keptFiles = AssetFileList(*pExisting);
+			const CDetails old(*pExisting);
+			p.keptSdlFiles = old.Get(DetailKey::kSdlFiles);
+			p.keptAceLibrary = old.Get(DetailKey::kAceLibrary);
+			p.detail = "The video asset '" + p.assetName + "' already exists in " + (p.folder.empty() ? std::string("the Assets root") : p.folder) +
+				" (" + std::to_string(p.keptFiles.size()) + " files). Importing replaces its descriptor and its source copy.";
+		}
+		else
+		{
+			for (const char* ext : { ".cevvideo.cryasset", ".cevvideo", ".webm" })
+			{
+				const std::string rel = p.folder + p.assetName + ext;
+				if (fs::exists(fs::u8path(AssetsAbsolute(rel)), ec))
+				{
+					p.exists = true;
+					p.detail = "The file '" + rel + "' already exists (no video asset is registered for it). Importing overwrites it.";
+					break;
+				}
+			}
+		}
+		p.ok = true;
+		return p;
+	}
+
+	bool ReleaseAssetFiles(const std::string& metadataRel, const CryGUID& guid, int timeoutMs, std::string& error)
+	{
+		ReleaseEditorsOfAsset(metadataRel); // players hold the video file open
+		if (CJobRunner* const pRunner = CJobRunner::Get())
+		{
+			if (!guid.IsNull() && !pRunner->CancelAndWait(AssetOwnerKey(guid), timeoutMs))
+			{
+				error = "a background job still works on the files of this asset";
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool PrepareOverwrite(const SImportPlan& plan, std::string& error)
+	{
+		if (!plan.exists)
+			return true;
+		return ReleaseAssetFiles(plan.metadataRel, plan.guid, 15000, error);
+	}
+
+	SImportResult ImportVideoFileNow(const std::string& absSrc, const std::string& folderRel, const SImportOptions& options)
+	{
+		SImportResult r;
+		const SImportPlan plan = PlanImport(absSrc, folderRel, options);
+		if (!plan.ok)
+		{
+			r.error = plan.error;
+			return r;
+		}
+		r.assetName = plan.assetName;
+		r.metadataRel = plan.metadataRel;
+		if (plan.exists)
+		{
+			if (!options.overwrite)
+			{
+				r.error = "refused: " + plan.detail + " Choose another asset name (name=...) or allow it explicitly (overwrite).";
+				return r;
+			}
+			if (!PrepareOverwrite(plan, r.error))
+				return r;
+		}
+		return ImportVideoFile(absSrc, plan, options);
+	}
+
+	SImportResult ImportVideoFile(const std::string& absSrc, const SImportPlan& plan, const SImportOptions& options, const std::atomic<bool>* cancel)
+	{
+		SImportResult r;
+		r.assetName = plan.assetName;
+		r.metadataRel = plan.metadataRel;
+		if (!plan.ok)
+		{
+			r.error = plan.error;
+			return r;
+		}
+		if (plan.exists && !options.overwrite)
+		{
+			r.error = "refused: " + plan.detail;
+			return r;
+		}
+		const fs::path src = fs::u8path(absSrc);
+		std::error_code ec;
+		const std::string& folder = plan.folder;
+		const std::string& name = plan.assetName;
+
 		SMediaInfo info;
 		std::string probeError;
-		if (!ProbeMediaFile(absSrc, info, probeError))
+		if (!ProbeMediaFile(absSrc, info, probeError, cancel))
 		{
-			r.error = "cannot read the video: " + probeError;
+			r.error = (cancel != nullptr && cancel->load()) ? std::string("cancelled") : "cannot read the video: " + probeError;
 			return r;
 		}
 
@@ -244,12 +343,21 @@ namespace CEVEditor
 		}
 		const std::string videoName = name + ".webm";
 		const std::string descriptorName = name + ".cevvideo";
+		if (cancel != nullptr && cancel->load())
+		{
+			r.error = "cancelled";
+			return r;
+		}
+		const bool copyIsNew = !fs::exists(dstDir / fs::u8path(videoName), ec);
 		if (!CopyFileReplace(src, dstDir / fs::u8path(videoName), r.error))
 			return r;
 		std::string sha;
-		if (!Sha256File((dstDir / fs::u8path(videoName)).u8string(), sha))
+		if (!Sha256File((dstDir / fs::u8path(videoName)).u8string(), sha, cancel))
 		{
-			r.error = "cannot hash the copied video";
+			// do not leave a copy without an asset behind
+			if (copyIsNew && !plan.exists)
+				fs::remove(dstDir / fs::u8path(videoName), ec);
+			r.error = (cancel != nullptr && cancel->load()) ? std::string("cancelled") : std::string("cannot hash the copied video");
 			return r;
 		}
 
@@ -285,20 +393,34 @@ namespace CEVEditor
 			languageNames.push_back(l.name);
 		details.Set(DetailKey::kLanguages, JoinList(languageNames, ','));
 
-		CAsset* pAsset = FindAssetByMetadata(r.metadataRel);
-		if (pAsset == nullptr)
-			pAsset = new CAsset(kTypeName, CryGUID::Create(), name.c_str());
+		// Overwriting: the new CAsset carries the GUID of the existing one; MergeAssets (main thread, FinishImport) then
+		// updates the existing asset in place. The asset manager's own objects are never touched from this thread.
+		std::vector<std::string> files = { folder + descriptorName, folder + videoName };
+		for (const std::string& kept : plan.keptFiles)
+		{
+			if (std::find(files.begin(), files.end(), kept) == files.end())
+				files.push_back(kept);
+		}
+		if (!plan.keptSdlFiles.empty())
+			details.Set(DetailKey::kSdlFiles, plan.keptSdlFiles);
+		if (!plan.keptAceLibrary.empty())
+			details.Set(DetailKey::kAceLibrary, plan.keptAceLibrary);
+
+		std::unique_ptr<CAsset> pAsset(new CAsset(kTypeName, plan.guid.IsNull() ? CryGUID::Create() : plan.guid, name.c_str()));
 		CAssetImportContext ctx;
 		CEditableAsset edit = ctx.CreateEditableAsset(*pAsset);
 		edit.SetMetadataFile(r.metadataRel.c_str());
-		edit.SetFiles({ string((folder + descriptorName).c_str()), string((folder + videoName).c_str()) });
+		std::vector<string> fileList;
+		for (const std::string& f : files)
+			fileList.emplace_back(f.c_str());
+		edit.SetFiles(fileList);
 		edit.SetDetails(details.ToPairs());
 		if (!edit.WriteToFile())
 		{
-			r.error = "cannot write " + r.metadataRel;
+			r.error = "cannot write " + r.metadataRel + " (read-only file or folder?)";
 			return r;
 		}
-		r.pAsset = pAsset;
+		r.pAsset = pAsset.release();
 		r.ok = true;
 		return r;
 	}
@@ -525,18 +647,34 @@ namespace CEVEditor
 			int total = 0;
 			for (const SStep& s : steps)
 				total += s.wanted ? 1 : 0;
+			// Cancelled / failed run (the user, quit, a delete / rename of the asset): the completion that would list the
+			// files may not run, so the files this run created from nothing go away again (earlier files stay).
+			std::vector<std::string> createdNew;
+			auto discardCreated = [&createdNew, produced]()
+			{
+				for (const std::string& abs : createdNew)
+				{
+					std::error_code ec;
+					fs::remove(fs::u8path(abs), ec);
+				}
+				createdNew.clear();
+				produced->clear();
+			};
 			for (const SStep& s : steps)
 			{
 				if (!s.wanted)
 					continue;
 				if (ctx.Cancelled())
 				{
+					discardCreated();
 					last.status = EOpStatus::Cancelled;
 					last.message = "cancelled";
 					return last;
 				}
 				ctx.Log(std::string(s.what) + " -> " + *s.rel);
 				const std::string dstAbs = AssetsAbsolute(*s.rel);
+				std::error_code existsEc;
+				const bool existedBefore = fs::exists(fs::u8path(dstAbs), existsEc);
 				SOpResult r;
 				const std::string kind = s.kind;
 				if (kind == "split")
@@ -549,20 +687,34 @@ namespace CEVEditor
 					r = offline.StripAudio(srcAbs, dstAbs, ctx);
 				if (!r.Ok())
 				{
+					discardCreated();
 					r.message = std::string(s.what) + " failed: " + r.message;
 					return r;
 				}
+				if (!existedBefore)
+					createdNew.push_back(dstAbs);
 				produced->push_back({ kind, *s.rel });
 				ctx.Progress(static_cast<float>(++done) / static_cast<float>(total));
 			}
 			return last;
 		};
 
-		auto onDone = [metadataRel, produced, opsCopy, name, onFinished](const SOpResult& result)
+		const CryGUID guid = asset.GetGUID();
+		auto onDone = [metadataRel, guid, produced, opsCopy, name, onFinished](const SOpResult& result)
 		{
-			CAsset* const pAsset = FindAssetByMetadata(metadataRel);
+			// by GUID first: the asset may have been renamed / moved while the job ran (those operations wait for the job)
+			CAsset* pAsset = CAssetManager::GetInstance()->FindAssetById(guid);
+			if (pAsset == nullptr)
+				pAsset = FindAssetByMetadata(metadataRel);
 			if (pAsset == nullptr)
 			{
+				// the asset was deleted meanwhile: do not leave the files the job produced behind
+				for (const SProduced& p : *produced)
+				{
+					std::error_code ec;
+					fs::remove(fs::u8path(AssetsAbsolute(p.rel)), ec);
+				}
+				CryLogAlways("[CEVEditor] audio operations for '%s': the asset is gone, %u produced file(s) removed", name.c_str(), static_cast<unsigned>(produced->size()));
 				if (onFinished)
 					onFinished(false);
 				return;
@@ -590,7 +742,7 @@ namespace CEVEditor
 				onFinished(result.Ok() && cueOk);
 		};
 
-		return pRunner->Submit(QObject::tr("Audio operations: %1").arg(QString::fromUtf8(name.c_str())), work, onDone);
+		return pRunner->Submit(QObject::tr("Audio operations: %1").arg(QString::fromUtf8(name.c_str())), work, onDone, AssetOwnerKey(guid));
 	}
 
 	// ---------------------------------------------------------------------------------------------------------------
@@ -664,9 +816,13 @@ namespace CEVEditor
 				defaultLanguage = t.language;
 		}
 		desc.defaultLanguage = defaultLanguage;
-		if (desc.trigger.empty() && !ace.triggers.empty())
+		bool hasUnnamedSound = false;
+		for (const SAceTriggers& t : ace.triggers)
+			hasUnnamedSound = hasUnnamedSound || t.language.empty();
+		if (!hasUnnamedSound && !ace.triggers.empty())
 		{
-			// default triggers of the languages without their own: those of the default language
+			// default triggers of the languages without their own: those of the default language. Always renewed:
+			// after a rename the old asset name must not stay in them.
 			for (const SAceTriggers& t : ace.triggers)
 			{
 				if (t.language.empty() || _stricmp(t.language.c_str(), defaultLanguage.c_str()) == 0)

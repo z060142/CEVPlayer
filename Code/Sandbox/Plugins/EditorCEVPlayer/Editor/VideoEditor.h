@@ -9,6 +9,7 @@
 #include <QPointer>
 
 #include <AssetSystem/AssetEditor.h>
+#include <CryExtension/CryGUID.h>
 
 #include "Asset/VideoDescriptorIO.h"
 #include "Asset/VideoAssetMeta.h"
@@ -34,6 +35,7 @@ namespace CEVEditor
 
 		struct SState
 		{
+			CryGUID guid;
 			std::string assetName;
 			std::string metadataRel;
 			std::string descriptorRel;     //!< Files[0], relative to Assets
@@ -44,12 +46,18 @@ namespace CEVEditor
 			std::vector<std::string> files;   //!< Files of the asset (relative to Assets), .cevvideo first
 			CDetails details;
 			SDescriptor descriptor;        //!< edited copy (saved by OnSaveAsset)
+			SDescriptor baseDescriptor;    //!< what the file contained when it was last read / written (merge base)
 			SMediaInfo media;
 			bool mediaKnown = false;
 			SSourceStatus source;
 		};
 		const SState& State() const { return m_state; }
 		bool HasAsset() const { return m_stateValid; }
+		//! True when the in-memory descriptor differs from the file (unsaved edits).
+		bool HasUnsavedDescriptor() const { return m_stateValid && !DescriptorsEqual(m_state.descriptor, m_state.baseDescriptor); }
+		//! Bumped whenever the descriptor in the state was replaced by something other than the user's own edit
+		//! (open, reload from disk, merge): the info panel refills its tables then.
+		int DescriptorRevision() const { return m_descriptorRevision; }
 
 		// ---- edits from the panels (main thread) ----
 		void SetDescriptor(const SDescriptor& descriptor);   //!< marks the asset modified; saved by Save
@@ -58,11 +66,15 @@ namespace CEVEditor
 		bool ReimportSource(std::string& error);
 		void RunAudioOps(const SAudioOps& ops);
 		void UpgradeToCue();
-		void RefreshAssetState();                              //!< re-reads Details, descriptor and the file list
+		void RefreshAssetState();                              //!< re-reads Details, descriptor and the file list (unsaved edits are merged)
 		static CVideoEditor* Current();                        //!< the last window that opened an asset (console command, tests)
 
 		//! Opens the dropped / selected .webm files: options dialog, import on a job, merge on the main thread.
 		void ImportFiles(const QStringList& files);
+
+		//! Destroys the preview player of this window when it shows the asset (files are about to be replaced / renamed /
+		//! deleted); the next state refresh loads it again.
+		void ReleasePlayerForAsset(const std::string& metadataRel);
 
 	signals:
 		void StateChanged();
@@ -79,14 +91,21 @@ namespace CEVEditor
 		void dropEvent(QDropEvent* pEvent) override;
 
 	private:
-		bool LoadState(CAsset& asset);
+		bool LoadState(CAsset& asset, bool keepUnsavedEdits);
 		void StartBackgroundChecks();
 		void PushToPreview();
+		void OnAssetChangedHook(CAsset& asset, int changeFlags);
+		void QueueRefresh();
+		std::string PreviewKey() const;
 
 		SState m_state;
 		QPointer<CVideoPreviewPanel> m_pPreview;
 		QPointer<CVideoInfoPanel> m_pInfo;
 		bool m_stateValid = false;
+		bool m_refreshQueued = false;
+		bool m_forcePreviewReload = false;
 		int m_generation = 0;   //!< bumped on open / close: results of older jobs are dropped
+		int m_descriptorRevision = 0;
+		std::string m_pushedPreviewKey;
 	};
 }
