@@ -8,7 +8,8 @@
 # outside these paths is touched):
 #   Code/CryPlugins/CEVPlayer              (an older copy that CECE ships is replaced)
 #   Code/Sandbox/Plugins/EditorCEVPlayer   (only if it exists in this repository)
-#   Code/SDKs/{libvpx,libwebm,libogg,libvorbis,libopus}
+#   Code/SDKs/CEVPlayer/{libvpx,libwebm,libogg,libvorbis,libopus}  (one parent folder; stale
+#   pre-2026-11 copies directly under Code/SDKs/<lib> are removed)
 # Single files (overwritten, other files in the destination directory are left alone):
 #   cmake/modules/{CEVPlayerSDK,libvpx,libwebm,libogg,libvorbis,libopus}.cmake
 #       -> <engine>/Tools/CMake/modules/
@@ -61,8 +62,12 @@ sync_file() { # <path here relative to the repo> <path in the engine>
 
 sync_dir "Code/CryPlugins/CEVPlayer"
 sync_dir "Code/Sandbox/Plugins/EditorCEVPlayer"
-for sdk in libvpx libwebm libogg libvorbis libopus; do
-  sync_dir "Code/SDKs/$sdk"
+sync_dir "Code/SDKs/CEVPlayer"
+for sdk in libvpx libwebm libogg libvorbis libopus; do # old flat layout
+  old="$engine/Code/SDKs/$sdk"
+  if [ -f "$old/VERSION" ] && grep -q "CEVPlayer\|build_sdks" "$old/VERSION" 2>/dev/null; then
+    if [ "$dry" -eq 1 ]; then echo "would remove old: Code/SDKs/$sdk"; else rm -rf "${old:?}"; echo "removed old: Code/SDKs/$sdk"; fi
+  fi
 done
 for mod in CEVPlayerSDK libvpx libwebm libogg libvorbis libopus; do
   sync_file "cmake/modules/$mod.cmake" "Tools/CMake/modules/$mod.cmake"

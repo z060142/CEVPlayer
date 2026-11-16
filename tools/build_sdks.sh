@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_sdks.sh - regenerate Code/SDKs/{libvpx,libwebm,libogg,libvorbis,libopus}
+# build_sdks.sh - regenerate Code/SDKs/CEVPlayer/{libvpx,libwebm,libogg,libvorbis,libopus}
 # prebuilt Win64 static libraries for the CEVPlayer CRYENGINE 5.7.1 plugin.
 #
 # Run from Git Bash on Windows 11 with VS 2022 (C++ workload), system CMake >= 3.20,
@@ -21,7 +21,7 @@ set -euo pipefail
 export MSYS2_ARG_CONV_EXCL="*"   # stop Git Bash from rewriting /Z7 etc. into paths
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SDKS="$ROOT/Code/SDKs"
+SDKS="$ROOT/Code/SDKs/CEVPlayer"
 TOOLS_DIR="${TOOLS_DIR:-D:/coding11/_tools}"
 VCPKG_ROOT="${VCPKG_ROOT:-$TOOLS_DIR/vcpkg}"
 WORK="${WORK:-$TOOLS_DIR/sdkbuild}"
@@ -160,7 +160,7 @@ publish_libs libvorbis vorbis vorbis.lib vorbisenc.lib vorbisfile.lib
 cp "$VORBIS_SRC/COPYING" "$SDKS/libvorbis/LICENSE"
 write_version libvorbis "libvorbis $VORBIS_VER" "Source:   $VORBIS_URL" "SHA-256:  $VORBIS_SHA256 (release tarball, upstream tag v$VORBIS_VER)" \
   "Build:    CMake (VS2022 generator, -DBUILD_SHARED_LIBS=OFF), Release flags: $REL_FLAGS, Debug flags: $DBG_FLAGS" \
-  "Depends:  libogg (include/ogg from Code/SDKs/libogg)" "$(common_ver_tail)"
+  "Depends:  libogg (include/ogg from Code/SDKs/CEVPlayer/libogg)" "$(common_ver_tail)"
 
 fi
 

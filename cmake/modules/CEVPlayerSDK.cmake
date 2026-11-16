@@ -1,10 +1,10 @@
 # Shared helper for the CEVPlayer third-party SDK modules (libvpx, libwebm, libogg, libvorbis, libopus).
 #
 # Layout of every SDK, relative to ${SDK_DIR} (= <engine>/Code/SDKs by default):
-#   <name>/include/...                      headers (upstream-relative include paths, e.g. vpx/vpx_decoder.h)
-#   <name>/lib/win64/release/<lib>.lib      static lib for Release and Profile  (/MD)
-#   <name>/lib/win64/debug/<lib>.lib        static lib for Debug                (/MDd)
-#   <name>/VERSION, <name>/LICENSE
+#   CEVPlayer/<name>/include/...                      headers (upstream-relative include paths, e.g. vpx/vpx_decoder.h)
+#   CEVPlayer/<name>/lib/win64/release/<lib>.lib      static lib for Release and Profile  (/MD)
+#   CEVPlayer/<name>/lib/win64/debug/<lib>.lib        static lib for Debug                (/MDd)
+#   CEVPlayer/<name>/VERSION, LICENSE
 # The libraries are produced by tools/build_sdks.sh and synced into the engine by tools/sync_sources.sh.
 #
 # cev_add_imported_static(<target> <sdk dir name> LIBS "<lib base name>[|<alternative base name>...]")
@@ -24,7 +24,7 @@ function(cev_add_imported_static TARGET_NAME SDK_NAME LIB_KEYWORD LIB_SPEC)
 		return()
 	endif()
 
-	set(SDK_ROOT "${SDK_DIR}/${SDK_NAME}")
+	set(SDK_ROOT "${SDK_DIR}/CEVPlayer/${SDK_NAME}")
 	set(SDK_LIB_ROOT "${SDK_ROOT}/lib/win64")
 	if(NOT EXISTS "${SDK_ROOT}/include")
 		message(FATAL_ERROR "CEVPlayer: SDK '${SDK_NAME}' not found at ${SDK_ROOT} (expected include/ and lib/win64/). "
