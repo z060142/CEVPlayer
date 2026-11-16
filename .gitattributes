@@ -2,3 +2,8 @@
 *.sh text eol=lf
 # Patches carry the line endings of the engine files they patch (CRLF); never normalise them.
 patches/** -text
+*.ico binary
+*.png binary
+*.yml text eol=lf
+*.yaml text eol=lf
+*.env text eol=lf
