@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <vector>
 
@@ -27,6 +28,8 @@ namespace cev
 
 		constexpr double kPresentEpsilon = 1e-4; // frames due within 0.1 ms count as due
 		constexpr double kEndEpsilon = 1e-3;
+		constexpr double kEndGraceMin = 0.25;     // seconds past the duration after which remaining frames are discarded
+		constexpr uint32_t kMaxAudioBufferMs = 4000;
 	}
 
 	struct PlayerCore::Impl final : public IDecodeTask
@@ -75,6 +78,10 @@ namespace cev
 		const float* pendingPcm = nullptr;
 		uint32_t pendingFrames = 0;
 		std::atomic<bool> aEof{false};
+		std::atomic<bool> faulted{false};      // a worker step threw: both streams count as ended
+		// What ReadAudio() (audio thread) may touch besides AudioRing and the atomics below: nothing.
+		std::atomic<bool> audioActive{false};  // true from the end of the load step until Unload starts
+		std::atomic<uint32_t> audioChannels{1};
 		std::atomic<uint32_t> appliedSeekGen{0};
 		std::atomic<uint32_t> decodeErrors{0};
 
@@ -95,7 +102,42 @@ namespace cev
 		// ================================================================ IDecodeTask
 		bool RunStep() override
 		{
-			if (cancel.load(std::memory_order_relaxed))
+			// An exception (bad_alloc, system_error) on a worker thread would terminate the process: turn it into
+			// a failed player instead.
+			try
+			{
+				return RunStepImpl();
+			}
+			catch (const std::bad_alloc&)
+			{
+				return AbortStep(Status::OutOfMemory);
+			}
+			catch (...)
+			{
+				return AbortStep(Status::LoadFailed);
+			}
+		}
+
+		bool AbortStep(Status status)
+		{
+			if (loadState.load(std::memory_order_acquire) == LoadState::Loading)
+				return Fail(status, StatusDetail::InternalError);
+			decodeErrors.fetch_add(1, std::memory_order_relaxed);
+			faulted.store(true, std::memory_order_release);
+			return false;
+		}
+
+		// The stream cannot be played any further (format change): Ready -> Failed, surfaced through
+		// GetLoadState() / GetLoadError(). Buffers stay valid until Unload().
+		bool FailStream(Status status, StatusDetail detail)
+		{
+			faulted.store(true, std::memory_order_release);
+			return Fail(status, detail);
+		}
+
+		bool RunStepImpl()
+		{
+			if (cancel.load(std::memory_order_relaxed) || faulted.load(std::memory_order_relaxed))
 				return false;
 			const LoadState ls = loadState.load(std::memory_order_acquire);
 			if (ls == LoadState::Loading)
@@ -219,8 +261,9 @@ namespace cev
 				info.height = di.height;
 
 				const uint32_t slots = std::max(3u, cfg.ringSlots);
-				if (Failed(ring.Init(format, slots)))
-					return Fail(Status::OutOfMemory, StatusDetail::RingInit);
+				st = ring.Init(format, slots);
+				if (Failed(st))
+					return Fail(st, StatusDetail::RingInit); // Unsupported (too large) / OutOfMemory (budget)
 
 				uint64_t epoch = 0;
 				const int slot = ring.AcquireWrite(epoch);
@@ -261,9 +304,15 @@ namespace cev
 				info.audioCodec = a.codec;
 				info.audioSampleRate = adec->SampleRate();
 				info.audioChannels = adec->Channels();
-				const uint64_t cap = static_cast<uint64_t>(info.audioSampleRate) * std::max(50u, cfg.audioBufferMs) / 1000u;
-				aring.Init(info.audioChannels, static_cast<uint32_t>(std::max<uint64_t>(cap, adec->MaxFramesPerPacket())));
+				// PCM ring: 50 ms .. 4 s of audio, computed in 64 bit before anything is allocated.
+				const uint64_t rate = info.audioSampleRate;
+				const uint32_t bufMs = std::min(std::max(50u, cfg.audioBufferMs), kMaxAudioBufferMs);
+				uint64_t cap = std::max<uint64_t>(rate * bufMs / 1000u, adec->MaxFramesPerPacket());
+				cap = std::min<uint64_t>(cap, std::max<uint64_t>(rate * (kMaxAudioBufferMs / 1000u), adec->MaxFramesPerPacket()));
+				aring.Init(info.audioChannels, static_cast<uint32_t>(cap));
 				ApplyAudioSeek(0.0);
+				audioChannels.store(std::max(1u, info.audioChannels), std::memory_order_relaxed);
+				audioActive.store(true, std::memory_order_release);
 			}
 			else
 			{
@@ -373,6 +422,12 @@ namespace cev
 				t1 = Steady::now();
 			if (Failed(st))
 				decodeErrors.fetch_add(1, std::memory_order_relaxed);
+			if (st == Status::Unsupported) // e.g. the stream switched to high bit depth
+			{
+				if (slot >= 0)
+					ring.Abandon(slot);
+				return FailStream(Status::Unsupported, StatusDetail::StreamChanged);
+			}
 
 			if (skipping)
 			{
@@ -396,6 +451,12 @@ namespace cev
 				{
 					decodeErrors.fetch_add(1, std::memory_order_relaxed);
 					ring.Abandon(slot);
+					// Resolution / chroma format switched mid-stream: the ring is sized for the first frame, so
+					// stop cleanly instead of freezing on the last frame.
+					DecodedImageInfo di;
+					if (Succeeded(vdec->GetFrameInfo(di)) && (di.width != format.width || di.height != format.height ||
+						di.chromaShiftX != format.chromaShiftX || di.chromaShiftY != format.chromaShiftY))
+						return FailStream(Status::Unsupported, StatusDetail::StreamChanged);
 				}
 			}
 			else
@@ -472,12 +533,12 @@ namespace cev
 
 		bool VideoAtEnd() const
 		{
-			return !hasVideo || (EofValid() && vEof.load(std::memory_order_acquire));
+			return !hasVideo || faulted.load(std::memory_order_acquire) || (EofValid() && vEof.load(std::memory_order_acquire));
 		}
 
 		bool AudioAtEnd() const
 		{
-			return !hasAudio || (EofValid() && aEof.load(std::memory_order_acquire));
+			return !hasAudio || faulted.load(std::memory_order_acquire) || (EofValid() && aEof.load(std::memory_order_acquire));
 		}
 
 		void WakeWorker()
@@ -503,6 +564,7 @@ namespace cev
 		{
 			if (loadState.load(std::memory_order_acquire) == LoadState::Unloaded && handle == DecodePool::kInvalidHandle)
 				return;
+			audioActive.store(false, std::memory_order_release); // ReadAudio() returns 0 from here on
 			cancel.store(true, std::memory_order_release);
 			if (pool && handle != DecodePool::kInvalidHandle)
 				pool->Unregister(handle);
@@ -528,6 +590,7 @@ namespace cev
 			vSeekTarget = 0.0;
 			vEof.store(false);
 			aEof.store(false);
+			faulted.store(false);
 			silenceRemaining = 0;
 			pendingPcm = nullptr;
 			pendingFrames = 0;
@@ -560,22 +623,41 @@ namespace cev
 		Impl& d = *m_impl;
 		if (!source)
 			return Status::InvalidArgument;
-		d.UnloadImpl();
-
-		d.clock->Pause();
-		d.clock->Seek(0.0);
-		d.pool = d.cfg.pool ? d.cfg.pool : DecodePool::AcquireShared();
-		d.pendingSource = std::move(source);
-		d.loadState.store(LoadState::Loading, std::memory_order_release);
-		if (Failed(d.pool->Register(&d, d.handle)))
+		try
 		{
-			d.loadError = LoadError{Status::OutOfMemory, StatusDetail::PoolRegister};
+			d.UnloadImpl();
+
+			d.clock->Pause();
+			d.clock->Seek(0.0);
+			d.pool = d.cfg.pool ? d.cfg.pool : DecodePool::AcquireShared();
+			d.pendingSource = std::move(source);
+			if (!d.pool)
+			{
+				d.pendingSource.reset();
+				d.loadError = LoadError{Status::OutOfMemory, StatusDetail::PoolRegister};
+				d.loadState.store(LoadState::Failed, std::memory_order_release);
+				return Status::OutOfMemory;
+			}
+			d.loadState.store(LoadState::Loading, std::memory_order_release);
+			if (Failed(d.pool->Register(&d, d.handle)))
+			{
+				d.loadError = LoadError{Status::OutOfMemory, StatusDetail::PoolRegister};
+				d.loadState.store(LoadState::Failed, std::memory_order_release);
+				d.pool.reset();
+				d.pendingSource.reset();
+				return Status::OutOfMemory;
+			}
+			d.pool->Wake(d.handle);
+			return Status::Ok;
+		}
+		catch (...)
+		{
+			// Nothing may throw out of the API. Release whatever was set up and report a failed load.
+			try { d.UnloadImpl(); } catch (...) {}
+			d.loadError = LoadError{Status::OutOfMemory, StatusDetail::InternalError};
 			d.loadState.store(LoadState::Failed, std::memory_order_release);
-			d.pool.reset();
 			return Status::OutOfMemory;
 		}
-		d.pool->Wake(d.handle);
-		return Status::Ok;
 	}
 
 	LoadState PlayerCore::GetLoadState() const { return m_impl->loadState.load(std::memory_order_acquire); }
@@ -710,7 +792,18 @@ namespace cev
 
 		if (d.State() == PlayerState::Playing && t >= d.info.durationSeconds - kEndEpsilon)
 		{
-			const bool videoDone = !d.hasVideo || (d.VideoAtEnd() && d.ring.ReadyCount() == 0);
+			bool videoDone = !d.hasVideo || (d.VideoAtEnd() && d.ring.ReadyCount() == 0);
+			if (!videoDone && d.VideoAtEnd())
+			{
+				// Frames that stay queued long after the duration (bogus timestamps) must not hold the end back:
+				// once the clock is a grace period past the duration the decoder is done, drop what is left.
+				const double period = d.info.frameRate > 0.0 ? 1.0 / d.info.frameRate : 0.0;
+				if (t >= d.info.durationSeconds + std::max(kEndGraceMin, period))
+				{
+					d.ring.FlushReady();
+					videoDone = true;
+				}
+			}
 			if (videoDone)
 			{
 				if (d.loop)
@@ -761,10 +854,11 @@ namespace cev
 		Impl& d = *m_impl;
 		if (dst == nullptr || frames == 0)
 			return 0;
-		// Before Ready the channel count is unknown (and being written by the load step): dst is left untouched.
-		if (d.loadState.load(std::memory_order_acquire) != LoadState::Ready || !d.hasAudio)
+		// Only atomics and the (mutex protected) AudioRing are touched here, so this is safe while Load() /
+		// Unload() run on another thread. Before Ready / after Unload started dst is left untouched.
+		if (d.loadState.load(std::memory_order_acquire) != LoadState::Ready || !d.audioActive.load(std::memory_order_acquire))
 			return 0;
-		const uint32_t channels = std::max(1u, d.info.audioChannels);
+		const uint32_t channels = d.audioChannels.load(std::memory_order_relaxed);
 		if (d.State() != PlayerState::Playing ||
 			d.seekGen.load(std::memory_order_acquire) != d.appliedSeekGen.load(std::memory_order_acquire))
 		{
@@ -774,8 +868,7 @@ namespace cev
 		const uint32_t n = d.aring.Read(dst, frames);
 		if (n < frames)
 			std::memset(dst + static_cast<size_t>(n) * channels, 0, static_cast<size_t>(frames - n) * channels * sizeof(float));
-		if (!d.aEof.load(std::memory_order_relaxed) && d.aring.FreeFrames() >= d.aring.Capacity() / 4)
-			d.WakeWorker();
+		// No worker wake-up here: Update() (consumer thread) wakes the worker when a quarter of the ring is free.
 		return n;
 	}
 
@@ -798,6 +891,7 @@ namespace cev
 		return d.loadState.load(std::memory_order_acquire) == LoadState::Ready && d.AudioAtEnd() && d.aring.Buffered() == 0;
 	}
 
+	void PlayerCore::SetStatsEnabled(bool enabled) { m_impl->stats.SetEnabled(enabled); }
 	StatsSnapshot PlayerCore::GetStats() const { return m_impl->stats.Snapshot(); }
 	void PlayerCore::ResetStats() { m_impl->stats.Reset(); }
 

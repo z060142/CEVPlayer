@@ -8,8 +8,26 @@
 
 namespace cev
 {
+	// Largest picture the frame ring accepts (FrameRing.cpp); bigger keyframes are refused before libvpx allocates.
+	constexpr unsigned kMaxFrameWidth = 8192;
+	constexpr unsigned kMaxFrameHeight = 8192;
+	constexpr uint64_t kMaxFramePixels = 8192ull * 4608ull;
+
+	namespace
+	{
+		bool Oversized(vpx_codec_iface_t* iface, const uint8_t* data, uint32_t size)
+		{
+			vpx_codec_stream_info_t si;
+			std::memset(&si, 0, sizeof(si));
+			si.sz = sizeof(si);
+			return vpx_codec_peek_stream_info(iface, data, size, &si) == VPX_CODEC_OK && si.is_kf != 0 &&
+				(si.w > kMaxFrameWidth || si.h > kMaxFrameHeight || static_cast<uint64_t>(si.w) * si.h > kMaxFramePixels);
+		}
+	}
+
 	struct VideoDecoder::Impl
 	{
+		vpx_codec_iface_t* iface = nullptr;
 		vpx_codec_ctx_t main;
 		vpx_codec_ctx_t alpha;
 		bool mainInit = false;
@@ -44,8 +62,17 @@ namespace cev
 			threads = 1;
 		threads = std::min<uint32_t>(threads, 16);
 
-		std::unique_ptr<Impl> impl = std::make_unique<Impl>();
+		std::unique_ptr<Impl> impl;
+		try
+		{
+			impl = std::make_unique<Impl>();
+		}
+		catch (...)
+		{
+			return Status::OutOfMemory;
+		}
 		vpx_codec_iface_t* iface = stream.codec == VideoCodec::VP9 ? vpx_codec_vp9_dx() : vpx_codec_vp8_dx();
+		impl->iface = iface;
 
 		vpx_codec_dec_cfg_t cfg;
 		cfg.threads = threads;
@@ -68,7 +95,14 @@ namespace cev
 				vpx_codec_control(&impl->alpha, VP9D_SET_ROW_MT, 1);
 		}
 
-		out = std::make_unique<VideoDecoder>(std::move(impl));
+		try
+		{
+			out = std::make_unique<VideoDecoder>(std::move(impl));
+		}
+		catch (...)
+		{
+			return Status::OutOfMemory;
+		}
 		return Status::Ok;
 	}
 
@@ -79,6 +113,10 @@ namespace cev
 		d.alphaImage = nullptr;
 		if (data == nullptr || size == 0)
 			return Status::InvalidArgument;
+
+		// A keyframe that announces an oversized picture is refused before libvpx allocates its frame buffers.
+		if (Oversized(d.iface, data, size) || (d.alphaInit && alphaData != nullptr && alphaSize > 0 && Oversized(d.iface, alphaData, alphaSize)))
+			return Status::Unsupported;
 
 		// The alpha decoder must see every alpha packet (inter frames reference the previous ones), also when
 		// the main packet fails or produces no visible frame.
@@ -154,7 +192,10 @@ namespace cev
 		if (format.hasAlpha && slot.plane[3] != nullptr)
 		{
 			const vpx_image_t* a = m_impl->alphaImage;
-			if (a != nullptr && a->planes[0] != nullptr && static_cast<int>(a->d_w) == w && static_cast<int>(a->d_h) == h)
+			// High bit depth alpha (16-bit samples) cannot be copied as bytes: treat it as opaque.
+			const bool alphaUsable = a != nullptr && a->planes[0] != nullptr && (a->fmt & VPX_IMG_FMT_HIGHBITDEPTH) == 0 &&
+				a->bit_depth == 8 && static_cast<int>(a->d_w) == w && static_cast<int>(a->d_h) == h;
+			if (alphaUsable)
 			{
 				for (int r = 0; r < h; ++r)
 					std::memcpy(slot.plane[3] + static_cast<ptrdiff_t>(r) * slot.stride[3],

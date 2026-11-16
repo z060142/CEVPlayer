@@ -30,9 +30,16 @@ namespace cev
 		using TaskHandle = uint32_t;
 		static constexpr TaskHandle kInvalidHandle = 0xFFFFFFFFu;
 
-		// Process wide shared pool: created on first use, destroyed when the last holder releases it.
-		// workerCount == 0 -> default (min(4, max(2, hardware_concurrency / 2))), only used when it creates the pool.
+		// Process wide shared pool: created on first use and kept alive (idle workers just sleep) until
+		// ShutdownShared(). Returns nullptr when no worker thread could be started (PlayerCore::Load then fails
+		// with OutOfMemory). workerCount == 0 -> default (min(4, max(2, hardware_concurrency / 2))), only used
+		// when it creates the pool.
 		static std::shared_ptr<DecodePool> AcquireShared(uint32_t workerCount = 0);
+		// Drops the process wide pool's own reference. The workers are joined as soon as the last PlayerCore
+		// holding it is gone (immediately when none is). Call it at plugin / module shutdown, after the players
+		// were destroyed or unloaded, so no worker thread outlives the module. A later AcquireShared() creates a
+		// new pool.
+		static void ShutdownShared();
 
 		explicit DecodePool(uint32_t workerCount);
 		~DecodePool();

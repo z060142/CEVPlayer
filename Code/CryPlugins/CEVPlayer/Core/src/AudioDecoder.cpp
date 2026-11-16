@@ -171,7 +171,7 @@ namespace cev
 				offset += sizes[i];
 			}
 
-			if (vi.channels < 1 || vi.channels > 8 || vi.rate < 8000)
+			if (vi.channels < 1 || vi.channels > 8 || vi.rate < 8000 || vi.rate > 384000)
 			{
 				detail = StatusDetail::BadCodecPrivate;
 				return Status::Unsupported;
@@ -207,16 +207,25 @@ namespace cev
 		StatusDetail dummy = StatusDetail::None;
 		StatusDetail& det = detail != nullptr ? *detail : dummy;
 
-		std::unique_ptr<Impl> impl = std::make_unique<Impl>();
-		Status st = Status::Unsupported;
-		if (stream.codec == AudioCodec::Opus)
-			st = impl->InitOpus(stream, det);
-		else if (stream.codec == AudioCodec::Vorbis)
-			st = impl->InitVorbis(stream, det);
-		if (Failed(st))
-			return st;
-		out = std::make_unique<AudioDecoder>(std::move(impl));
-		return Status::Ok;
+		try
+		{
+			std::unique_ptr<Impl> impl = std::make_unique<Impl>();
+			Status st = Status::Unsupported;
+			if (stream.codec == AudioCodec::Opus)
+				st = impl->InitOpus(stream, det);
+			else if (stream.codec == AudioCodec::Vorbis)
+				st = impl->InitVorbis(stream, det);
+			if (Failed(st))
+				return st;
+			out = std::make_unique<AudioDecoder>(std::move(impl));
+			return Status::Ok;
+		}
+		catch (...)
+		{
+			out.reset();
+			det = StatusDetail::AudioDecoderInit;
+			return Status::OutOfMemory;
+		}
 	}
 
 	uint32_t AudioDecoder::SampleRate() const { return m_impl->sampleRate; }

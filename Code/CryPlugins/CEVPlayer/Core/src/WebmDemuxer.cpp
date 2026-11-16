@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <new>
 
 #include <mkvparser/mkvparser.h>
 
@@ -38,6 +39,15 @@ namespace cev
 		constexpr uint32_t kIdEncryptedBlock = 0xAF;
 
 		constexpr uint64_t kUnknownSize = ~0ull;
+
+		// Index limits. Everything PlayerCore allocates from the index (packet buffers) is bounded by these.
+		constexpr uint32_t kMaxVideoPayload = 64u << 20;   // per video frame / BlockAdditional payload
+		constexpr uint32_t kMaxAudioPayload = 1u << 20;    // per audio frame
+		constexpr size_t kMaxPackets = 4u << 20;           // per stream
+		constexpr int64_t kMaxPtsNs = 1000000000000000ll;  // ~11.5 days
+		constexpr int64_t kMaxFrameNs = 10000000000ll;     // sanity cap for DefaultDuration / CodecDelay / SeekPreRoll
+		constexpr double kPtsSlackSeconds = 0.5;           // pts are clamped to Info/Duration + this
+		constexpr uint32_t kCancelPollElements = 256;
 
 		struct SegmentDeleter
 		{
@@ -221,7 +231,52 @@ namespace cev
 			std::vector<PacketRef>* audio = nullptr;
 			const std::atomic<bool>* cancel = nullptr;
 			uint32_t videoAlphaTrackNumber = 0;
+			uint32_t elementsSincePoll = 0;
+
+			// True when the open should be aborted (polled every kCancelPollElements elements).
+			bool PollCancel()
+			{
+				if (cancel == nullptr || ++elementsSincePoll < kCancelPollElements)
+					return false;
+				elementsSincePoll = 0;
+				return cancel->load(std::memory_order_relaxed);
+			}
 		};
+
+		// Appends one packet after validating it against the file: payload inside the file, size caps, packet
+		// count cap. The index therefore never holds an offset / size the byte source cannot serve, and the
+		// buffers PlayerCore sizes from the maximum packet size stay bounded by the file length and the caps.
+		Status PushPacket(IndexContext& ctx, std::vector<PacketRef>* dst, PacketRef ref)
+		{
+			const uint64_t len = ctx.scanner->Length();
+			const uint32_t cap = dst == ctx.video ? kMaxVideoPayload : kMaxAudioPayload;
+			if (ref.size == 0 || ref.size > cap || ref.offset > len || ref.size > len - ref.offset)
+				return Status::InvalidData;
+			if (ref.additionalSize != 0 &&
+				(ref.additionalSize > kMaxVideoPayload || ref.additionalOffset > len || ref.additionalSize > len - ref.additionalOffset))
+			{
+				ref.additionalOffset = 0; // unusable alpha payload: the frame is simply opaque
+				ref.additionalSize = 0;
+			}
+			if (dst->size() >= kMaxPackets)
+				return Status::InvalidData;
+			dst->push_back(ref);
+			return Status::Ok;
+		}
+
+		// Presentation time of a (laced) frame in ns: saturating, clamped to [0, kMaxPtsNs].
+		int64_t BlockPtsNs(int64_t clusterTicks, int64_t relTicks, int64_t scale)
+		{
+			int64_t ticks = std::min<int64_t>(std::max<int64_t>(clusterTicks, 0), kMaxPtsNs);
+			ticks += relTicks;
+			if (ticks <= 0)
+				return 0;
+			if (scale <= 0)
+				scale = 1000000;
+			if (ticks > kMaxPtsNs / scale)
+				return kMaxPtsNs;
+			return ticks * scale;
+		}
 
 		// Adds the frames of one Block / SimpleBlock payload.
 		Status AddBlock(IndexContext& ctx, uint64_t dataStart, uint64_t dataSize, int64_t clusterTimecode,
@@ -232,7 +287,7 @@ namespace cev
 			unsigned tnLen = 0;
 			if (!sc.ReadVint(dataStart, track, tnLen))
 				return Status::InvalidData;
-			if (dataSize < tnLen + 3)
+			if (dataSize < static_cast<uint64_t>(tnLen) + 3)
 				return Status::InvalidData;
 
 			std::vector<PacketRef>* dst = nullptr;
@@ -243,6 +298,11 @@ namespace cev
 			if (dst == nullptr)
 				return Status::Ok;
 
+			// The whole block must lie inside the file (guards every size / offset below).
+			const uint64_t fileLen = sc.Length();
+			if (dataStart > fileLen || dataSize > fileLen - dataStart)
+				return Status::InvalidData;
+
 			uint8_t hdr[3];
 			if (!sc.Peek(dataStart + tnLen, hdr, 3))
 				return Status::InvalidData;
@@ -250,9 +310,9 @@ namespace cev
 			const uint8_t flags = hdr[2];
 			const unsigned lacing = (flags >> 1) & 3u;
 			const bool key = simpleBlock ? (flags & 0x80) != 0 : !extras.hasReference;
-			const int64_t ptsNs = (clusterTimecode + rel) * ctx.timecodeScale;
+			const int64_t ptsNs = BlockPtsNs(clusterTimecode, rel, ctx.timecodeScale);
 
-			uint64_t pos = dataStart + tnLen + 3;
+			uint64_t pos = dataStart + tnLen + 3; // <= end
 			const uint64_t end = dataStart + dataSize;
 
 			PacketRef ref;
@@ -263,83 +323,100 @@ namespace cev
 
 			if (lacing == 0)
 			{
+				if (end == pos)
+					return Status::Ok; // empty packet: nothing to decode
+				if (end - pos > 0xFFFFFFFFull)
+					return Status::InvalidData;
 				ref.offset = pos;
 				ref.size = static_cast<uint32_t>(end - pos);
 				ref.ptsNs = ptsNs;
-				dst->push_back(ref);
-				return Status::Ok;
+				return PushPacket(ctx, dst, ref);
 			}
 
-			// Laced block: Xiph (1), fixed size (2), EBML (3).
+			// Laced block: Xiph (1), fixed size (2), EBML (3). All arithmetic in uint64, every step bounded by `end`.
+			if (pos >= end)
+				return Status::InvalidData; // no room for the lace count byte
 			uint8_t countByte = 0;
 			if (!sc.Peek(pos, &countByte, 1))
 				return Status::InvalidData;
 			++pos;
 			const unsigned frameCount = static_cast<unsigned>(countByte) + 1;
-			std::vector<uint32_t> sizes(frameCount, 0);
+			std::vector<uint64_t> sizes(frameCount, 0);
 			uint64_t total = 0;
 			if (lacing == 2)
 			{
 				const uint64_t each = (end - pos) / frameCount;
 				for (unsigned i = 0; i < frameCount; ++i)
-					sizes[i] = static_cast<uint32_t>(each);
+					sizes[i] = each;
 				total = each * frameCount;
 			}
 			else if (lacing == 1)
 			{
 				for (unsigned i = 0; i + 1 < frameCount; ++i)
 				{
-					uint32_t sz = 0;
+					uint64_t sz = 0;
 					uint8_t b = 255;
 					while (b == 255)
 					{
-						if (!sc.Peek(pos, &b, 1))
+						if (pos >= end || !sc.Peek(pos, &b, 1))
 							return Status::InvalidData;
 						++pos;
 						sz += b;
 					}
 					sizes[i] = sz;
 					total += sz;
+					if (total > end)
+						return Status::InvalidData;
 				}
 			}
-			else
+			else if (frameCount > 1)
 			{
 				uint64_t first = 0;
 				unsigned len = 0;
-				if (!sc.ReadVint(pos, first, len))
+				if (pos >= end || !sc.ReadVint(pos, first, len))
 					return Status::InvalidData;
 				pos += len;
-				sizes[0] = static_cast<uint32_t>(first);
+				if (pos > end || first > end)
+					return Status::InvalidData;
+				sizes[0] = first;
 				total = first;
 				int64_t prev = static_cast<int64_t>(first);
 				for (unsigned i = 1; i + 1 < frameCount; ++i)
 				{
 					uint64_t raw = 0;
-					if (!sc.ReadVint(pos, raw, len))
+					if (pos >= end || !sc.ReadVint(pos, raw, len))
 						return Status::InvalidData;
 					pos += len;
-					const int64_t bias = (1ll << (7 * len - 1)) - 1;
-					prev += static_cast<int64_t>(raw) - bias;
-					if (prev < 0)
+					if (pos > end)
 						return Status::InvalidData;
-					sizes[i] = static_cast<uint32_t>(prev);
+					const int64_t bias = (1ll << (7 * len - 1)) - 1;
+					prev += static_cast<int64_t>(raw) - bias; // |prev| <= end + 2^56: no overflow
+					if (prev < 0 || static_cast<uint64_t>(prev) > end)
+						return Status::InvalidData;
+					sizes[i] = static_cast<uint64_t>(prev);
 					total += static_cast<uint64_t>(prev);
+					if (total > end)
+						return Status::InvalidData;
 				}
 			}
-			if (pos + total > end)
+			if (pos > end || total > end - pos)
 				return Status::InvalidData;
 			if (lacing != 2)
-				sizes[frameCount - 1] = static_cast<uint32_t>(end - pos - total);
+				sizes[frameCount - 1] = end - pos - total;
 
 			for (unsigned i = 0; i < frameCount; ++i)
 			{
+				if (sizes[i] == 0 || sizes[i] > 0xFFFFFFFFull)
+					return Status::InvalidData;
 				ref.offset = pos;
-				ref.size = sizes[i];
-				ref.ptsNs = ptsNs + static_cast<int64_t>(i) * ctx.audioFrameNs;
+				ref.size = static_cast<uint32_t>(sizes[i]);
+				ref.ptsNs = std::min<int64_t>(ptsNs + static_cast<int64_t>(i) * ctx.audioFrameNs, kMaxPtsNs);
 				ref.additionalOffset = 0;
 				ref.additionalSize = 0;
 				ref.discardPaddingNs = (i + 1 == frameCount) ? extras.discardPaddingNs : 0;
-				dst->push_back(ref);
+				const Status st = PushPacket(ctx, dst, ref);
+				if (Failed(st))
+					return st;
 				pos += sizes[i];
 			}
 			return Status::Ok;
@@ -357,7 +434,7 @@ namespace cev
 			Element e;
 			while (pos < end && sc.ReadElement(pos, e))
 			{
-				if (e.dataSize == kUnknownSize)
+				if (e.dataSize == kUnknownSize || e.End() > end)
 					return Status::InvalidData;
 				switch (e.id)
 				{
@@ -383,7 +460,7 @@ namespace cev
 					Element more;
 					while (mp < mend && sc.ReadElement(mp, more))
 					{
-						if (more.dataSize == kUnknownSize)
+						if (more.dataSize == kUnknownSize || more.End() > mend)
 							return Status::InvalidData;
 						if (more.id == kIdBlockMore)
 						{
@@ -394,7 +471,7 @@ namespace cev
 							Element item;
 							while (ip < iend && sc.ReadElement(ip, item))
 							{
-								if (item.dataSize == kUnknownSize)
+								if (item.dataSize == kUnknownSize || item.End() > iend)
 									return Status::InvalidData;
 								if (item.id == kIdBlockAddId)
 									sc.ReadUInt(item, addId);
@@ -405,7 +482,7 @@ namespace cev
 								}
 								ip = item.End();
 							}
-							if (addId == 1 && addSize > 0 && extras.additionalOffset == 0)
+							if (addId == 1 && addSize > 0 && addSize <= kMaxVideoPayload && extras.additionalOffset == 0)
 							{
 								extras.additionalOffset = addOff;
 								extras.additionalSize = static_cast<uint32_t>(addSize);
@@ -431,16 +508,22 @@ namespace cev
 			Scanner& sc = *ctx.scanner;
 			int64_t timecode = 0;
 			uint64_t pos = cluster.dataStart;
+			const uint64_t fileLen = sc.Length();
 			const bool unknown = cluster.dataSize == kUnknownSize;
-			const uint64_t end = unknown ? sc.Length() : cluster.End();
+			// A cluster that claims to extend past the end of the file (truncated download) is clamped to the file.
+			const bool truncated = !unknown && (cluster.dataStart > fileLen || cluster.dataSize > fileLen - cluster.dataStart);
+			const bool lenient = unknown || truncated;
+			const uint64_t end = lenient ? fileLen : cluster.End();
 
 			Element e;
 			while (pos < end)
 			{
+				if (ctx.PollCancel())
+					return Status::Cancelled;
 				if (!sc.ReadElement(pos, e))
 				{
-					if (unknown)
-						break; // truncated tail of a live stream
+					if (lenient)
+						break; // truncated tail of a live stream / file
 					return Status::InvalidData;
 				}
 				if (unknown && IsTopLevelId(e.id))
@@ -449,7 +532,7 @@ namespace cev
 					return Status::InvalidData;
 				if (e.End() > end)
 				{
-					if (unknown)
+					if (lenient)
 						break;
 					return Status::InvalidData;
 				}
@@ -461,7 +544,7 @@ namespace cev
 				{
 					uint64_t v = 0;
 					if (sc.ReadUInt(e, v))
-						timecode = static_cast<int64_t>(v);
+						timecode = static_cast<int64_t>(std::min<uint64_t>(v, static_cast<uint64_t>(kMaxPtsNs)));
 					break;
 				}
 				case kIdSimpleBlock:
@@ -534,6 +617,26 @@ namespace cev
 	}
 
 	Status WebmDemuxer::Open(std::unique_ptr<IByteSource> source, std::unique_ptr<WebmDemuxer>& out,
+		StatusDetail* detail, const std::atomic<bool>* cancel)
+	{
+		// Nothing may throw out of the public API (the index vectors / libwebm allocate).
+		try
+		{
+			return OpenImpl(std::move(source), out, detail, cancel);
+		}
+		catch (const std::bad_alloc&)
+		{
+			out.reset();
+			return Status::OutOfMemory;
+		}
+		catch (...)
+		{
+			out.reset(); // e.g. a byte source that throws
+			return Status::IoError;
+		}
+	}
+
+	Status WebmDemuxer::OpenImpl(std::unique_ptr<IByteSource> source, std::unique_ptr<WebmDemuxer>& out,
 		StatusDetail* detail, const std::atomic<bool>* cancel)
 	{
 		out.reset();
@@ -616,8 +719,10 @@ namespace cev
 			VideoStreamInfo& v = dmx->m_video;
 			v.codec = std::strcmp(vTrack->GetCodecId(), "V_VP9") == 0 ? VideoCodec::VP9 : VideoCodec::VP8;
 			v.trackNumber = static_cast<uint32_t>(vTrack->GetNumber());
-			v.width = static_cast<int>(vTrack->GetWidth());
-			v.height = static_cast<int>(vTrack->GetHeight());
+			const long long trackW = vTrack->GetWidth();
+			const long long trackH = vTrack->GetHeight();
+			v.width = (trackW > 0 && trackW <= 65535) ? static_cast<int>(trackW) : 0; // 0 -> rejected below
+			v.height = (trackH > 0 && trackH <= 65535) ? static_cast<int>(trackH) : 0;
 			if (vTrack->GetDefaultDuration() > 0)
 				v.frameRate = 1e9 / static_cast<double>(vTrack->GetDefaultDuration());
 			else if (vTrack->GetFrameRate() > 0.0)
@@ -636,18 +741,22 @@ namespace cev
 			AudioStreamInfo& a = dmx->m_audio;
 			a.codec = std::strcmp(aTrack->GetCodecId(), "A_OPUS") == 0 ? AudioCodec::Opus : AudioCodec::Vorbis;
 			a.trackNumber = static_cast<uint32_t>(aTrack->GetNumber());
-			a.sampleRate = static_cast<uint32_t>(aTrack->GetSamplingRate());
-			a.channels = static_cast<uint32_t>(aTrack->GetChannels());
+			const double trackRate = aTrack->GetSamplingRate();
+			const long long trackChannels = aTrack->GetChannels();
+			a.sampleRate = (trackRate > 0.0 && trackRate <= 4.0e9) ? static_cast<uint32_t>(trackRate) : 0u;
+			a.channels = (trackChannels > 0 && trackChannels <= 255) ? static_cast<uint32_t>(trackChannels) : 0u;
 			size_t cpSize = 0;
 			const unsigned char* cp = aTrack->GetCodecPrivate(cpSize);
 			if (cp != nullptr && cpSize > 0)
 				a.codecPrivate.assign(cp, cp + cpSize);
-			a.codecDelayNs = aTrack->GetCodecDelay();
-			a.seekPreRollNs = aTrack->GetSeekPreRoll();
+			a.codecDelayNs = std::min<uint64_t>(aTrack->GetCodecDelay(), static_cast<uint64_t>(kMaxFrameNs));
+			a.seekPreRollNs = std::min<uint64_t>(aTrack->GetSeekPreRoll(), static_cast<uint64_t>(kMaxFrameNs));
 			ctx.audioTrack = a.trackNumber;
-			ctx.audioFrameNs = aTrack->GetDefaultDuration() > 0 ? static_cast<int64_t>(aTrack->GetDefaultDuration()) : 0;
+			ctx.audioFrameNs = aTrack->GetDefaultDuration() > 0
+				? static_cast<int64_t>(std::min<uint64_t>(aTrack->GetDefaultDuration(), static_cast<uint64_t>(kMaxFrameNs))) : 0;
 		}
-		const double infoDuration = info->GetDuration() > 0 ? static_cast<double>(info->GetDuration()) * 1e-9 : 0.0;
+		const double infoDuration = info->GetDuration() > 0
+			? std::min(static_cast<double>(info->GetDuration()) * 1e-9, static_cast<double>(kMaxPtsNs) * 1e-9) : 0.0;
 
 		// ---- full block index (own EBML scan: handles BlockAdditions and unknown size clusters) ----
 		Scanner scanner(src);
@@ -671,6 +780,8 @@ namespace cev
 			{
 				uint64_t next = 0;
 				const Status st = ScanCluster(ctx, e, next);
+				if (st == Status::Cancelled)
+					return st;
 				if (Failed(st))
 				{
 					// A damaged cluster in the middle of the file ends the index but keeps earlier packets.
@@ -689,6 +800,36 @@ namespace cev
 			if (e.dataSize == kUnknownSize)
 				break;
 			p = e.End();
+		}
+
+		// Bogus timestamps must not stall playback: clamp to [0, Info/Duration + slack] and force the pts of each
+		// stream non-decreasing (the frame ring presents strictly in queue order, one far-future pts would block
+		// every later frame).
+		{
+			int64_t limitNs = kMaxPtsNs;
+			if (infoDuration > 0.0)
+				limitNs = std::min<int64_t>(limitNs, static_cast<int64_t>((infoDuration + kPtsSlackSeconds) * 1e9));
+			for (std::vector<PacketRef>* list : {&dmx->m_videoPackets, &dmx->m_audioPackets})
+			{
+				const auto clampPts = [limitNs](int64_t v) { return std::min(std::max<int64_t>(v, 0), limitNs); };
+				int64_t prev = 0;
+				const size_t count = list->size();
+				for (size_t i = 0; i < count; ++i)
+				{
+					PacketRef& r = (*list)[i];
+					int64_t pt = clampPts(r.ptsNs);
+					// A single spike (this pts is ahead of the next one, which continues the sequence) is pulled back
+					// between its neighbours instead of dragging every later frame forward with it.
+					if (i + 1 < count)
+					{
+						const int64_t nx = clampPts((*list)[i + 1].ptsNs);
+						if (pt > nx && nx >= prev)
+							pt = prev + (nx - prev) / 2;
+					}
+					r.ptsNs = std::max(prev, pt);
+					prev = r.ptsNs;
+				}
+			}
 		}
 
 		if (dmx->HasVideo())

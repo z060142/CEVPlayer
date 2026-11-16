@@ -7,6 +7,11 @@ namespace cev
 	namespace
 	{
 		inline int AlignUp(int v, int a) { return (v + a - 1) / a * a; }
+
+		constexpr int kMaxWidth = 8192;
+		constexpr int kMaxHeight = 8192;
+		constexpr int64_t kMaxPixels = 8192ll * 4608ll;            // 8K UHD
+		constexpr uint64_t kMaxRingBytes = 1ull << 30;             // all slots together
 	}
 
 	Status FrameRing::Init(const FrameFormat& format, uint32_t slotCount)
@@ -16,54 +21,67 @@ namespace cev
 			return Status::InvalidArgument;
 		if (format.chromaShiftX < 0 || format.chromaShiftX > 2 || format.chromaShiftY < 0 || format.chromaShiftY > 2)
 			return Status::InvalidArgument;
-		if (static_cast<int64_t>(format.width) * format.height > (1ll << 27)) // 134M pixels
+		if (format.width > kMaxWidth || format.height > kMaxHeight ||
+			static_cast<int64_t>(format.width) * format.height > kMaxPixels) // 8192 x 4608
 			return Status::Unsupported;
 
-		m_format = format;
-		m_slots = std::make_unique<SlotStorage[]>(slotCount);
-		m_readyQueue = std::make_unique<int[]>(slotCount);
-
+		// Total memory is computed (in 64 bit) and checked against the budget before anything is allocated.
 		const int yStride = AlignUp(format.width, 16);
 		const int cStride = AlignUp(format.ChromaWidth(), 16);
 		const size_t ySize = static_cast<size_t>(yStride) * format.height;
 		const size_t cSize = static_cast<size_t>(cStride) * format.ChromaHeight();
 		const size_t aSize = format.hasAlpha ? ySize : 0;
 		const size_t total = ySize + 2 * cSize + aSize;
+		const uint64_t rgbaBytes = format.withRgba ? static_cast<uint64_t>(format.width) * format.height * 4 : 0;
+		if ((static_cast<uint64_t>(total) + rgbaBytes) * slotCount > kMaxRingBytes)
+			return Status::OutOfMemory;
 
-		for (uint32_t i = 0; i < slotCount; ++i)
+		try
 		{
-			SlotStorage& s = m_slots[i];
-			s.yuv = std::make_unique<uint8_t[]>(total);
-			// Neutral grey / opaque so a never written slot is harmless.
-			std::memset(s.yuv.get(), 16, ySize);
-			std::memset(s.yuv.get() + ySize, 128, 2 * cSize);
-			s.data.plane[0] = s.yuv.get();
-			s.data.stride[0] = yStride;
-			s.data.plane[1] = s.yuv.get() + ySize;
-			s.data.stride[1] = cStride;
-			s.data.plane[2] = s.yuv.get() + ySize + cSize;
-			s.data.stride[2] = cStride;
-			if (format.hasAlpha)
-			{
-				s.data.plane[3] = s.yuv.get() + ySize + 2 * cSize;
-				s.data.stride[3] = yStride;
-				std::memset(s.data.plane[3], 255, aSize);
-			}
-			if (format.withRgba)
-			{
-				const size_t rgbaSize = static_cast<size_t>(format.width) * format.height * 4;
-				s.rgbaMem = std::make_unique<uint8_t[]>(rgbaSize); // zero initialised
-				s.data.rgba = s.rgbaMem.get();
-				s.data.rgbaStride = format.width * 4;
-			}
-			s.state = State::Free;
-		}
+			m_format = format;
+			m_slots = std::make_unique<SlotStorage[]>(slotCount);
+			m_readyQueue = std::make_unique<int[]>(slotCount);
 
-		m_slotCount = slotCount;
-		m_readyHead = 0;
-		m_readyCount = 0;
-		m_current = -1;
-		return Status::Ok;
+			for (uint32_t i = 0; i < slotCount; ++i)
+			{
+				SlotStorage& s = m_slots[i];
+				s.yuv = std::make_unique<uint8_t[]>(total);
+				// Neutral grey / opaque so a never written slot is harmless.
+				std::memset(s.yuv.get(), 16, ySize);
+				std::memset(s.yuv.get() + ySize, 128, 2 * cSize);
+				s.data.plane[0] = s.yuv.get();
+				s.data.stride[0] = yStride;
+				s.data.plane[1] = s.yuv.get() + ySize;
+				s.data.stride[1] = cStride;
+				s.data.plane[2] = s.yuv.get() + ySize + cSize;
+				s.data.stride[2] = cStride;
+				if (format.hasAlpha)
+				{
+					s.data.plane[3] = s.yuv.get() + ySize + 2 * cSize;
+					s.data.stride[3] = yStride;
+					std::memset(s.data.plane[3], 255, aSize);
+				}
+				if (format.withRgba)
+				{
+					const size_t rgbaSize = static_cast<size_t>(format.width) * format.height * 4;
+					s.rgbaMem = std::make_unique<uint8_t[]>(rgbaSize); // zero initialised
+					s.data.rgba = s.rgbaMem.get();
+					s.data.rgbaStride = format.width * 4;
+				}
+				s.state = State::Free;
+			}
+
+			m_slotCount = slotCount;
+			m_readyHead = 0;
+			m_readyCount = 0;
+			m_current = -1;
+			return Status::Ok;
+		}
+		catch (...)
+		{
+			Shutdown(); // frees whatever was allocated so far
+			return Status::OutOfMemory;
+		}
 	}
 
 	void FrameRing::Shutdown()

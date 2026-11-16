@@ -39,6 +39,8 @@ namespace cev
 		case StatusDetail::FirstFrame: return "FirstFrame";
 		case StatusDetail::RingInit: return "RingInit";
 		case StatusDetail::PoolRegister: return "PoolRegister";
+		case StatusDetail::StreamChanged: return "StreamChanged";
+		case StatusDetail::InternalError: return "InternalError";
 		}
 		return "Unknown";
 	}

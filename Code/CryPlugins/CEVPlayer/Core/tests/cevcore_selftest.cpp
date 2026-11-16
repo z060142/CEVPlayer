@@ -18,6 +18,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,12 +48,22 @@ namespace
 {
 	std::atomic<uint64_t> g_newCount{0};
 	std::atomic<uint64_t> g_deleteCount{0};
+	std::atomic<size_t> g_maxAlloc{0}; // largest single operator new request since ResetMaxAlloc()
+
+	void NoteAlloc(size_t size)
+	{
+		size_t cur = g_maxAlloc.load(std::memory_order_relaxed);
+		while (size > cur && !g_maxAlloc.compare_exchange_weak(cur, size, std::memory_order_relaxed)) {}
+	}
+	void ResetMaxAlloc() { g_maxAlloc.store(0); }
+	size_t MaxAlloc() { return g_maxAlloc.load(); }
 
 	uint64_t AllocCounter() { return g_newCount.load(std::memory_order_relaxed); }
 
 	void* CountedAlloc(size_t size)
 	{
 		g_newCount.fetch_add(1, std::memory_order_relaxed);
+		NoteAlloc(size);
 		void* p = std::malloc(size != 0 ? size : 1);
 		if (p == nullptr)
 			std::abort();
@@ -62,6 +73,7 @@ namespace
 	void* CountedAllocAligned(size_t size, size_t alignment)
 	{
 		g_newCount.fetch_add(1, std::memory_order_relaxed);
+		NoteAlloc(size);
 #if defined(_WIN32)
 		void* p = _aligned_malloc(size != 0 ? size : 1, alignment);
 #else
@@ -953,6 +965,631 @@ namespace
 	}
 
 	// ---- stress: 4 players concurrently on the pool, repeated create / destroy ----
+	// ---------------------------------------------------------------------------------------------------------------
+	// Hardening regression tests: malformed files built in memory from a test clip.
+	// ---------------------------------------------------------------------------------------------------------------
+	constexpr size_t kAllocCap = 256u << 20; // largest single allocation any hardened load may make
+
+	bool ReadClipBytes(const char* name, std::vector<uint8_t>& out)
+	{
+		std::unique_ptr<IByteSource> s = OpenSource(g_mediaDir + "/" + name, true);
+		if (!s)
+			return false;
+		out.resize(static_cast<size_t>(s->Length()));
+		return Succeeded(s->Read(0, out.data(), out.size()));
+	}
+
+	unsigned RawVintLen(uint8_t first)
+	{
+		if (first == 0)
+			return 0;
+		unsigned len = 1;
+		for (uint8_t m = 0x80; (first & m) == 0; m >>= 1)
+			++len;
+		return len;
+	}
+
+	bool RawVint(const std::vector<uint8_t>& b, size_t pos, uint64_t& value, unsigned& len)
+	{
+		if (pos >= b.size())
+			return false;
+		len = RawVintLen(b[pos]);
+		if (len == 0 || pos + len > b.size())
+			return false;
+		value = b[pos] & (0xFFu >> len);
+		for (unsigned i = 1; i < len; ++i)
+			value = (value << 8) | b[pos + i];
+		return true;
+	}
+
+	struct RawBlock
+	{
+		size_t data = 0;      // first byte after the block's size field (track number vint)
+		uint64_t size = 0;
+		uint32_t track = 0;
+		bool key = false;
+	};
+
+	struct RawLayout
+	{
+		size_t segmentSizePos = 0;
+		unsigned segmentSizeLen = 0;
+		size_t firstCluster = 0;
+		std::vector<RawBlock> blocks; // every SimpleBlock of every cluster, in file order
+	};
+
+	// Minimal walk of a clip with known-size elements (as written by the clip generator).
+	bool ParseLayout(const std::vector<uint8_t>& b, RawLayout& out)
+	{
+		size_t pos = 0;
+		uint64_t size = 0;
+		unsigned len = 0;
+		// EBML header: 4 byte id + size
+		if (b.size() < 8 || !RawVint(b, 4, size, len))
+			return false;
+		pos = 4 + len + static_cast<size_t>(size);
+		if (pos + 4 > b.size() || b[pos] != 0x18 || b[pos + 1] != 0x53 || b[pos + 2] != 0x80 || b[pos + 3] != 0x67)
+			return false;
+		out.segmentSizePos = pos + 4;
+		if (!RawVint(b, out.segmentSizePos, size, len))
+			return false;
+		out.segmentSizeLen = len;
+		pos = out.segmentSizePos + len;
+		while (pos + 5 <= b.size())
+		{
+			const unsigned idLen = RawVintLen(b[pos]);
+			uint64_t esize = 0;
+			unsigned slen = 0;
+			if (idLen == 0 || idLen > 4 || !RawVint(b, pos + idLen, esize, slen))
+				break;
+			const size_t dataStart = pos + idLen + slen;
+			const bool isCluster = idLen == 4 && b[pos] == 0x1F && b[pos + 1] == 0x43 && b[pos + 2] == 0xB6 && b[pos + 3] == 0x75;
+			if (isCluster)
+			{
+				if (out.firstCluster == 0)
+					out.firstCluster = pos;
+				size_t cp = dataStart;
+				const size_t cend = std::min<size_t>(b.size(), dataStart + static_cast<size_t>(esize));
+				while (cp + 2 < cend)
+				{
+					const unsigned cidLen = RawVintLen(b[cp]);
+					uint64_t csize = 0;
+					unsigned cslen = 0;
+					if (cidLen == 0 || !RawVint(b, cp + cidLen, csize, cslen))
+						break;
+					const size_t cdata = cp + cidLen + cslen;
+					if (cidLen == 1 && b[cp] == 0xA3 && cdata + 4 <= cend)
+					{
+						uint64_t track = 0;
+						unsigned tlen = 0;
+						if (RawVint(b, cdata, track, tlen) && cdata + tlen + 3 <= b.size())
+						{
+							RawBlock rb;
+							rb.data = cdata;
+							rb.size = csize;
+							rb.track = static_cast<uint32_t>(track);
+							rb.key = (b[cdata + tlen + 2] & 0x80) != 0;
+							out.blocks.push_back(rb);
+						}
+					}
+					cp = cdata + static_cast<size_t>(csize);
+				}
+			}
+			pos = dataStart + static_cast<size_t>(esize);
+		}
+		return out.firstCluster != 0 && !out.blocks.empty();
+	}
+
+	void SetUnknownSize(std::vector<uint8_t>& b, size_t pos, unsigned len)
+	{
+		b[pos] = static_cast<uint8_t>((0x80u >> (len - 1)) | ((1u << (8 - len)) - 1u));
+		for (unsigned i = 1; i < len; ++i)
+			b[pos + i] = 0xFF;
+	}
+
+	void AppendBytes(std::vector<uint8_t>& b, std::initializer_list<uint8_t> bytes) { b.insert(b.end(), bytes.begin(), bytes.end()); }
+
+	// Appends a cluster that claims 0xF8000000 bytes with one SimpleBlock that claims `declaredBlockSize` bytes.
+	void AppendBadCluster(std::vector<uint8_t>& b, uint8_t track, uint8_t flags, uint64_t declaredBlockSize,
+		const std::vector<uint8_t>& payload)
+	{
+		AppendBytes(b, {0x1F, 0x43, 0xB6, 0x75, 0x01, 0x00, 0x00, 0x00, 0xF8, 0x00, 0x00, 0x00}); // Cluster, 8 byte size
+		AppendBytes(b, {0xE7, 0x81, 0x00});                                                        // Timecode 0
+		b.push_back(0xA3);                                                                        // SimpleBlock
+		b.push_back(0x01);                                                                        // 8 byte size vint
+		for (int i = 6; i >= 0; --i)
+			b.push_back(static_cast<uint8_t>(declaredBlockSize >> (8 * i)));
+		b.push_back(static_cast<uint8_t>(0x80 | track));
+		AppendBytes(b, {0x00, 0x00, flags});
+		b.insert(b.end(), payload.begin(), payload.end());
+	}
+
+	// Every indexed packet must lie inside the file and the size caps must hold.
+	void CheckIndexBounded(const WebmDemuxer& d, uint64_t len)
+	{
+		bool ok = true;
+		for (uint32_t i = 0; i < d.VideoPacketCount(); ++i)
+		{
+			const PacketRef& p = d.VideoPacket(i);
+			ok = ok && p.offset <= len && p.size <= len - p.offset && p.size <= (64u << 20) && p.size > 0;
+			ok = ok && (p.additionalSize == 0 || (p.additionalOffset <= len && p.additionalSize <= len - p.additionalOffset));
+			ok = ok && p.ptsNs >= 0 && p.ptsNs <= 1000000000000000ll;
+			ok = ok && (i == 0 || p.ptsNs >= d.VideoPacket(i - 1).ptsNs);
+		}
+		for (uint32_t i = 0; i < d.AudioPacketCount(); ++i)
+		{
+			const PacketRef& p = d.AudioPacket(i);
+			ok = ok && p.offset <= len && p.size <= len - p.offset && p.size <= (1u << 20) && p.size > 0;
+			ok = ok && p.ptsNs >= 0 && p.ptsNs <= 1000000000000000ll;
+			ok = ok && (i == 0 || p.ptsNs >= d.AudioPacket(i - 1).ptsNs);
+		}
+		CHECK(ok);
+		CHECKF(d.Video().maxPacketSize <= len && d.Audio().maxPacketSize <= len && d.Video().maxAdditionalSize <= len,
+			"max packet sizes %u / %u / %u for a %llu byte file", d.Video().maxPacketSize, d.Audio().maxPacketSize,
+			d.Video().maxAdditionalSize, static_cast<unsigned long long>(len));
+	}
+
+	// Opens the bytes with the demuxer (index must be bounded whether it opens or not), then loads them in a
+	// player and checks that no allocation was out of proportion. Returns the load state the player reached.
+	LoadState HardenedLoad(const std::vector<uint8_t>& bytes, bool* demuxOpened = nullptr)
+	{
+		const uint64_t len = bytes.size();
+		{
+			std::vector<uint8_t> copy = bytes;
+			std::unique_ptr<WebmDemuxer> d;
+			const Status st = WebmDemuxer::Open(std::make_unique<MemoryByteSource>(std::move(copy)), d, nullptr, nullptr);
+			if (demuxOpened != nullptr)
+				*demuxOpened = Succeeded(st);
+			CHECK(Succeeded(st) == (d != nullptr));
+			if (d)
+				CheckIndexBounded(*d, len);
+		}
+		std::vector<uint8_t> copy = bytes;
+		PlayerCore p;
+		CHECK(Succeeded(p.Load(std::make_unique<MemoryByteSource>(std::move(copy)))));
+		CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+		const LoadState ls = p.GetLoadState();
+		CHECK(ls == LoadState::Ready || ls == LoadState::Failed);
+		p.Unload();
+		return ls;
+	}
+
+	void TestMalformedIndex()
+	{
+		g_context = "malformed-index";
+		std::vector<uint8_t> clip;
+		CHECK(ReadClipBytes("vp8_vorbis.webm", clip));
+		RawLayout lay;
+		if (clip.empty() || !ParseLayout(clip, lay))
+		{
+			CHECK(false);
+			return;
+		}
+		uint32_t videoTrack = 1, audioTrack = 2;
+		{
+			std::unique_ptr<WebmDemuxer> d;
+			CHECK(Succeeded(WebmDemuxer::Open(std::make_unique<MemoryByteSource>(std::vector<uint8_t>(clip)), d, nullptr, nullptr)));
+			if (d)
+			{
+				videoTrack = d->Video().trackNumber;
+				audioTrack = d->Audio().trackNumber;
+			}
+		}
+
+		// Header of the clip up to its first cluster, with the Segment size set to "unknown" so appended data is read.
+		std::vector<uint8_t> head(clip.begin(), clip.begin() + static_cast<std::ptrdiff_t>(lay.firstCluster));
+		SetUnknownSize(head, lay.segmentSizePos, lay.segmentSizeLen);
+		std::vector<uint8_t> whole = clip;
+		SetUnknownSize(whole, lay.segmentSizePos, lay.segmentSizeLen);
+
+		const std::vector<uint8_t> junk(8, 0x55);
+		struct Case { const char* name; uint8_t track; uint8_t flags; uint64_t declared; std::vector<uint8_t> payload; };
+		const Case cases[] = {
+			{"huge video block (4 GB claim)", static_cast<uint8_t>(videoTrack), 0x80, 0xF0000000ull, junk},
+			{"huge audio block (4 GB claim)", static_cast<uint8_t>(audioTrack), 0x80, 0xF0000000ull, junk},
+			{"fixed lacing, no lace byte (size == header)", static_cast<uint8_t>(audioTrack), 0x04, 4, {}},
+			{"fixed lacing, 256 frames in 8 bytes", static_cast<uint8_t>(audioTrack), 0x04, 4 + 1 + 8, {0xFF, 1, 2, 3, 4, 5, 6, 7, 8}},
+			{"xiph lacing runs off the block", static_cast<uint8_t>(videoTrack), 0x02, 4 + 1 + 4, {0x05, 0xFF, 0xFF, 0xFF, 0xFF}},
+			{"ebml lacing with zero sized frames", static_cast<uint8_t>(audioTrack), 0x06, 4 + 1 + 4, {0x03, 0x80, 0x80, 0x80, 0x80}},
+			{"xiph lacing with zero sized frames", static_cast<uint8_t>(audioTrack), 0x02, 4 + 1 + 4, {0x02, 0x00, 0x00, 0x01, 0x02}},
+			{"video block larger than the file", static_cast<uint8_t>(videoTrack), 0x80, 0x01000000ull, junk},
+		};
+		for (const Case& c : cases)
+		{
+			g_context = std::string("malformed-index: ") + c.name;
+			// (a) bad cluster only, (b) appended to the whole good clip
+			std::vector<uint8_t> a = head;
+			AppendBadCluster(a, c.track, c.flags, c.declared, c.payload);
+			std::vector<uint8_t> w = whole;
+			AppendBadCluster(w, c.track, c.flags, c.declared, c.payload);
+			ResetMaxAlloc();
+			bool opened = false;
+			HardenedLoad(a, &opened);
+			CHECK(!opened); // nothing valid in the file
+			HardenedLoad(w, &opened);
+			CHECK(opened);  // the good clusters before the damaged one stay playable
+			CHECKF(MaxAlloc() < kAllocCap, "largest allocation %zu bytes", MaxAlloc());
+		}
+
+		// Truncation at many points: no packet may reach past the end of the file.
+		g_context = "malformed-index: truncation";
+		ResetMaxAlloc();
+		for (int i = 1; i < 40; ++i)
+		{
+			std::vector<uint8_t> cut(clip.begin(), clip.begin() + static_cast<std::ptrdiff_t>(clip.size() * i / 40));
+			HardenedLoad(cut);
+		}
+		// Deterministic byte mutations (header region and blocks).
+		g_context = "malformed-index: mutations";
+		uint32_t rng = 12345;
+		const auto next = [&rng] { rng = rng * 1664525u + 1013904223u; return rng >> 8; };
+		for (int i = 0; i < 120; ++i)
+		{
+			std::vector<uint8_t> m = clip;
+			const int edits = 1 + static_cast<int>(next() % 4);
+			for (int e = 0; e < edits; ++e)
+			{
+				if (next() % 2 == 0 && !lay.blocks.empty())
+				{
+					const RawBlock& blk = lay.blocks[next() % lay.blocks.size()];
+					const size_t at = blk.data + next() % 6; // track, timecode, flags, first payload bytes
+					if (at < m.size())
+						m[at] = static_cast<uint8_t>(next());
+				}
+				else
+				{
+					m[next() % std::min<size_t>(m.size(), 1500)] = static_cast<uint8_t>(next());
+				}
+			}
+			HardenedLoad(m);
+		}
+		CHECKF(MaxAlloc() < kAllocCap, "largest allocation %zu bytes", MaxAlloc());
+	}
+
+	// Vorbis identification header patched to absurd / supported sample rates; PCM ring stays bounded.
+	void TestAudioRateAndRing()
+	{
+		g_context = "audio-rate";
+		std::vector<uint8_t> clip;
+		CHECK(ReadClipBytes("vp8_vorbis.webm", clip));
+		size_t rateAt = 0;
+		const uint8_t sig[7] = {1, 'v', 'o', 'r', 'b', 'i', 's'};
+		for (size_t i = 0; i + 16 < clip.size(); ++i)
+			if (std::memcmp(&clip[i], sig, 7) == 0)
+			{
+				rateAt = i + 7 + 4 + 1; // packet type + "vorbis", version, channels -> sample rate
+				break;
+			}
+		CHECK(rateAt != 0);
+		if (rateAt == 0)
+			return;
+		const auto patchRate = [&](uint32_t rate)
+		{
+			std::vector<uint8_t> m = clip;
+			for (int i = 0; i < 4; ++i)
+				m[rateAt + i] = static_cast<uint8_t>(rate >> (8 * i));
+			return m;
+		};
+		for (uint32_t rate : {0x10000000u, 0xFFFFFFFFu, 384001u, 400000u})
+		{
+			g_context = "audio-rate " + std::to_string(rate);
+			ResetMaxAlloc();
+			std::vector<uint8_t> m = patchRate(rate);
+			std::unique_ptr<WebmDemuxer> d;
+			CHECK(Succeeded(WebmDemuxer::Open(std::make_unique<MemoryByteSource>(std::vector<uint8_t>(m)), d, nullptr, nullptr)));
+			if (d && d->HasAudio())
+			{
+				std::unique_ptr<AudioDecoder> ad;
+				CHECK(Failed(AudioDecoder::Create(d->Audio(), ad)));
+			}
+			PlayerCore p;
+			CHECK(Succeeded(p.Load(std::make_unique<MemoryByteSource>(std::move(m)))));
+			CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+			CHECK(p.GetLoadState() == LoadState::Ready); // video plays, the unsupported audio is dropped
+			CHECK(!p.GetInfo().hasAudio);
+			p.Unload();
+			CHECKF(MaxAlloc() < kAllocCap / 4, "largest allocation %zu bytes", MaxAlloc());
+		}
+		{
+			g_context = "audio-rate 384000 + huge audioBufferMs";
+			ResetMaxAlloc();
+			PlayerConfig cfg;
+			cfg.audioBufferMs = 0xFFFFFFF0u;
+			PlayerCore p(cfg);
+			CHECK(Succeeded(p.Load(std::make_unique<MemoryByteSource>(patchRate(384000)))));
+			CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+			CHECK(p.GetLoadState() == LoadState::Ready);
+			CHECK(p.GetInfo().hasAudio && p.GetInfo().audioSampleRate == 384000);
+			// the ring fills up and stops: at most 4 seconds of PCM
+			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			p.Update();
+			const uint32_t buffered = p.AudioBufferedFrames();
+			CHECKF(buffered > 0 && buffered <= 4u * 384000u, "buffered %u", buffered);
+			p.Unload();
+			CHECKF(MaxAlloc() < kAllocCap / 4, "largest allocation %zu bytes", MaxAlloc());
+		}
+		{
+			g_context = "audio-ring cap at the clip's rate";
+			PlayerConfig cfg;
+			cfg.audioBufferMs = 0xFFFFFFF0u;
+			PlayerCore p(cfg);
+			CHECK(Succeeded(p.Load(std::make_unique<MemoryByteSource>(std::vector<uint8_t>(clip)))));
+			CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+			CHECK(p.GetLoadState() == LoadState::Ready);
+			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			p.Update();
+			const uint32_t buffered = p.AudioBufferedFrames();
+			CHECKF(buffered > 0 && buffered <= 4u * 44100u, "buffered %u", buffered);
+		}
+	}
+
+	// Bogus timestamps: playback must still reach Ended (and loop).
+	void TestBogusTimestamps()
+	{
+		g_context = "bogus-pts";
+		std::vector<uint8_t> clip;
+		CHECK(ReadClipBytes("vp8_vorbis.webm", clip));
+		RawLayout lay;
+		if (clip.empty() || !ParseLayout(clip, lay))
+		{
+			CHECK(false);
+			return;
+		}
+		const uint32_t videoTrack = 1;
+		std::vector<size_t> videoBlocks;
+		for (size_t i = 0; i < lay.blocks.size(); ++i)
+			if (lay.blocks[i].track == videoTrack)
+				videoBlocks.push_back(i);
+		CHECK(videoBlocks.size() > 30);
+		if (videoBlocks.size() <= 30)
+			return;
+
+		struct Variant { const char* name; int block; uint8_t hi, lo; };
+		const Variant variants[] = {
+			{"video block 10 jumps +32.8 s", 10, 0x7F, 0xFF},
+			{"video block 20 jumps -32.8 s", 20, 0x80, 0x00},
+		};
+		for (const Variant& v : variants)
+		{
+			g_context = std::string("bogus-pts: ") + v.name;
+			std::vector<uint8_t> m = clip;
+			const RawBlock& blk = lay.blocks[videoBlocks[static_cast<size_t>(v.block)]];
+			m[blk.data + 1] = v.hi; // the track number is one byte (0x81) in this clip
+			m[blk.data + 2] = v.lo;
+			for (int mode = 0; mode < 2; ++mode) // 0: play to Ended, 1: loop
+			{
+				ManualClock clk;
+				PlayerCore p(MakeConfig(clk));
+				CHECK(Succeeded(p.Load(std::make_unique<MemoryByteSource>(std::vector<uint8_t>(m)))));
+				CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+				CHECK(p.GetLoadState() == LoadState::Ready);
+				if (p.GetLoadState() != LoadState::Ready)
+					continue;
+				Sim sim;
+				sim.Init(p, clk);
+				p.SetLoop(mode == 1);
+				CHECK(Succeeded(p.Play()));
+				if (mode == 0)
+				{
+					const bool ended = sim.RunToEnd(p.GetInfo().durationSeconds + 5.0);
+					CHECKF(ended && p.GetState() == PlayerState::Ended, "not ended: t=%.3f presented %llu", clk.NowSeconds(),
+						static_cast<unsigned long long>(sim.presented));
+					CHECK(sim.presented > 60);
+				}
+				else
+				{
+					const uint64_t limit = static_cast<uint64_t>((p.GetInfo().durationSeconds + 5.0) * 3 / sim.step) + 600;
+					while (sim.steps < limit && p.GetLoopCount() < 2)
+						if (!sim.Step())
+							break;
+					CHECKF(p.GetLoopCount() >= 2, "loop count %u", p.GetLoopCount());
+				}
+			}
+		}
+
+		// Timestamp overflow: the first cluster's Timecode rewritten to a huge 8 byte value; pts must stay
+		// clamped, non-negative and non-decreasing (the signed multiplication used to overflow).
+		{
+			g_context = "bogus-pts: cluster timecode overflow";
+			std::vector<uint8_t> m;
+			const size_t cp = lay.firstCluster + 4;
+			uint64_t csize = 0;
+			unsigned clen = 0;
+			CHECK(RawVint(clip, cp, csize, clen));
+			const size_t dataStart = cp + clen;
+			CHECK(clip[dataStart] == 0xE7);
+			const size_t tcLen = 2 + (clip[dataStart + 1] & 0x7F);
+			m.assign(clip.begin(), clip.begin() + static_cast<std::ptrdiff_t>(dataStart));
+			AppendBytes(m, {0xE7, 0x88, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00});
+			m.insert(m.end(), clip.begin() + static_cast<std::ptrdiff_t>(dataStart + tcLen), clip.end());
+			SetUnknownSize(m, cp, clen);
+			SetUnknownSize(m, lay.segmentSizePos, lay.segmentSizeLen);
+			std::unique_ptr<WebmDemuxer> d;
+			const Status st = WebmDemuxer::Open(std::make_unique<MemoryByteSource>(std::vector<uint8_t>(m)), d, nullptr, nullptr);
+			if (Succeeded(st) && d)
+			{
+				CheckIndexBounded(*d, m.size());
+				CHECK(d->HasVideo() && d->VideoPts(d->VideoPacketCount() - 1) <= d->DurationSeconds() + 1.0);
+			}
+			HardenedLoad(m);
+		}
+	}
+
+	// Resolution switch mid-stream: the player must fail cleanly instead of freezing silently.
+	void TestMidStreamResize()
+	{
+		g_context = "mid-stream-resize";
+		std::vector<uint8_t> clip;
+		CHECK(ReadClipBytes("vp8_vorbis.webm", clip));
+		RawLayout lay;
+		if (clip.empty() || !ParseLayout(clip, lay))
+		{
+			CHECK(false);
+			return;
+		}
+		// VP8 keyframe payload: 3 byte frame tag, start code 9D 01 2A, 16 bit width, 16 bit height (14 bit + scale).
+		int patched = 0;
+		std::vector<uint8_t> m = clip;
+		int seen = 0;
+		for (const RawBlock& blk : lay.blocks)
+		{
+			if (blk.track != 1 || !blk.key)
+				continue;
+			const size_t p = blk.data + 4; // one byte track number + timecode + flags
+			if (++seen >= 2 && p + 10 <= m.size() && m[p + 3] == 0x9D && m[p + 4] == 0x01 && m[p + 5] == 0x2A)
+			{
+				m[p + 6] = 0xA0; m[p + 7] = 0x00; // 160 x 90
+				m[p + 8] = 0x5A; m[p + 9] = 0x00;
+				++patched;
+				break;
+			}
+		}
+		if (patched == 0)
+		{
+			Log("  mid-stream-resize: clip has a single keyframe, skipped\n");
+			return;
+		}
+		ManualClock clk;
+		PlayerCore p(MakeConfig(clk));
+		CHECK(Succeeded(p.Load(std::make_unique<MemoryByteSource>(std::move(m)))));
+		CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+		CHECK(p.GetLoadState() == LoadState::Ready);
+		if (p.GetLoadState() != LoadState::Ready)
+			return;
+		CHECK(Succeeded(p.Play()));
+		const auto start = std::chrono::steady_clock::now();
+		while (p.GetLoadState() == LoadState::Ready && p.GetState() != PlayerState::Ended &&
+			std::chrono::steady_clock::now() - start < std::chrono::seconds(10))
+		{
+			clk.Advance(1.0 / 60.0);
+			p.Update();
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		CHECK(p.GetLoadState() == LoadState::Failed);
+		CHECK(p.GetLoadError().status == Status::Unsupported);
+		CHECK(p.GetLoadError().detail == StatusDetail::StreamChanged);
+		p.Unload();
+		CHECK(p.GetLoadState() == LoadState::Unloaded);
+	}
+
+	// ReadAudio() from its own thread while the consumer thread loads / unloads (the engine's audio callback).
+	void TestAudioThreadVersusUnload()
+	{
+		g_context = "audio-thread";
+		std::vector<uint8_t> clip;
+		CHECK(ReadClipBytes("vp8_vorbis.webm", clip));
+		PlayerConfig cfg;
+		cfg.audioBufferMs = 100;
+		PlayerCore p(cfg);
+		std::atomic<bool> stop{false};
+		std::atomic<uint64_t> calls{0};
+		std::thread audio([&]
+		{
+			std::vector<float> buf(2048 * 8);
+			while (!stop.load())
+			{
+				p.ReadAudio(buf.data(), 512);
+				calls.fetch_add(1);
+			}
+		});
+		for (int i = 0; i < 25; ++i)
+		{
+			CHECK(Succeeded(p.Load(std::make_unique<MemoryByteSource>(std::vector<uint8_t>(clip)))));
+			if (i % 3 != 0)
+				WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000);
+			if (p.GetLoadState() == LoadState::Ready)
+			{
+				p.Play();
+				std::this_thread::sleep_for(std::chrono::milliseconds(2 + i % 5));
+				p.Update();
+			}
+			if (i % 4 != 3)
+				p.Unload();
+		}
+		p.Unload();
+		stop = true;
+		audio.join();
+		CHECK(calls.load() > 0);
+	}
+
+	// Byte source that throws (bad_alloc / runtime_error) after a number of reads: exceptions on worker threads
+	// must end up as a failed / ended player, never std::terminate.
+	class ThrowingSource final : public IByteSource
+	{
+	public:
+		ThrowingSource(std::vector<uint8_t> data, uint32_t limit, bool badAlloc, std::atomic<uint32_t>* reads)
+			: m_inner(std::move(data)), m_limit(limit), m_badAlloc(badAlloc), m_reads(reads) {}
+		Status Read(uint64_t offset, void* dst, size_t size) override
+		{
+			if (m_reads->fetch_add(1) >= m_limit)
+			{
+				if (m_badAlloc)
+					throw std::bad_alloc();
+				throw std::runtime_error("source failure");
+			}
+			return m_inner.Read(offset, dst, size);
+		}
+		uint64_t Length() const override { return m_inner.Length(); }
+
+	private:
+		MemoryByteSource m_inner;
+		uint32_t m_limit;
+		bool m_badAlloc;
+		std::atomic<uint32_t>* m_reads;
+	};
+
+	void TestWorkerExceptions()
+	{
+		g_context = "worker-exceptions";
+		std::vector<uint8_t> clip;
+		CHECK(ReadClipBytes("vp8_vorbis.webm", clip));
+		// reads needed to reach Ready
+		std::atomic<uint32_t> readsAtReady{0};
+		{
+			ManualClock clk;
+			PlayerCore p(MakeConfig(clk));
+			CHECK(Succeeded(p.Load(std::make_unique<ThrowingSource>(clip, 0xFFFFFFFFu, true, &readsAtReady))));
+			CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+			CHECK(p.GetLoadState() == LoadState::Ready);
+		}
+		const uint32_t loadReads = readsAtReady.load();
+		for (int kind = 0; kind < 2; ++kind)
+		{
+			const bool badAlloc = kind == 0;
+			g_context = badAlloc ? "worker-exceptions bad_alloc" : "worker-exceptions runtime_error";
+			for (uint32_t limit : {0u, 1u, 7u, loadReads / 2})
+			{
+				std::atomic<uint32_t> reads{0};
+				PlayerCore p;
+				CHECK(Succeeded(p.Load(std::make_unique<ThrowingSource>(clip, limit, badAlloc, &reads))));
+				CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+				CHECK(p.GetLoadState() == LoadState::Failed);
+				CHECK(p.GetLoadError().status != Status::Ok);
+				p.Unload();
+			}
+			// throws after Ready, during playback: the stream counts as ended, the process survives
+			std::atomic<uint32_t> reads{0};
+			ManualClock clk;
+			PlayerCore p(MakeConfig(clk));
+			CHECK(Succeeded(p.Load(std::make_unique<ThrowingSource>(clip, loadReads + 5, badAlloc, &reads))));
+			CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+			CHECK(p.GetLoadState() == LoadState::Ready);
+			if (p.GetLoadState() == LoadState::Ready)
+			{
+				CHECK(Succeeded(p.Play()));
+				const auto start = std::chrono::steady_clock::now();
+				while (p.GetState() != PlayerState::Ended && std::chrono::steady_clock::now() - start < std::chrono::seconds(10))
+				{
+					clk.Advance(1.0 / 60.0);
+					p.Update();
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				CHECK(p.GetState() == PlayerState::Ended);
+				CHECK(p.DecodeErrors() >= 1);
+			}
+		}
+	}
+
 	void TestStress(int iterations)
 	{
 		g_context = "stress";
@@ -1116,9 +1753,19 @@ int main(int argc, char** argv)
 		TestSteadyStateAllocations(*FindClip("av_sync_flash_beep.webm"));
 		TestSteadyStateAllocations(*FindClip("vp8_vorbis.webm"));
 	}
+	if (wanted("harden"))
+	{
+		TestMalformedIndex();
+		TestAudioRateAndRing();
+		TestBogusTimestamps();
+		TestMidStreamResize();
+		TestAudioThreadVersusUnload();
+		TestWorkerExceptions();
+	}
 	if (wanted("stress"))
 		TestStress(stressIterations);
 
+	DecodePool::ShutdownShared(); // the shared pool outlives the players now; release it before the leak check
 #if defined(CEV_CRT_DEBUG)
 	{
 		g_context = "crt-heap";

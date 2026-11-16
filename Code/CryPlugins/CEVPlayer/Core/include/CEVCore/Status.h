@@ -38,6 +38,8 @@ namespace cev
 		FirstFrame,
 		RingInit,
 		PoolRegister,
+		StreamChanged,  // resolution / chroma format / bit depth changed mid-stream (not supported)
+		InternalError,  // an exception (allocation failure) was caught on a worker thread
 	};
 
 	inline bool Succeeded(Status s) { return s == Status::Ok; }

@@ -83,20 +83,44 @@ namespace cev
 
 		if (preload)
 		{
-			std::vector<uint8_t> data(static_cast<size_t>(len));
+			std::vector<uint8_t> data;
+			try
+			{
+				data.resize(static_cast<size_t>(len));
+			}
+			catch (...)
+			{
+				std::fclose(f);
+				return Status::OutOfMemory;
+			}
 			const size_t got = len > 0 ? std::fread(data.data(), 1, data.size(), f) : 0;
 			std::fclose(f);
 			if (got != data.size())
 				return Status::IoError;
-			out = std::make_unique<MemoryByteSource>(std::move(data));
+			try
+			{
+				out = std::make_unique<MemoryByteSource>(std::move(data));
+			}
+			catch (...)
+			{
+				return Status::OutOfMemory;
+			}
 			return Status::Ok;
 		}
 
-		std::unique_ptr<FileByteSource> src = std::make_unique<FileByteSource>(Key{});
-		src->m_file = f;
-		src->m_length = static_cast<uint64_t>(len);
-		src->m_pos = 0;
-		out = std::move(src);
+		try
+		{
+			std::unique_ptr<FileByteSource> src = std::make_unique<FileByteSource>(Key{});
+			src->m_file = f;
+			src->m_length = static_cast<uint64_t>(len);
+			src->m_pos = 0;
+			out = std::move(src);
+		}
+		catch (...)
+		{
+			std::fclose(f);
+			return Status::OutOfMemory;
+		}
 		return Status::Ok;
 	}
 

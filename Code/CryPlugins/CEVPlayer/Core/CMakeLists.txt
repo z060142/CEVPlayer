@@ -111,8 +111,13 @@ source_group("Include" FILES ${CEV_CORE_HEADERS})
 
 if(MSVC)
 	target_compile_options(CEVPlayerCore PRIVATE /W4 /permissive- /utf-8)
+	# The engine builds plugins without /EHsc; Core catches allocation failures internally
+	# (no exception crosses its API), so it needs unwind semantics of its own.
+	target_compile_options(CEVPlayerCore PRIVATE /EHsc)
 	# Third party headers (mkvparser, libvpx, ...) come in through imported targets; keep their warnings out.
 	target_compile_options(CEVPlayerCore PRIVATE /external:W0)
+	# libvpx headers define unused static inline control wrappers; C4505 ignores /external:W0 and the engine builds with /WX.
+	target_compile_options(CEVPlayerCore PRIVATE /wd4505)
 	if(CEV_CORE_STANDALONE)
 		target_compile_options(CEVPlayerCore PRIVATE /WX /MP)
 		target_compile_definitions(CEVPlayerCore PRIVATE _CRT_SECURE_NO_WARNINGS)

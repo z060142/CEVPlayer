@@ -3,11 +3,17 @@
 // Threading model
 //   * Consumer thread (the game's main thread): every method except ReadAudio(). Update() must be called once
 //     per rendered frame; it is the only place frames change.
-//   * Audio thread: ReadAudio() (may be called from any single audio callback thread).
+//   * Audio thread: ReadAudio() (may be called from any single audio callback thread). It only touches atomics
+//     and the mutex protected PCM ring, so it may run concurrently with Load() / Unload() on the consumer thread
+//     (it returns 0 while no audio is loaded). The one thing it cannot survive is the destructor: stop the audio
+//     callback before destroying the PlayerCore.
 //   * Worker threads (DecodePool): Load, demux, decode, convert. They never touch the frame the consumer holds.
 //
 // Load() is asynchronous: a worker opens and indexes the file, creates the decoders and decodes the first
 // frame; only then GetLoadState() becomes Ready. Until then everything else returns NotReady.
+// A Ready player turns Failed (GetLoadError(): Unsupported / StreamChanged) when the stream switches resolution,
+// chroma format or bit depth mid-stream; Update() and the audio then stop, Unload() resets it.
+// No function throws: allocation failures end up as Status::OutOfMemory / a Failed load state.
 #pragma once
 
 #include <cstdint>
@@ -114,7 +120,10 @@ namespace cev
 		// Fills dst with up to `frames` interleaved float frames (GetInfo().audioChannels) and returns the
 		// number of decoded frames delivered. The rest of dst is zero filled (silence on underrun, when not
 		// playing, or while a seek is pending); before Ready / without audio dst is left untouched and 0 is
-		// returned. Does not allocate and never blocks on decoding. Stop the audio thread before Unload().
+		// returned. Does not allocate and never blocks on decoding. Safe against concurrent Load() / Unload()
+		// (see the threading model); the destination must hold `frames * channels` floats for the channel count
+		// of the media currently loaded, so after loading other media re-read GetInfo().audioChannels once the
+		// player is Ready again before sizing the next callback buffer.
 		uint32_t ReadAudio(float* dst, uint32_t frames);
 		// PCM frames ready for ReadAudio() (0 while a seek is pending).
 		uint32_t AudioBufferedFrames() const;
@@ -122,6 +131,7 @@ namespace cev
 		bool AudioDecoderAtEnd() const;      // all audio packets decoded (PCM may still be buffered)
 
 		// ---- diagnostics ----
+		void SetStatsEnabled(bool enabled);  // runtime toggle (PlayerConfig::enableStats is the initial value)
 		StatsSnapshot GetStats() const;
 		void ResetStats();
 		bool VideoBufferedFrame() const;     // a decoded frame is queued and not yet presented

@@ -64,7 +64,9 @@ namespace cev
 	class WebmDemuxer
 	{
 	public:
-		// Takes ownership of the source. `cancel` (optional) is polled while indexing.
+		// Takes ownership of the source. `cancel` (optional) is polled while indexing. Never throws (allocation
+		// failure -> OutOfMemory). Every indexed packet lies inside the source and is capped (64 MB video /
+		// BlockAdditional, 1 MB audio, 4M packets per stream); pts are clamped and non-decreasing per stream.
 		static Status Open(std::unique_ptr<IByteSource> source, std::unique_ptr<WebmDemuxer>& out,
 			StatusDetail* detail = nullptr, const std::atomic<bool>* cancel = nullptr);
 
@@ -99,6 +101,9 @@ namespace cev
 		uint32_t FindAudioPacket(double seconds) const;
 
 	private:
+		static Status OpenImpl(std::unique_ptr<IByteSource> source, std::unique_ptr<WebmDemuxer>& out,
+			StatusDetail* detail, const std::atomic<bool>* cancel);
+
 		std::unique_ptr<IByteSource> m_source;
 		VideoStreamInfo m_video;
 		AudioStreamInfo m_audio;

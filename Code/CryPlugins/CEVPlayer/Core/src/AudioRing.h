@@ -39,7 +39,11 @@ namespace cev
 			m_count = 0;
 		}
 
-		uint32_t Capacity() const { return m_capacity; }
+		uint32_t Capacity() const
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			return m_capacity;
+		}
 
 		uint32_t Buffered() const
 		{
