@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- M3: route="cue". The picture is the silent copy of av_sync_flash_beep (flash + 1 kHz beep at the start of every
+     second), the sound is the CryAudio trigger cev_test_beep (SDL_mixer, the same beep track as a WAV, see
+     tools/make_cue_test_assets.sh). pauseTrigger / resumeTrigger are SDL_mixer event actions on the same sample. -->
+<CEVVideo version="1" route="cue" video="av_sync_flash_beep_silent.webm" avOffsetMs="0"
+          trigger="cev_test_beep" pauseTrigger="cev_test_beep_pause" resumeTrigger="cev_test_beep_resume"/>

@@ -458,6 +458,11 @@ namespace CEVPlayer
 		case ESYSTEM_EVENT_LEVEL_LOAD_ERROR:
 			EndLevelLoading("system event");
 			break;
+		case ESYSTEM_EVENT_LEVEL_UNLOAD:
+			// The engine drops the level's audio data: cue triggers are stopped (the pictures go on silently).
+			for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
+				p->OnLevelUnload();
+			break;
 		case ESYSTEM_EVENT_FULL_SHUTDOWN:
 		case ESYSTEM_EVENT_FAST_SHUTDOWN:
 			Shutdown();

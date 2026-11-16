@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- M2a test: mixed route, embedded english, external japanese (audio_ja.webm), a missing file (falls back to the
-     embedded track), a cue-only language (M3: silent + warning) and two markers. -->
+     embedded track), a cue-only language (German: trigger Play_Intro_DE does not exist in the test audio data: warning, video clock) and two markers. -->
 <CEVVideo version="1" route="mixed" video="opus_preskip.webm" avOffsetMs="0">
   <Languages default="english">
     <Language name="english" embedded="1"/>

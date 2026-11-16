@@ -1,0 +1,428 @@
+diff --git a/Code/CryEngine/CryAudioSystem/Common/IObject.h b/Code/CryEngine/CryAudioSystem/Common/IObject.h
+index 65ae805..43bd340 100644
+--- a/Code/CryEngine/CryAudioSystem/Common/IObject.h
++++ b/Code/CryEngine/CryAudioSystem/Common/IObject.h
+@@ -117,6 +117,17 @@ struct IObject
+ 	 * @return void
+ 	 */
+ 	virtual void DrawDebugInfo(IRenderAuxGeom& auxGeom, float const posX, float posY, char const* const szTextFilter) = 0;
++
++	// CEVPlayer patch 02-cryaudio-trigger-position: appended last (no existing vtable slot moves), with a default so
++	// that every other implementation (Wwise, FMOD, Adx2, PortAudio, ...) compiles and behaves as before.
++	/**
++	 * Playback position of the most recently started event of this object that is still playing.
++	 * Called from the game's main thread (NOT the audio thread): an implementation must only read thread safe state.
++	 * @param triggerId - ID of the system trigger (may be ignored if the implementation cannot map events to triggers).
++	 * @param outSeconds - [out] position in seconds.
++	 * @return false when unsupported or nothing is playing.
++	 */
++	virtual bool GetTriggerPlaybackPosition(ControlId const triggerId, float& outSeconds) const { return false; }
+ };
+ } // namespace Impl
+ } // namespace CryAudio
+diff --git a/Code/CryEngine/CryAudioSystem/CryAudioSystem.cpp b/Code/CryEngine/CryAudioSystem/CryAudioSystem.cpp
+index 48b4a49..6231627 100644
+--- a/Code/CryEngine/CryAudioSystem/CryAudioSystem.cpp
++++ b/Code/CryEngine/CryAudioSystem/CryAudioSystem.cpp
+@@ -234,4 +234,14 @@ CEngineModule_CryAudioSystem::~CEngineModule_CryAudioSystem()
+ 	}
+ }
+ } // namespace CryAudio
++
++// CEVPlayer patch 02-cryaudio-trigger-position: probe export. A plug-in finds this symbol with
++// GetProcAddress(GetModuleHandle("CryAudioSystem.dll"), "CEVPlayer_AudioPatched") and may then call
++// CryAudio::IObject::GetTriggerPlaybackPosition(). Returns a bit mask: bit 0 = playback position query exists.
++// (Whether the active audio implementation supports it is answered by the query itself.)
++extern "C" DLL_EXPORT int CEVPlayer_AudioPatched()
++{
++	return 1;
++}
++
+ #include <CryCore/CrtDebugStats.h>
+diff --git a/Code/CryEngine/CryAudioSystem/Object.cpp b/Code/CryEngine/CryAudioSystem/Object.cpp
+index 925feb2..4d84afc 100644
+--- a/Code/CryEngine/CryAudioSystem/Object.cpp
++++ b/Code/CryEngine/CryAudioSystem/Object.cpp
+@@ -37,6 +37,17 @@ void PushRequest(SRequestData const& requestData, SRequestUserData const& userDa
+ 	g_system.PushRequest(request);
+ }
+ 
++//////////////////////////////////////////////////////////////////////////
++bool CObject::GetTriggerPlaybackPosition(ControlId const triggerId, float& outSeconds) const
++{
++	// Runs on the caller's (main) thread. It does not touch m_triggerInstances or any other container owned by
++	// the audio thread: only the implementation object pointer is read and the implementation answers from its own
++	// thread safe state (see Impl::IObject::GetTriggerPlaybackPosition). The caller must not query an object that
++	// it has already passed to ReleaseObject.
++	Impl::IObject const* const pIObject = m_pIObject;
++	return (pIObject != nullptr) && pIObject->GetTriggerPlaybackPosition(triggerId, outSeconds);
++}
++
+ //////////////////////////////////////////////////////////////////////////
+ void CObject::Destruct()
+ {
+diff --git a/Code/CryEngine/CryAudioSystem/Object.h b/Code/CryEngine/CryAudioSystem/Object.h
+index 1938a76..6158fc2 100644
+--- a/Code/CryEngine/CryAudioSystem/Object.h
++++ b/Code/CryEngine/CryAudioSystem/Object.h
+@@ -145,6 +145,7 @@ private:
+ 	virtual void RemoveListener(ListenerId const id, SRequestUserData const& userData = SRequestUserData::GetEmptyObject()) override;
+ 	virtual void ToggleAbsoluteVelocityTracking(bool const enable, SRequestUserData const& userData = SRequestUserData::GetEmptyObject()) override;
+ 	virtual void ToggleRelativeVelocityTracking(bool const enable, SRequestUserData const& userData = SRequestUserData::GetEmptyObject()) override;
++	virtual bool GetTriggerPlaybackPosition(ControlId const triggerId, float& outSeconds) const override;
+ 	// ~CryAudio::IObject
+ 
+ 	void SetActive();
+diff --git a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.cpp b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.cpp
+index 4626a58..177a002 100644
+--- a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.cpp
++++ b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.cpp
+@@ -11,6 +11,7 @@
+ #endif  // CRY_AUDIO_IMPL_SDLMIXER_USE_DEBUG_CODE
+ 
+ #include <SDL_mixer.h>
++#include <chrono>
+ 
+ namespace CryAudio
+ {
+@@ -29,6 +30,227 @@ TChannelQueue g_freeChannels;
+ SampleChannels g_sampleChannels;
+ SChannelData g_channels[g_numMixChannels];
+ 
++//////////////////////////////////////////////////////////////////////////
++// CEVPlayer patch 02-cryaudio-trigger-position: playback position tracking.
++//
++// How the position is measured: the SDL_mixer mixing callback (SDL audio thread) calls the effect registered on a channel
++// with the chunk bytes it mixes into the output for that channel (len, in the device format: Mix_QuerySpec). Counting
++// them gives exactly the number of sample bytes consumed by the mixer, including loops, independent of timers or of the
++// game frame rate. A time stamp taken in the same callback lets a reader interpolate between callbacks (a callback
++// happens every g_bufferSize frames = about 85 ms). The device plays what a callback mixed a little later, so the
++// reported position is "consumed - one buffer + time since the last callback" (an estimate of the audible position, at most
++// two buffers of extrapolation: a paused channel is not mixed, its counter stops and the position freezes).
++//
++// Thread safety: the tracker table is a fixed static array of std::atomic members. Writers: the audio system thread
++// (allocates / initialises a tracker before the channel starts playing) and the SDL threads (effect and done callbacks,
++// both run with the SDL audio device lock held, so they never overlap each other; Mix_HaltChannel also runs the done
++// callback under that lock). The effect callback is the only writer of the counter pair and publishes it with a
++// seqlock. The reader (any thread, the game's main thread in practice) never blocks and never touches an
++// audio thread container: it scans the table, picks the live tracker of the object that was started last and
++// reads the counter pair with the seqlock (retry, give up after a few attempts = "unknown").
++namespace
++{
++constexpr int g_numPositionTrackers = g_numMixChannels; // at most one live tracker per channel
++constexpr int g_positionLeadFrames = 4096;              // = g_bufferSize of Impl.cpp (Mix_OpenAudio): one output buffer
++constexpr double g_maxExtrapolationBuffers = 2.0;
++
++enum : uint32 { TrackerFree = 0, TrackerLive = 1 };
++
++struct SPositionTracker final
++{
++	std::atomic<uint32>      state{ TrackerFree };
++	std::atomic<uint32>      seq{ 0 };               // seqlock of mixedBytes / stampNs, odd = being written
++	std::atomic<void const*> owner{ nullptr };       // the CObject the event instance belongs to
++	std::atomic<uint64>      order{ 0 };             // start order, the highest live one wins a query
++	std::atomic<int64>       mixedBytes{ 0 };
++	std::atomic<int64>       stampNs{ 0 };           // steady clock time of the last effect callback, 0 = none yet
++	std::atomic<uint32>      bytesPerSecond{ 0 };
++	std::atomic<float>       leadSeconds{ 0.0f };    // one output buffer in seconds
++};
++
++SPositionTracker g_positionTrackers[g_numPositionTrackers];
++std::atomic<uint64> g_positionTrackerOrder{ 0 };
++
++int64 PositionNowNs()
++{
++	return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
++// SDL audio thread, once per mixed block of the channel.
++void SDLCALL PositionEffect(int channel, void* pStream, int len, void* pUserData)
++{
++	auto* const pTracker = static_cast<SPositionTracker*>(pUserData);
++
++	if ((pTracker != nullptr) && (len > 0))
++	{
++		int64 const bytes = pTracker->mixedBytes.load(std::memory_order_relaxed) + len;
++		int64 const now = PositionNowNs();
++		uint32 const seq = pTracker->seq.load(std::memory_order_relaxed);
++
++		pTracker->seq.store(seq + 1, std::memory_order_relaxed);
++		std::atomic_thread_fence(std::memory_order_release);
++		pTracker->mixedBytes.store(bytes, std::memory_order_relaxed);
++		pTracker->stampNs.store(now, std::memory_order_relaxed);
++		pTracker->seq.store(seq + 2, std::memory_order_release);
++	}
++}
++
++// Called by SDL_mixer when the effect is removed: the channel finished / was halted, or Mix_UnregisterEffect.
++void SDLCALL PositionEffectDone(int channel, void* pUserData)
++{
++	auto* const pTracker = static_cast<SPositionTracker*>(pUserData);
++
++	if (pTracker != nullptr)
++	{
++		pTracker->owner.store(nullptr, std::memory_order_relaxed);
++		pTracker->state.store(TrackerFree, std::memory_order_release);
++	}
++}
++} // namespace
++
++//////////////////////////////////////////////////////////////////////////
++void BeginPlaybackTracking(int const channel, CObject const* const pObject)
++{
++	if ((channel < 0) || (channel >= g_numMixChannels) || (pObject == nullptr))
++	{
++		return;
++	}
++
++	int frequency = 0;
++	Uint16 format = 0;
++	int numChannels = 0;
++
++	if (Mix_QuerySpec(&frequency, &format, &numChannels) == 0)
++	{
++		return;
++	}
++
++	uint32 const bytesPerSecond = static_cast<uint32>(frequency) * static_cast<uint32>(numChannels) * static_cast<uint32>((format & 0xFF) / 8);
++
++	if (bytesPerSecond == 0)
++	{
++		return;
++	}
++
++	SPositionTracker* pTracker = nullptr;
++
++	for (SPositionTracker& tracker : g_positionTrackers)
++	{
++		uint32 expected = TrackerFree;
++
++		// Only this (audio system) thread allocates; the compare-and-swap just orders us against the free of the SDL threads.
++		if ((tracker.state.load(std::memory_order_acquire) == TrackerFree) && tracker.state.compare_exchange_strong(expected, TrackerLive))
++		{
++			pTracker = &tracker;
++			break;
++		}
++	}
++
++	if (pTracker == nullptr)
++	{
++		return; // no free tracker: this event just has no position
++	}
++
++	// The channel is idle (it comes from the free list), so no SDL thread touches the tracker yet; the tracker only
++	// becomes visible to readers with owner != nullptr and bytes > 0.
++	pTracker->mixedBytes.store(0, std::memory_order_relaxed);
++	pTracker->stampNs.store(0, std::memory_order_relaxed);
++	pTracker->bytesPerSecond.store(bytesPerSecond, std::memory_order_relaxed);
++	pTracker->leadSeconds.store(static_cast<float>(g_positionLeadFrames) / static_cast<float>(frequency), std::memory_order_relaxed);
++	pTracker->order.store(++g_positionTrackerOrder, std::memory_order_relaxed);
++	pTracker->owner.store(pObject, std::memory_order_release);
++
++	// Registered BEFORE the play call: a channel that is not playing is not mixed, so the first mixed block
++	// is already counted. A channel that finished has no effects left (SDL_mixer removes them when it stops).
++	if (Mix_RegisterEffect(channel, &PositionEffect, &PositionEffectDone, pTracker) == 0)
++	{
++		PositionEffectDone(channel, pTracker);
++	}
++}
++
++//////////////////////////////////////////////////////////////////////////
++void EndPlaybackTracking(int const channel)
++{
++	if ((channel >= 0) && (channel < g_numMixChannels))
++	{
++		// Calls PositionEffectDone (frees the tracker) when the effect is registered, does nothing otherwise.
++		Mix_UnregisterEffect(channel, &PositionEffect);
++	}
++}
++
++//////////////////////////////////////////////////////////////////////////
++bool GetObjectPlaybackPosition(CObject const* const pObject, float& outSeconds)
++{
++	if (pObject == nullptr)
++	{
++		return false;
++	}
++
++	SPositionTracker const* pBest = nullptr;
++	uint64 bestOrder = 0;
++
++	for (SPositionTracker const& tracker : g_positionTrackers)
++	{
++		if ((tracker.state.load(std::memory_order_acquire) == TrackerLive) && (tracker.owner.load(std::memory_order_acquire) == pObject))
++		{
++			uint64 const order = tracker.order.load(std::memory_order_relaxed);
++
++			if ((pBest == nullptr) || (order > bestOrder))
++			{
++				pBest = &tracker;
++				bestOrder = order;
++			}
++		}
++	}
++
++	if (pBest == nullptr)
++	{
++		return false;
++	}
++
++	int64 bytes = 0;
++	int64 stamp = 0;
++	bool consistent = false;
++
++	for (int attempt = 0; attempt < 8; ++attempt)
++	{
++		uint32 const seq1 = pBest->seq.load(std::memory_order_acquire);
++
++		if ((seq1 & 1) != 0)
++		{
++			continue;
++		}
++
++		bytes = pBest->mixedBytes.load(std::memory_order_relaxed);
++		stamp = pBest->stampNs.load(std::memory_order_relaxed);
++		std::atomic_thread_fence(std::memory_order_acquire);
++
++		if (pBest->seq.load(std::memory_order_relaxed) == seq1)
++		{
++			consistent = true;
++			break;
++		}
++	}
++
++	uint32 const bytesPerSecond = pBest->bytesPerSecond.load(std::memory_order_relaxed);
++	float const lead = pBest->leadSeconds.load(std::memory_order_relaxed);
++
++	// The tracker may have been freed (and even handed to another event) while it was read: then the answer is "unknown".
++	if (!consistent || (bytes <= 0) || (stamp == 0) || (bytesPerSecond == 0) ||
++	    (pBest->state.load(std::memory_order_acquire) != TrackerLive) ||
++	    (pBest->owner.load(std::memory_order_acquire) != pObject) ||
++	    (pBest->order.load(std::memory_order_relaxed) != bestOrder))
++	{
++		return false;
++	}
++
++	double const mixedSeconds = static_cast<double>(bytes) / static_cast<double>(bytesPerSecond);
++	double const sinceCallback = std::max(0.0, static_cast<double>(PositionNowNs() - stamp) * 1e-9);
++	double const extrapolated = std::min(sinceCallback, g_maxExtrapolationBuffers * static_cast<double>(lead));
++	outSeconds = static_cast<float>(std::max(0.0, mixedSeconds - static_cast<double>(lead) + extrapolated));
++	return true;
++}
++
+ //////////////////////////////////////////////////////////////////////////
+ int GetAbsoluteVolume(int const eventVolume, float const multiplier)
+ {
+diff --git a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.h b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.h
+index 9de52b1..a97b689 100644
+--- a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.h
++++ b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.h
+@@ -3,6 +3,7 @@
+ #pragma once
+ 
+ #include <queue>
++#include <atomic>
+ 
+ struct Mix_Chunk;
+ 
+@@ -50,6 +51,17 @@ struct SChannelData final
+ 
+ extern SChannelData g_channels[g_numMixChannels];
+ 
++// CEVPlayer patch 02-cryaudio-trigger-position: playback position tracking.
++// Every started event instance gets a tracker: a Mix_RegisterEffect callback on its channel counts the bytes the SDL_mixer
++// mixing callback consumed from the sample. The trackers live in a fixed table of atomics (never reallocated, never
++// owned by the audio thread's containers), so the main thread can read them without locks.
++//   BeginPlaybackTracking:  audio thread, on the free channel BEFORE Mix_PlayChannel / Mix_FadeInChannel (no mixed byte is missed)
++//   EndPlaybackTracking:    audio thread, when the play call failed (removes the effect again)
++//   GetObjectPlaybackPosition: any thread
++void BeginPlaybackTracking(int const channel, CObject const* const pObject);
++void EndPlaybackTracking(int const channel);
++bool GetObjectPlaybackPosition(CObject const* const pObject, float& outSeconds);
++
+ float GetVolumeMultiplier(CObject* const pObject, SampleId const sampleId);
+ int   GetAbsoluteVolume(int const eventVolume, float const multiplier);
+ void  GetDistanceAngleToObject(
+diff --git a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Event.cpp b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Event.cpp
+index 122b8a1..1739bf5 100644
+--- a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Event.cpp
++++ b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Event.cpp
+@@ -71,6 +71,9 @@ ETriggerResult CEvent::Execute(IObject* const pIObject, TriggerInstanceId const
+ 				int const mixVolume = GetAbsoluteVolume(m_volume, volumeMultiplier);
+ 				Mix_Volume(channelID, g_isMuted ? 0 : mixVolume);
+ 
++				// CEVPlayer patch 02-cryaudio-trigger-position: count the mixed bytes of this event instance.
++				BeginPlaybackTracking(channelID, pObject);
++
+ 				int channel = -1;
+ 
+ 				if (m_fadeInTime > 0)
+@@ -82,6 +85,11 @@ ETriggerResult CEvent::Execute(IObject* const pIObject, TriggerInstanceId const
+ 					channel = Mix_PlayChannel(channelID, pSample, m_numLoops);
+ 				}
+ 
++				if (channel == -1)
++				{
++					EndPlaybackTracking(channelID);
++				}
++
+ 				if (channel != -1)
+ 				{
+ 					// Get distance and angle from the listener to the object
+diff --git a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Object.cpp b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Object.cpp
+index d6f7a27..9f62acb 100644
+--- a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Object.cpp
++++ b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Object.cpp
+@@ -97,6 +97,14 @@ void CObject::RemoveListener(IListener* const pIListener)
+ 	}
+ }
+ 
++//////////////////////////////////////////////////////////////////////////
++bool CObject::GetTriggerPlaybackPosition(ControlId const triggerId, float& outSeconds) const
++{
++	// Main thread: does not touch m_eventInstances (audio thread). The position comes from the lock free tracker
++	// table in Common.cpp. SDL_mixer connections carry no trigger identity, so triggerId cannot be used.
++	return GetObjectPlaybackPosition(this, outSeconds);
++}
++
+ //////////////////////////////////////////////////////////////////////////
+ void CObject::StopEvent(uint32 const id)
+ {
+diff --git a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Object.h b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Object.h
+index f2b9f03..3477b3b 100644
+--- a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Object.h
++++ b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Object.h
+@@ -44,6 +44,7 @@ public:
+ 	virtual void                   AddListener(IListener* const pIListener) override;
+ 	virtual void                   RemoveListener(IListener* const pIListener) override;
+ 	virtual void                   ToggleFunctionality(EObjectFunctionality const type, bool const enable) override {}
++	virtual bool                   GetTriggerPlaybackPosition(ControlId const triggerId, float& outSeconds) const override;
+ 
+ 	// Below data is only used when CRY_AUDIO_IMPL_SDLMIXER_USE_DEBUG_CODE is defined!
+ 	virtual void DrawDebugInfo(IRenderAuxGeom& auxGeom, float const posX, float posY, char const* const szTextFilter) override {}
+diff --git a/Code/CryEngine/CryCommon/CryAudio/IObject.h b/Code/CryEngine/CryCommon/CryAudio/IObject.h
+index 2aa8980..3fb4b14 100644
+--- a/Code/CryEngine/CryCommon/CryAudio/IObject.h
++++ b/Code/CryEngine/CryCommon/CryAudio/IObject.h
+@@ -149,5 +149,21 @@ struct IObject
+ 	 */
+ 	virtual void ToggleRelativeVelocityTracking(bool const enable, SRequestUserData const& userData = SRequestUserData::GetEmptyObject()) = 0;
+ 	// </interfuscator:shuffle>
++
++	// CEVPlayer patch 02-cryaudio-trigger-position: appended AFTER the last existing virtual function (and outside the
++	// shuffle block) so that no existing vtable slot moves. Callers must only use it when the optional probe export
++	// "CEVPlayer_AudioPatched" (bit 0) of CryAudioSystem.dll exists.
++	/**
++	 * Gets the playback position of a trigger that was started on this object.
++	 * May be called from the main thread at any time (it never waits for the audio thread). Not every audio
++	 * middleware implementation supports it (currently only SDL_mixer); the default says "not supported".
++	 * @param triggerId - ID of the trigger. Implementations that cannot tell which trigger an event belongs to (SDL_mixer)
++	 *                    ignore it and report the most recently started event instance that is still playing on this object.
++	 * @param outSeconds - [out] estimated position in seconds of the sound that is audible now, counted from the start of the event
++	 *                     (a looping event keeps counting). Left untouched when false is returned.
++	 * @return true when outSeconds was written; false when nothing of this object is playing / has been mixed yet, or the
++	 *         implementation does not support the query.
++	 */
++	virtual bool GetTriggerPlaybackPosition(ControlId const triggerId, float& outSeconds) const { return false; }
+ };
+ } // namespace CryAudio

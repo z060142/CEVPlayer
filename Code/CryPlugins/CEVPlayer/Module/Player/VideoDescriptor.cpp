@@ -149,6 +149,15 @@ namespace CEVPlayer
 			out.avOffsetMs = 0.0;
 		}
 
+		out.trigger = Attr(root, "trigger");
+		out.pauseTrigger = Attr(root, "pauseTrigger");
+		out.resumeTrigger = Attr(root, "resumeTrigger");
+		if (out.route == EVideoRoute::Cue && out.trigger.empty())
+		{
+			// not fatal: every <Language> may bring its own trigger
+			LogDebug("descriptor <%s>: route=\"cue\" without a default trigger, languages need their own trigger", path);
+		}
+
 		// ---- sections
 		const int childCount = std::max(0, root->getChildCount());
 		for (int c = 0; c < childCount; ++c)
@@ -189,7 +198,9 @@ namespace CEVPlayer
 					if (file[0] != '\0')
 						lang.file = ResolveSiblingPath(path, file);
 					lang.trigger = Attr(node, "trigger");
-					if (!lang.embedded && lang.file.empty() && lang.trigger.empty())
+					lang.pauseTrigger = Attr(node, "pauseTrigger");
+					lang.resumeTrigger = Attr(node, "resumeTrigger");
+					if (!lang.embedded && lang.file.empty() && lang.trigger.empty() && !(out.route == EVideoRoute::Cue && !out.trigger.empty()))
 					{
 						LogWarning("descriptor <%s>: language <%s> has no embedded / file / trigger, skipped", path, lang.name.c_str());
 						continue;

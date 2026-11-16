@@ -32,3 +32,17 @@
 
 - `D:/coding11/_testproject/CEVTest` 設定音訊 impl 為 SDL_mixer（`s_ImplName CryAudioImplSDLMixer` 或 .cryproject 對應欄位），手寫最小的 ACE 控制檔與資產：把 `av_sync_flash_beep` 的音軌轉成 48 kHz WAV 放進 `audio/sdlmixer/assets/`，建立 trigger `cev_test_beep`；描述檔 `cue_beep.cevvideo` 指向無聲版影片 + 該 trigger。
 - 冒煙：未套 optional patch → 播 cue 片：log 顯示 trigger 執行、「聲音已開始」回呼、時鐘 = internal（警告）；套 patch 後重建 CryAudioSystem + SDL_mixer impl → 時鐘 = cue，`cev_list` 顯示 trigger 位置與影片時間的差 < 1 幀。
+
+## 實作記錄（M3 完成時）
+
+- **patch**：`patches/optional/02-cryaudio-trigger-position.patch`（10 個檔，兩棵樹基底雜湊相同、無 community 變體），細節與執行緒論證見 `patches/README.md` 的「Optional patches」。`tools/apply_patches.sh --with-optional` 才套用。
+- **插件**：`Module/Audio/CueRoute.{h,cpp}`：`CCueClock`（`cev::IClock`）就是 trigger 的 transport。PlayerCore 照常呼叫 Resume / Pause / Seek（loop = `Seek(0)`），時鐘把它轉成 CryAudio 請求：
+  - Resume / 從 0 起的 Seek：`ExecuteTriggerWithCallbacks`（旗標 `CallbackOnExternalOrCallingThread | SubsequentCallbackOnExternalThread`，回呼在主執行緒的 `ExternalUpdate`，`pUserData` 帶 run id，過期的回呼忽略）；收到 `TriggerExecuted` 之前畫面不前進（2 秒逾時 → 影片時鐘 + 警告；`requestResult == Failure` = 沒有這個 trigger → 同樣退回並警告）。
+  - 探測 `CEVPlayer_AudioPatched` 成功且插件用修補過的 `IObject.h` 編譯 → 時間 = trigger 播放位置，與行進估計混合（時間常數 0.12 s，領先 > 0.25 s 立刻對齊，落後 > 0.25 s 等聲音），單調；否則影片時鐘 + 一次警告。`cev_cueForceFallback 1` 強制後者。
+  - Pause / Resume：描述檔 `pauseTrigger` / `resumeTrigger`（SDL_mixer 的 event `type="pause" / "resume"` 動作；它們對**同一物件上同 sample 的播放中實例**生效）。沒有 pauseTrigger 時聲音停不下來（記一次警告；resume 時畫面追上聲音）。
+  - Seek：只有 `t≈0`（loop / replay / stop 後重播）會重新觸發；其他目標停掉聲音，畫面無聲繼續（記一次警告）。Rate 對聲音無效（固定 1x）。
+  - 描述檔：`<CEVVideo trigger= pauseTrigger= resumeTrigger=>` 為預設，`<Language trigger= …>` 覆寫；mixed 路線的 trigger-only 語言也走 cue。
+  - 銷毀 / 卸載 / 關機 / 關卡卸載（`ESYSTEM_EVENT_LEVEL_UNLOAD`）：StopTrigger、移除 listener、ReleaseObject；`gEnv->pAudioSystem` 為空就不碰。
+- `avOffsetMs` 現在對所有路線生效（`PlayerConfig::avOffsetSeconds`）；外部語言音檔的 PlayerCore 用 `decodeVideo = false`；影片先 Ready 而外部音檔還在載入時，Tick 會等它（5 秒逾時才放棄並警告），不再當成失敗。
+- **限制**：位置是估計值（延遲常數 = 一個輸出緩衝 4096 frames，實際裝置佇列可能更深，用 `avOffsetMs` 校正）；`GetTriggerPlaybackPosition` 在 SDL_mixer 取「物件上最近開始、仍在播放」的實例，不認 `triggerId`（每個播放器一個物件一個 trigger 即可）；Wwise / FMOD / PortAudio 回 false（退回影片時鐘）；音量（SetVolume）對 cue 無效；cue 不能 seek 到中間；在社群樹（未修補）建置的插件即使引擎已修補也走影片時鐘。
+- 測試資產：`tools/make_cue_test_assets.sh`（WAV 與無聲影片由 ffmpeg 產生、不進版控）、`tools/test_audio/cev_test.xml`、`tools/test_descriptors/cue_beep.cevvideo`。

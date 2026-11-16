@@ -134,6 +134,7 @@ namespace CEVPlayer
 		REGISTER_CVAR2("cev_muteOnFocusLoss", &mEnv->m_cevMuteOnFocusLoss, 1, VF_NULL, "1 = video audio is muted while the game window has no focus");
 		REGISTER_CVAR2("cev_disableEmbeddedAudio", &mEnv->m_cevDisableEmbeddedAudio, 0, VF_NULL, "1 = videos play silently and the plug-in never initialises the SDL audio subsystem (set it in the .cryproject console_variables to cover the whole run)");
 		REGISTER_CVAR2("cev_variant", &mEnv->m_cevVariant, -1, VF_NULL, "Variant of a .cevvideo descriptor for players loaded afterwards: -1 = automatic (smallest not below the screen height when fullscreen, else the main video), 0 = main video, n = n-th <Variant>");
+		REGISTER_CVAR2("cev_cueForceFallback", &mEnv->m_cevCueForceFallback, 0, VF_NULL, "1 = the cue route (audio from a CryAudio trigger) ignores the optional engine patch and follows the video clock (test of the fallback)");
 		ConsoleRegistrationHelper::Register("cev_volume", &mEnv->m_cevVolume, 1.f, VF_NULL, "Master volume of all videos (0.0 - 1.0), multiplied with the player volume and vp_audio_volume");
 
 		// Legacy (kept for existing projects)
@@ -158,7 +159,7 @@ namespace CEVPlayer
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 
-		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_volume", "vp_debug_log", "vp_debug_draw", "vp_disableLogs", "vp_audio_volume" };
+		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "vp_debug_log", "vp_debug_draw", "vp_disableLogs", "vp_audio_volume" };
 		for (const char* name : variables)
 			pConsole->UnregisterVariable(name, true);
 	}

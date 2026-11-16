@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- M2a test: route="cue" is not implemented before M3 -> no audio, one warning, the video plays silently. -->
+<!-- Cue route with a trigger that does not exist in the audio data (Play_Intro_EN): CryAudio reports the failed request,
+     one warning, the video plays on the video clock without sound. (cue_beep.cevvideo is the working example.) -->
 <CEVVideo version="1" route="cue" video="vp8_vorbis.webm">
   <Languages default="english">
     <Language name="english" trigger="Play_Intro_EN"/>

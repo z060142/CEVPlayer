@@ -9,6 +9,7 @@
 
 #include <CEVPlayer/IVideoPlayer.h>
 
+#include "Audio/CueRoute.h"
 #include "CEVCore/AudioClock.h"
 #include "CEVCore/PlayerCore.h"
 #include "Player/VideoDescriptor.h"
@@ -84,8 +85,11 @@ namespace CEVPlayer
 		uint64_t UploadCount() const { return m_uploads; }
 		EVideoFit Fit() const { return m_fit; }
 		cev::PlayerCore& Core() { return *m_core; }
-		//! "audio" while an audio voice drives the clock (AudioClock), otherwise "internal" (wall clock).
-		const char* ClockSourceName() const { return m_voice >= 0 ? "audio" : "internal"; }
+		//! "audio" while an audio voice drives the clock (AudioClock), "cue" while the playback position of the cue
+		//! trigger does, otherwise "internal" (wall clock / video clock).
+		const char* ClockSourceName() const { return m_voice >= 0 ? "audio" : (m_cueClock ? m_cueClock->SourceName() : "internal"); }
+		//! Level unload: a cue trigger is stopped (the engine drops the level's audio data).
+		void OnLevelUnload();
 		//! Lateness of the picture on screen against the clock (clock time - presented frame timestamp, ms).
 		bool GetAvOffsetMs(double& ms) const;
 		bool IsDestroyed() const { return m_destroyed; }
@@ -113,7 +117,10 @@ namespace CEVPlayer
 			std::string videoPath;
 			std::string externalPath; // external audio file (mixed route), empty = none
 			std::string language;
-			bool cue = false;         // route cue / trigger language: no audio before M3
+			bool cue = false;         // route cue / trigger language: the audio is a CryAudio trigger
+			std::string trigger;      // cue: start trigger (empty = nothing to play)
+			std::string pauseTrigger;
+			std::string resumeTrigger;
 		};
 		enum class ERestore : uint8_t { None, Playing, Paused };
 		struct SBinding
@@ -164,6 +171,7 @@ namespace CEVPlayer
 		// Order matters: the clock is referenced by the cores, so it is declared first (destroyed last); the
 		// voice is removed from the mixer before any of them is reset (StopVoice).
 		std::unique_ptr<cev::AudioClock> m_audioClock; // null: the cores run on their InternalClock
+		std::unique_ptr<CCueClock> m_cueClock;         // cue route: transport of the CryAudio trigger (instead of m_audioClock)
 		std::unique_ptr<cev::PlayerCore> m_core;       // video (and the embedded audio track)
 		std::unique_ptr<cev::PlayerCore> m_audioCore;  // external audio file of a language, audio only
 		uint32_t m_id;
@@ -188,6 +196,7 @@ namespace CEVPlayer
 		double m_reloadTime = 0.0;
 		ERestore m_reloadRestore = ERestore::None;
 		bool m_silentWarned = false;
+		double m_audioWaitSince = -1.0;  // steady seconds: the video core became Ready while the external audio file still loads
 
 		// markers
 		size_t m_markerNext = 0;

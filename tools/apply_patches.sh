@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Apply the CEVPlayer engine patch series (patches/) to a CRYENGINE source tree.
 #
-#   tools/apply_patches.sh <engine-root> [--force]
+#   tools/apply_patches.sh <engine-root> [--force] [--with-optional]
 #
 # Two engine trees are supported, each with its own series:
 #   vanilla    CRYENGINE 5.7.1            patches/NN-*.patch
@@ -12,22 +12,29 @@
 # accepted when it still has its base hash, or when one of the patches touching it is already applied.
 # Unknown tree: refused, unless --force (then the variant whose series applies cleanly is used).
 #
+# Optional patches (patches/optional/NN-*.patch, community override patches/community/optional/NN-*.patch) are NOT part
+# of the series: they are only applied with --with-optional (the plug-in works without them and falls back at run
+# time). Their files are listed in BASE_FILES too, and an already applied optional patch never makes the tree unknown.
+#
 # Idempotent: a patch that is already applied ("git apply --reverse --check" succeeds) is skipped.
 # Nothing is committed; the patches only modify the working tree.
 set -euo pipefail
 
 usage() {
-  echo "usage: apply_patches.sh <engine-root> [--force]" >&2
+  echo "usage: apply_patches.sh <engine-root> [--force] [--with-optional]" >&2
   echo "  Applies patches/*.patch (vanilla 5.7.1) or the community series (CECE) to <engine-root>." >&2
+  echo "  --with-optional  also applies patches/optional/*.patch (community: patches/community/optional/)." >&2
   exit 2
 }
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 engine=""
 force=0
+with_optional=0
 for arg in "$@"; do
   case "$arg" in
     --force) force=1 ;;
+    --with-optional) with_optional=1 ;;
     -h|--help) usage ;;
     -*) echo "apply_patches: unknown option $arg" >&2; usage ;;
     *) [ -z "$engine" ] && engine="$arg" || usage ;;
@@ -61,6 +68,18 @@ series() { # variant
   done
 }
 
+# Optional series of a variant: patches/optional/NN-*.patch, community overrides main per number.
+optional_series() { # variant
+  local variant="$1" p num c
+  for p in "$here"/patches/optional/[0-9][0-9]-*.patch; do
+    num="$(basename "$p")"; num="${num%%-*}"
+    if [ "$variant" = "community" ]; then
+      for c in "$here"/patches/community/optional/"$num"-*.patch; do p="$c"; break; done
+    fi
+    echo "$p"
+  done
+}
+
 is_applied() { git -C "$engine" apply --reverse --check "$1" >/dev/null 2>&1; }
 
 # Does the tree match the variant's BASE_FILES?
@@ -71,7 +90,7 @@ matches_variant() { # variant -> 0/1
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     if is_applied "$p"; then applied_files+="$(patch_files "$p")"$'\n'; fi
-  done < <(series "$variant")
+  done < <(series "$variant"; optional_series "$variant")
   while read -r hash path; do
     case "$hash" in ''|'#'*) continue ;; esac
     [ -f "$engine/$path" ] || { why+="  [$variant] missing: $path"$'
@@ -113,22 +132,35 @@ fi
 echo "apply_patches: $engine -> $variant ($(git -C "$engine" rev-parse --short HEAD 2>/dev/null || echo 'not a git repo'))"
 
 applied=0 skipped=0
-while IFS= read -r p; do
-  [ -n "$p" ] || continue
-  name="${p#"$here/patches/"}"
-  if is_applied "$p"; then
-    echo "already applied: $name"
-    skipped=$((skipped + 1))
-    continue
-  fi
-  if git -C "$engine" apply --check "$p"; then
-    git -C "$engine" apply "$p"
-    echo "applied: $name"
-    applied=$((applied + 1))
-  else
-    echo "apply_patches: $name does not apply cleanly to $engine" >&2
-    echo "apply_patches: (the patches use CRLF like the engine files; an LF checkout will not match)" >&2
-    exit 1
-  fi
-done < <(series "$variant")
+apply_list() { # patch paths on stdin
+  local p name
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    name="${p#"$here/patches/"}"
+    if is_applied "$p"; then
+      echo "already applied: $name"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if git -C "$engine" apply --check "$p"; then
+      git -C "$engine" apply "$p"
+      echo "applied: $name"
+      applied=$((applied + 1))
+    else
+      echo "apply_patches: $name does not apply cleanly to $engine" >&2
+      echo "apply_patches: (the patches use CRLF like the engine files; an LF checkout will not match)" >&2
+      exit 1
+    fi
+  done
+}
+apply_list < <(series "$variant")
+
+if [ "$with_optional" -eq 1 ]; then
+  apply_list < <(optional_series "$variant")
+else
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if is_applied "$p"; then echo "optional, applied earlier (left as is): ${p#"$here/patches/"}"; else echo "optional, not applied (use --with-optional): ${p#"$here/patches/"}"; fi
+  done < <(optional_series "$variant")
+fi
 echo "apply_patches: done ($applied applied, $skipped already applied)"

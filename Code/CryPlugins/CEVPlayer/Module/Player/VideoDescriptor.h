@@ -1,10 +1,13 @@
 // Runtime descriptor of a video asset: "<name>.cevvideo" (XML, read with ISystem::LoadXmlFromFile, read only).
 //
-//   <CEVVideo version="1" route="embedded|mixed|cue" video="intro.webm" avOffsetMs="0">
+//   <CEVVideo version="1" route="embedded|mixed|cue" video="intro.webm" avOffsetMs="0"
+//             trigger="Play_Intro" pauseTrigger="Pause_Intro" resumeTrigger="Resume_Intro">
+//     (trigger / pauseTrigger / resumeTrigger on the root = defaults of the cue route for languages without their own)
 //     <Languages default="english">
 //       <Language name="english" embedded="1"/>                 use the embedded audio track
 //       <Language name="japanese" file="intro.japanese.webm"/>   external WebM (audio only)
-//       <Language name="german" trigger="Play_Intro_DE"/>        cue route (M3)
+//       <Language name="german" trigger="Play_Intro_DE"/>        cue route (M3): CryAudio trigger of this language
+//                 (optional pauseTrigger="..." resumeTrigger="..." per language)
 //     </Languages>
 //     <Variants rule="smallestNotBelowOutput">
 //       <Variant file="intro_720.webm" width="1280" height="720"/>
@@ -31,7 +34,9 @@ namespace CEVPlayer
 		{
 			std::string name;
 			std::string file;      // resolved CryPak path of the external audio file ("" = none)
-			std::string trigger;   // cue route trigger name (M3)
+			std::string trigger;   // cue route trigger name (M3), "" = the root trigger
+			std::string pauseTrigger;  // cue route: event action "pause" trigger, "" = the root one
+			std::string resumeTrigger; // cue route: event action "resume" trigger, "" = the root one
 			bool embedded = false;
 		};
 		struct SVariant
@@ -49,7 +54,10 @@ namespace CEVPlayer
 		std::string path;          // the descriptor itself
 		EVideoRoute route = EVideoRoute::Embedded;
 		std::string video;         // resolved CryPak path of the main video
-		double avOffsetMs = 0.0;   // parsed and reported; not applied yet (the audio clock is the master)
+		double avOffsetMs = 0.0;   // applied with PlayerCore::SetAvOffset (picture later by this much, see PlayerCore.h)
+		std::string trigger;       // cue route default trigger (languages without their own use it)
+		std::string pauseTrigger;  // cue route default pause trigger
+		std::string resumeTrigger; // cue route default resume trigger
 		std::string defaultLanguage;
 		std::vector<SLanguage> languages;
 		std::vector<SVariant> variants;

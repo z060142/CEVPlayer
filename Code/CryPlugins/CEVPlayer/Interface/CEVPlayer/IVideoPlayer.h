@@ -131,7 +131,7 @@ namespace CEVPlayer
 		virtual void Stop() = 0;    //!< back to time 0, shows the first frame
 		virtual void Seek(double seconds) = 0;
 		virtual void SetLoop(bool loop) = 0;
-		virtual void SetRate(float rate) = 0;     //!< playback speed (0 < rate <= 16)
+		virtual void SetRate(float rate) = 0;     //!< playback speed, clamped to 0.25 .. 4 (rate <= 0 / NaN ignored)
 		virtual void SetVolume(float volume) = 0; //!< 0..1, multiplied with the global volumes (cev_volume, vp_audio_volume)
 
 		// ---- queries ----

@@ -2,12 +2,14 @@
 #include "PluginEnv.h"
 #include "ApiTable.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <vector>
 
+#include "CEVCore/PlayerCore.h"
 #include <Cry3DEngine/IMaterial.h>
 #include <CryRenderer/IRenderer.h>
 
@@ -88,12 +90,15 @@ namespace CEVPlayer
 			bool FnSetRate(const SCall& c)
 			{
 				const float rate = c.args[0].f;
-				if (!(rate > 0.f && rate <= 16.f))
+				if (!(rate > 0.f)) // also NaN
 				{
-					LogWarning("api: SetRate(%g) is outside (0, 16], ignored", static_cast<double>(rate));
+					LogWarning("api: SetRate(%g) must be > 0, ignored", static_cast<double>(rate));
 					return false;
 				}
-				c.pPlayer->SetRate(rate);
+				const float clamped = static_cast<float>(std::min(cev::PlayerCore::kMaxRate, std::max(cev::PlayerCore::kMinRate, static_cast<double>(rate))));
+				if (clamped != rate)
+					LogWarning("api: SetRate(%g) is outside [%g, %g], clamped to %g", static_cast<double>(rate), cev::PlayerCore::kMinRate, cev::PlayerCore::kMaxRate, static_cast<double>(clamped));
+				c.pPlayer->SetRate(clamped);
 				return true;
 			}
 			bool FnSetLanguage(const SCall& c) { c.pPlayer->SetLanguage(c.args[0].s.c_str()); return true; }
@@ -174,7 +179,7 @@ namespace CEVPlayer
 			const SParam kLoadParams[]        = { { EType::String, "Path", "CryPak path of a .webm video or a .cevvideo descriptor, e.g. Videos/intro.webm", 0, "" } };
 			const SParam kSeekParams[]        = { { EType::Float, "Seconds", "Target time in seconds", 0, nullptr } };
 			const SParam kSetLoopParams[]     = { { EType::Bool, "Loop", "Restart at 0 when the end is reached", 0, nullptr } };
-			const SParam kSetRateParams[]     = { { EType::Float, "Rate", "Playback speed, 0 < rate <= 16 (1 = normal)", 1.0, nullptr } };
+			const SParam kSetRateParams[]     = { { EType::Float, "Rate", "Playback speed, 0.25 .. 4 (1 = normal; values outside are clamped)", 1.0, nullptr } };
 			const SParam kSetLanguageParams[] = { { EType::String, "Language", "Audio language as named in the .cevvideo descriptor; empty = default choice", 0, "" } };
 			const SParam kSetVolumeParams[]   = { { EType::Float, "Volume", "Player volume 0..1 (multiplied with the global volumes cev_volume / vp_audio_volume)", 1.0, nullptr } };
 			const SParam kSetOutputParams[]   =

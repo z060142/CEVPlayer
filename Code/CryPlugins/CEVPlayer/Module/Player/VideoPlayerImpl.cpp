@@ -3,6 +3,8 @@
 #include "VideoPlayerImpl.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -44,6 +46,14 @@ namespace CEVPlayer
 			cfg.pool = manager.AcquirePool();
 			return cfg;
 		}
+
+		// Seconds on a steady clock (timeouts that must not depend on the game timer / pauses).
+		double SteadySeconds()
+		{
+			return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		}
+		// The external audio file may take this long to load after the video is ready (then the video starts without it).
+		constexpr double kExternalAudioTimeoutSeconds = 5.0;
 
 		bool FileExists(const std::string& path)
 		{
@@ -209,6 +219,7 @@ namespace CEVPlayer
 		m_frameSerial = 0;
 		m_seekPending = false;
 		m_silentWarned = false;
+		m_audioWaitSince = -1.0;
 		m_markerResync = true;
 		m_markerNext = 0;
 		m_markerPrev = 0.0;
@@ -274,16 +285,11 @@ namespace CEVPlayer
 		plan.externalPath.clear();
 		plan.language.clear();
 		plan.cue = false;
+		plan.trigger.clear();
+		plan.pauseTrigger.clear();
+		plan.resumeTrigger.clear();
 		if (!m_descValid)
 			return;
-
-		if (m_desc.route == EVideoRoute::Cue)
-		{
-			plan.cue = true;
-			if (report)
-				LogWarning("player %u: <%s> uses route=\"cue\", which is not implemented before M3: playing without audio", m_id, m_path.c_str());
-			return;
-		}
 
 		// request chain: SetLanguage, g_languageAudio, g_language, descriptor default
 		const char* const candidates[4] = { m_requestedLanguage.c_str(), CVarString("g_languageAudio"), CVarString("g_language"), m_desc.defaultLanguage.c_str() };
@@ -294,6 +300,37 @@ namespace CEVPlayer
 			if (index >= 0)
 				break;
 		}
+
+		if (m_desc.route == EVideoRoute::Cue)
+		{
+			// every language may bring its own trigger, the root attributes are the defaults
+			plan.cue = true;
+			plan.trigger = m_desc.trigger;
+			plan.pauseTrigger = m_desc.pauseTrigger;
+			plan.resumeTrigger = m_desc.resumeTrigger;
+			if (index >= 0)
+			{
+				const SVideoDescriptor::SLanguage& cueLang = m_desc.languages[static_cast<size_t>(index)];
+				plan.language = cueLang.name;
+				if (!cueLang.trigger.empty())
+				{
+					plan.trigger = cueLang.trigger;
+					plan.pauseTrigger = cueLang.pauseTrigger;
+					plan.resumeTrigger = cueLang.resumeTrigger;
+				}
+				else
+				{
+					if (!cueLang.pauseTrigger.empty())
+						plan.pauseTrigger = cueLang.pauseTrigger;
+					if (!cueLang.resumeTrigger.empty())
+						plan.resumeTrigger = cueLang.resumeTrigger;
+				}
+			}
+			if (report && plan.trigger.empty())
+				LogWarning("player %u: <%s> uses route=\"cue\" but has no trigger for language <%s>: playing without audio", m_id, m_path.c_str(), plan.language.c_str());
+			return;
+		}
+
 		if (index < 0)
 			return; // no language matches: the embedded track
 		const SVideoDescriptor::SLanguage& lang = m_desc.languages[static_cast<size_t>(index)];
@@ -310,9 +347,11 @@ namespace CEVPlayer
 		}
 		else if (!lang.embedded && !lang.trigger.empty())
 		{
+			// cue-only language of a mixed video: the audio comes from the CryAudio trigger, the embedded track is not played
 			plan.cue = true;
-			if (report)
-				LogWarning("player %u: language <%s> is a cue trigger (<%s>), not implemented before M3: playing without audio", m_id, lang.name.c_str(), lang.trigger.c_str());
+			plan.trigger = lang.trigger;
+			plan.pauseTrigger = lang.pauseTrigger.empty() ? m_desc.pauseTrigger : lang.pauseTrigger;
+			plan.resumeTrigger = lang.resumeTrigger.empty() ? m_desc.resumeTrigger : lang.resumeTrigger;
 		}
 	}
 
@@ -369,7 +408,11 @@ namespace CEVPlayer
 			Log("player %u: descriptor <%s> route=%s video=<%s> language=<%s>%s%s markers=%u", m_id, path, RouteName(m_desc.route), plan.videoPath.c_str(),
 				plan.language.c_str(), plan.externalPath.empty() ? "" : " external=", plan.externalPath.c_str(), static_cast<unsigned>(m_desc.markers.size()));
 			if (m_desc.avOffsetMs != 0.0)
-				LogWarning("player %u: avOffsetMs=%.1f of <%s> is not applied yet (the audio clock is the master)", m_id, m_desc.avOffsetMs, path);
+			{
+				Log("player %u: avOffsetMs=%.1f of <%s> applied (picture %s)", m_id, m_desc.avOffsetMs, path, m_desc.avOffsetMs > 0.0 ? "later" : "earlier");
+				if (std::fabs(m_desc.avOffsetMs) > cev::PlayerCore::kMaxAvOffsetSeconds * 1000.0)
+					LogWarning("player %u: avOffsetMs=%.1f of <%s> is limited to +-%.0f ms", m_id, m_desc.avOffsetMs, path, cev::PlayerCore::kMaxAvOffsetSeconds * 1000.0);
+			}
 		}
 		if (!FileExists(plan.videoPath))
 		{
@@ -390,6 +433,7 @@ namespace CEVPlayer
 		m_audioCore.reset();
 		m_core.reset();
 		m_audioClock.reset();
+		m_cueClock.reset(); // stops its trigger (destructor)
 
 		const bool dedicated = gEnv == nullptr || gEnv->IsDedicated();
 		const bool audioWanted = mEnv->m_cevAudioEnable != 0 && !dedicated && !plan.cue;
@@ -399,9 +443,21 @@ namespace CEVPlayer
 		const bool external = useClock && !plan.externalPath.empty();
 
 		cev::PlayerConfig cfg = MakeConfig(m_manager);
+		cfg.avOffsetSeconds = m_descValid ? m_desc.avOffsetMs / 1000.0 : 0.0; // all routes (PlayerCore clamps it)
 		if (useClock)
 			m_audioClock = std::make_unique<cev::AudioClock>(CAudioMixer::kDeviceRate);
 		cfg.externalClock = m_audioClock.get();
+		// Cue route: the clock is the transport of the CryAudio trigger. Not affected by cev_disableEmbeddedAudio
+		// (no SDL device of ours is involved); cev_audio_enable = 0 and dedicated servers play it silently.
+		if (plan.cue && !plan.trigger.empty() && mEnv->m_cevAudioEnable != 0 && !dedicated && gEnv != nullptr && gEnv->pAudioSystem != nullptr)
+		{
+			SCueConfig cue;
+			cue.trigger = plan.trigger;
+			cue.pauseTrigger = plan.pauseTrigger;
+			cue.resumeTrigger = plan.resumeTrigger;
+			m_cueClock = std::make_unique<CCueClock>(m_id, cue);
+			cfg.externalClock = m_cueClock.get();
+		}
 		if (embedDisabled && audioWanted)
 		{
 			// Decode just enough to know that the video has audio (reported once), nothing is ever played.
@@ -422,6 +478,7 @@ namespace CEVPlayer
 			acfg.outputRgba = false;
 			acfg.enableStats = false;
 			acfg.decodeAudio = true;
+			acfg.decodeVideo = false; // an external language file is audio only: never decode its picture, even if it has one
 			acfg.externalClock = m_audioClock.get(); // the same clock as the video: the audio is the master
 			acfg.outputSampleRate = CAudioMixer::kDeviceRate;
 			m_audioCore = std::make_unique<cev::PlayerCore>(acfg);
@@ -433,6 +490,8 @@ namespace CEVPlayer
 		StopVoice();
 		m_audioCore.reset();
 		m_core->Unload();
+		if (m_cueClock)
+			m_cueClock->Shutdown(); // trigger stopped, object released; the clock object stays (the core still points to it)
 		m_phase = EPhase::None;
 		m_info = cev::MediaInfo();
 		m_hasAudio = false;
@@ -477,9 +536,13 @@ namespace CEVPlayer
 				m_audioCore.reset();
 			}
 		}
+		else if (m_cueClock)
+		{
+			m_hasAudio = true; // the sound is the CryAudio trigger (the video file itself is silent / its track is not played)
+		}
 		else
 		{
-			m_hasAudio = m_info.hasAudio;
+			m_hasAudio = m_info.hasAudio && !m_plan.cue;
 		}
 		Log("player %u ready: <%s> %dx%d %.2fs%s%s", m_id, m_plan.videoPath.c_str(), m_info.width, m_info.height, m_info.durationSeconds,
 			m_info.hasAlpha ? " alpha" : "", m_hasAudio ? " audio" : "");
@@ -549,6 +612,8 @@ namespace CEVPlayer
 		StopVoice();
 		m_audioCore.reset();
 		m_core->Unload();
+		if (m_cueClock)
+			m_cueClock->Shutdown();
 		m_phase = EPhase::Failed;
 		m_loadStatus = status;
 		m_playPending = false;
@@ -709,8 +774,9 @@ namespace CEVPlayer
 
 	void CVideoPlayerImpl::SetRate(float rate)
 	{
-		if (!(rate > 0.f) || rate > 16.f)
+		if (!(rate > 0.f)) // NaN / <= 0: ignored; the rest is clamped to the range PlayerCore supports (like PlayerCore::SetRate)
 			return;
+		rate = static_cast<float>(std::min(cev::PlayerCore::kMaxRate, std::max(cev::PlayerCore::kMinRate, static_cast<double>(rate))));
 		m_rate = rate;
 		CoresSetRate(static_cast<double>(rate));
 	}
@@ -776,7 +842,7 @@ namespace CEVPlayer
 
 		SPlan next = m_plan;
 		ResolveAudio(next, false);
-		if (next.language == m_plan.language && next.externalPath == m_plan.externalPath && next.cue == m_plan.cue)
+		if (next.language == m_plan.language && next.externalPath == m_plan.externalPath && next.cue == m_plan.cue && next.trigger == m_plan.trigger)
 			return; // same audio source
 		ReloadForLanguage();
 	}
@@ -1115,7 +1181,25 @@ namespace CEVPlayer
 		{
 			const cev::LoadState ls = m_core->GetLoadState();
 			if (ls == cev::LoadState::Ready)
-				OnLoaded();
+			{
+				// The external language file loads in parallel: wait for it (a Ready video must not drop an audio
+				// file that is merely still loading). Failed / Ready-without-audio is handled by OnLoaded().
+				bool audioPending = m_audioCore && m_audioCore->GetLoadState() == cev::LoadState::Loading;
+				if (audioPending)
+				{
+					const double now = SteadySeconds();
+					if (m_audioWaitSince < 0.0)
+						m_audioWaitSince = now;
+					if (now - m_audioWaitSince >= kExternalAudioTimeoutSeconds)
+					{
+						LogWarning("player %u: audio file <%s> still loading after %.0f s, playing without it", m_id, m_plan.externalPath.c_str(), kExternalAudioTimeoutSeconds);
+						m_audioCore.reset();
+						audioPending = false;
+					}
+				}
+				if (!audioPending)
+					OnLoaded();
+			}
 			else if (ls == cev::LoadState::Failed)
 				OnLoadFailed();
 		}
@@ -1230,16 +1314,34 @@ namespace CEVPlayer
 		StopVoice();
 		m_audioCore.reset();
 		m_core->Unload();
+		if (m_cueClock)
+			m_cueClock->Shutdown();
 		m_phase = EPhase::None;
+	}
+
+	void CVideoPlayerImpl::OnLevelUnload()
+	{
+		if (m_cueClock)
+			m_cueClock->OnLevelUnload();
 	}
 
 	void CVideoPlayerImpl::ListState(char* buffer, size_t size) const
 	{
 		const float peak = m_voice >= 0 ? m_manager.Audio().TakeVoicePeak(m_voice) : 0.f;
-		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  uploads=%llu  tex=%s(%d)%s  audio=%s  peak=%.3f  clock=%s  lang=%s  variant=%s  <%s>",
+		char cue[200] = "";
+		if (m_cueClock)
+		{
+			double trigger = 0.0;
+			double media = 0.0;
+			if (m_cueClock->GetDebugPosition(trigger, media))
+				std::snprintf(cue, sizeof(cue), "  cue=<%s> triggerPos=%.3f mediaT=%.3f diff=%+.1fms", m_cueClock->Trigger().c_str(), trigger, media, (trigger - media) * 1000.0);
+			else
+				std::snprintf(cue, sizeof(cue), "  cue=<%s> triggerPos=n/a", m_cueClock->Trigger().c_str());
+		}
+		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  uploads=%llu  tex=%s(%d)%s  audio=%s  peak=%.3f  clock=%s%s  lang=%s  variant=%s  <%s>",
 			m_id, StateName(GetState()), GetTime(), GetDuration(), GetWidth(), GetHeight(), HasAlpha() ? " alpha" : "",
 			static_cast<unsigned long long>(m_uploads), m_textureName.c_str(), m_textureId, m_fullscreen ? "  fullscreen" : "",
-			!m_hasAudio ? "none" : (m_voice >= 0 ? (m_audioCore ? "external" : "embedded") : "silent"), peak, ClockSourceName(),
+			!m_hasAudio ? "none" : (m_voice >= 0 ? (m_audioCore ? "external" : "embedded") : (m_cueClock ? "cue" : "silent")), peak, ClockSourceName(), cue,
 			m_language.empty() ? "-" : m_language.c_str(), m_variantIndex < 0 ? "main" : std::to_string(m_variantIndex).c_str(), m_path.c_str());
 	}
 }

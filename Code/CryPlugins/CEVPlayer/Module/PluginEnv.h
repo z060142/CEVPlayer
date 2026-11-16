@@ -43,6 +43,7 @@ namespace CEVPlayer
 		float m_cevVolume = 1.f;  // cev_volume (master volume 0..1, multiplied with vp_audio_volume)
 		int m_cevMuteOnFocusLoss = 1; // cev_muteOnFocusLoss
 		int m_cevDisableEmbeddedAudio = 0; // cev_disableEmbeddedAudio: never initialise the SDL audio subsystem
+		int m_cevCueForceFallback = 0; // cev_cueForceFallback: 1 = the cue route ignores the engine patch and follows the video clock
 		int m_cevVariant = -1;    // cev_variant: -1 = automatic, 0 = main video, n = n-th <Variant> of the descriptor
 	};
 

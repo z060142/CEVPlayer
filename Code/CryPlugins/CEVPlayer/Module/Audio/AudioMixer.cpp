@@ -244,6 +244,7 @@ namespace CEVPlayer
 			const float startGain = v.gain;
 
 			uint32_t done = 0;
+			uint32_t audible = 0; // frames of this block that came from decoded audio (AudioClock holds until audio is audible)
 			bool starved = false;
 			while (done < frames && !starved)
 			{
@@ -267,15 +268,16 @@ namespace CEVPlayer
 						dst[2u * i + 1u] += m_scratch[2u * i + 1u] * g;
 					}
 				}
+				audible += got;
 				done += n;
 				starved = got < n;
 			}
 			v.gain = target;
 			if (peak > m_peak[voiceIndex].load(std::memory_order_relaxed))
 				m_peak[voiceIndex].store(peak, std::memory_order_relaxed);
-			// The clock counts every block handed to the device, also silence (underrun, paused, ended).
+			// The clock counts every block handed to the device, also silence (underrun, paused, ended); `audible` tells how much of it was real audio.
 			if (v.pClock != nullptr)
-				v.pClock->OnFramesConsumed(frames);
+				v.pClock->OnFramesConsumed(frames, audible);
 		}
 
 		for (uint32_t i = 0; i < frames * 2u; ++i)

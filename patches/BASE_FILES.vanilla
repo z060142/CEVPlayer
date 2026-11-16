@@ -1,3 +1,14 @@
 # <git blob sha1 of the pristine file, line endings normalised to LF>  <path>
 d0d6786c1ecfd6ec524b65c7419400e506d13413  Code/CryPlugins/CMakeLists.txt
 328e0647658778d6042396fcf85fe3c0e81128e3  Tools/CMake/BuildSandbox.cmake
+# optional patches/optional/02-cryaudio-trigger-position.patch (same base hashes in both trees)
+0cac818d6d80c10eef06faf1090e6f149140759a  Code/CryEngine/CryAudioSystem/Common/IObject.h
+0f93e2e69de5c5f2feb80a984daa3df1da3710c1  Code/CryEngine/CryAudioSystem/CryAudioSystem.cpp
+c757dbd4a5599f2131a945f0e666d255748b8c19  Code/CryEngine/CryAudioSystem/Object.cpp
+046fb32b13ad1df518b91cc45fc4d689fe898716  Code/CryEngine/CryAudioSystem/Object.h
+f5c8a4e205ddc4e3250f0c2b97a4823cbde2f27e  Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.cpp
+624e9e912b76a5bbc428ccf2937f257041435192  Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.h
+b05319cb3e2763482c103e720cb11e9275af5522  Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Event.cpp
+05407cf18b3330c917d1124b1b0bf2036f4bc319  Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Object.cpp
+d8b2c0cc6cf545ecf1b1076233637e52f1e7883a  Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Object.h
+ac114f9b160ba44ec09de37470cb1242f8f4c18c  Code/CryEngine/CryCommon/CryAudio/IObject.h

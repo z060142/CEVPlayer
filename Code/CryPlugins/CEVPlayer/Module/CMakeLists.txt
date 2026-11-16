@@ -37,6 +37,8 @@ add_sources("NoUberFile"
     SOURCE_GROUP "Audio"
 		"Audio/AudioMixer.cpp"
 		"Audio/AudioMixer.h"
+		"Audio/CueRoute.cpp"
+		"Audio/CueRoute.h"
 )
 add_sources("NoUberFile"
     SOURCE_GROUP "Render"
