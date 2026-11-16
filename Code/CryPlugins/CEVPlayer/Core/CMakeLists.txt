@@ -46,7 +46,7 @@ endif()
 # SDK locations
 # ---------------------------------------------------------------------------------------------------------------
 get_filename_component(CEV_CORE_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../.." ABSOLUTE)
-set(CEV_SDK_DIR "${CEV_CORE_REPO_ROOT}/Code/SDKs" CACHE PATH "Directory that contains libvpx/ libwebm/ libogg/ libvorbis/ libopus/")
+set(CEV_SDK_DIR "${CEV_CORE_REPO_ROOT}/Code/SDKs" CACHE PATH "Directory that contains CEVPlayer/{libvpx,libwebm,libogg,libvorbis,libopus}/")
 if(NOT DEFINED SDK_DIR)
 	set(SDK_DIR "${CEV_SDK_DIR}") # variable name used by cmake/modules/CEVPlayerSDK.cmake
 endif()
