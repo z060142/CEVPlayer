@@ -9,6 +9,7 @@
 #     SDKs are taken from <repo>/Code/SDKs (override: -DCEV_SDK_DIR=...), the imported SDK targets from
 #     <repo>/cmake/modules (override: -DCEV_CMAKE_MODULES_DIR=...).
 #     Extra options: -DCEV_ENABLE_ASAN=ON (MSVC /fsanitize=address), -DCEV_BUILD_SELFTEST=OFF.
+#     offline/ adds CEVPlayerOffline (editor side media tools, M4a) and <build dir>/Release/cevoffline_selftest.exe.
 #
 # (b) Inside a CRYENGINE CMake tree (CMake 3.22 there), from the plugin's Module/CMakeLists.txt, after
 #     CryEngineModule(CEVPlayer ...):
@@ -22,6 +23,8 @@
 #     In this mode no selftest is built and no warning-as-error flag is set; CEV_SDK_DIR / SDK_DIR and the
 #     engine's CMake module directory (TOOLS_CMAKE_DIR) are used when present. The library is plain
 #     C++17 without CRYENGINE headers (it never throws; the STL it uses may still throw bad_alloc).
+#     offline/ also defines CEVPlayerOffline (EXCLUDE_FROM_ALL in this mode: built only when the editor plugin
+#     links it, target_link_libraries(<editor plugin> PRIVATE CEVPlayerOffline); the runtime plugin never does).
 
 cmake_minimum_required(VERSION 3.14)
 
@@ -161,3 +164,8 @@ if(CEV_CORE_STANDALONE)
 		add_test(NAME cevcore_selftest COMMAND cevcore_selftest --media "${CEV_TEST_MEDIA_DIR}")
 	endif()
 endif()
+
+# ---------------------------------------------------------------------------------------------------------------
+# CEVPlayerOffline (editor side, CE independent): probe / WebM audio extract + strip / WAV / Ogg Vorbis
+# ---------------------------------------------------------------------------------------------------------------
+add_subdirectory(offline)
