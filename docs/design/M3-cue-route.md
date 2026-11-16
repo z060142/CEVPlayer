@@ -45,4 +45,5 @@
   - 銷毀 / 卸載 / 關機 / 關卡卸載（`ESYSTEM_EVENT_LEVEL_UNLOAD`）：StopTrigger、移除 listener、ReleaseObject；`gEnv->pAudioSystem` 為空就不碰。
 - `avOffsetMs` 現在對所有路線生效（`PlayerConfig::avOffsetSeconds`）；外部語言音檔的 PlayerCore 用 `decodeVideo = false`；影片先 Ready 而外部音檔還在載入時，Tick 會等它（5 秒逾時才放棄並警告），不再當成失敗。
 - **限制**：位置是估計值（延遲常數 = 一個輸出緩衝 4096 frames，實際裝置佇列可能更深，用 `avOffsetMs` 校正）；`GetTriggerPlaybackPosition` 在 SDL_mixer 取「物件上最近開始、仍在播放」的實例，不認 `triggerId`（每個播放器一個物件一個 trigger 即可）；Wwise / FMOD / PortAudio 回 false（退回影片時鐘）；音量（SetVolume）對 cue 無效；cue 不能 seek 到中間；在社群樹（未修補）建置的插件即使引擎已修補也走影片時鐘。
+- **審查後補強（M3 review）**：`Impl::IObject` 新增的虛函式對「補丁前編譯的實作 DLL」不存在於 vtable；`CryAudioSystem` 的 `CObject::GetTriggerPlaybackPosition` 因此只在已載入的 `CryAudioImplSDLMixer.dll` 匯出 `CEVPlayer_AudioImplPositionPatched` 時才呼叫該虛函式（其餘實作／舊 DLL 直接回 false）。
 - 測試資產：`tools/make_cue_test_assets.sh`（WAV 與無聲影片由 ffmpeg 產生、不進版控）、`tools/test_audio/cev_test.xml`、`tools/test_descriptors/cue_beep.cevvideo`。

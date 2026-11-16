@@ -38,12 +38,21 @@ namespace CEVPlayer
 			CApiPlayers& operator=(const CApiPlayers&) = delete;
 
 			//! Creates a player (nullptr / empty = generated texture name). Returns its handle, 0 on failure.
-			int Create(const char* textureName);
+			//! `componentOwned`: the caller (a Schematyc / CryVS component) owns the player and destroys it itself with
+			//! the component; DestroyScriptOwned() leaves such a player alone.
+			int Create(const char* textureName, bool componentOwned = false);
 			//! Destroys the player and invalidates the handle. False (with a warning) for an invalid handle.
 			bool Destroy(int handle);
 			//! The player behind a handle, nullptr (and a warning when `warn`) for an invalid one.
 			IVideoPlayer* Find(int handle, bool warn = true);
 			uint32_t Count() const { return static_cast<uint32_t>(m_records.size()); }
+
+			//! Destroys every player that is NOT owned by a live component (the ones made through the table's Create:
+			//! FlowGraph nodes, scripts, console tests). Called when the game mode of the editor ends and when a level is
+			//! unloaded: the flow graphs that made them are reset or gone, and a Screen mode player would otherwise stay
+			//! on the screen. Handles of destroyed players become invalid (later calls only warn). Returns the number
+			//! destroyed.
+			uint32_t DestroyScriptOwned();
 
 			//! A skippable player that is playing is stopped by any key / mouse / gamepad button press; the event
 			//! Skipped follows.
@@ -74,6 +83,7 @@ namespace CEVPlayer
 				IVideoPlayer* pPlayer = nullptr;
 				bool skippable = false;
 				bool skipPending = false;
+				bool componentOwned = false;
 				std::vector<IEventSink*> sinks;
 
 				void OnReady(IVideoPlayer& player) override;

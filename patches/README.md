@@ -44,7 +44,10 @@ What it adds (everything is append-only):
   interfuscator shuffle block) with a default that returns `false`; the internal `Impl::IObject` gets the same appended virtual (default `false`) so Wwise /
   FMOD / Adx2 / PortAudio and the NULL audio system compile and behave exactly as before. `CryAudio::CObject` (final, internal to `CryAudioSystem.dll`) overrides
   the public one and forwards to the implementation object; no data member was added to any class, no vtable slot moved (existing, already built modules keep
-  working; a plug-in built against the old header simply never calls the new slot).
+  working; a plug-in built against the old header simply never calls the new slot). One caveat is inherent to appending a virtual to `Impl::IObject`: an
+  *implementation* DLL that was compiled before the patch has a vtable without the new slot. `CryAudioSystem.dll` therefore calls the slot only when the loaded
+  `CryAudioImplSDLMixer.dll` exports the marker `CEVPlayer_AudioImplPositionPatched` (looked up once per module; always true in monolithic builds); every other or
+  stale implementation answers `false` without being called. Still rebuild the implementation targets you use after applying the patch.
 * `CryAudioSystem.dll` exports `extern "C" int CEVPlayer_AudioPatched()` (bit mask, bit 0 = playback position query). The plug-in calls the new virtual only after
   `GetProcAddress(GetModuleHandle("CryAudioSystem.dll"), "CEVPlayer_AudioPatched")` succeeded. (A plug-in compiled against an unpatched header cannot name the new
   member at all: `Audio/CueRoute.cpp` detects that at compile time and then never calls it.)

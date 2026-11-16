@@ -58,6 +58,12 @@ namespace CEVPlayer
 			const char* description;
 			double defNum;       //!< default of Bool / Int / Float parameters
 			const char* defStr;  //!< default of String parameters
+			//! Fixed id of the parameter (a four character code, unique within its entry, never 0). Schematyc stores the
+			//! ports of a function by this id in saved scripts: it MUST NEVER CHANGE once released and is NOT derived from
+			//! the position, so a parameter can be inserted or reordered later without breaking saved scripts. A new
+			//! parameter takes an unused code. (The values of the first parameters are the former positional ids
+			//! 'in00', 'in01', ... so scripts saved before the ids existed keep working.)
+			uint32_t id;
 		};
 
 		enum class EKind : uint8_t { Control, Query, Event };

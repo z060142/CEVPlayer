@@ -79,23 +79,23 @@ namespace CEVPlayer
 	{
 		ReflectSignalBase(desc, Api::eEvent_NewFrame);
 		const Api::SParam& p = EventEntry(Api::eEvent_NewFrame).params[0];
-		desc.AddMember(&CVideoPlayerComponent::SNewFrameSignal::serial, 'seri', p.name, p.name, p.description, 0);
+		desc.AddMember(&CVideoPlayerComponent::SNewFrameSignal::serial, p.id, p.name, p.name, p.description, 0);
 	}
 
 	static void ReflectType(Schematyc::CTypeDesc<CVideoPlayerComponent::SMarkerSignal>& desc)
 	{
 		ReflectSignalBase(desc, Api::eEvent_Marker);
 		const Api::SParam* p = EventEntry(Api::eEvent_Marker).params;
-		desc.AddMember(&CVideoPlayerComponent::SMarkerSignal::name, 'name', p[0].name, p[0].name, p[0].description, Schematyc::CSharedString());
-		desc.AddMember(&CVideoPlayerComponent::SMarkerSignal::time, 'time', p[1].name, p[1].name, p[1].description, 0.f);
+		desc.AddMember(&CVideoPlayerComponent::SMarkerSignal::name, p[0].id, p[0].name, p[0].name, p[0].description, Schematyc::CSharedString());
+		desc.AddMember(&CVideoPlayerComponent::SMarkerSignal::time, p[1].id, p[1].name, p[1].name, p[1].description, 0.f);
 	}
 
 	static void ReflectType(Schematyc::CTypeDesc<CVideoPlayerComponent::SErrorSignal>& desc)
 	{
 		ReflectSignalBase(desc, Api::eEvent_Error);
 		const Api::SParam* p = EventEntry(Api::eEvent_Error).params;
-		desc.AddMember(&CVideoPlayerComponent::SErrorSignal::code, 'code', p[0].name, p[0].name, p[0].description, 0);
-		desc.AddMember(&CVideoPlayerComponent::SErrorSignal::message, 'mesg', p[1].name, p[1].name, p[1].description, Schematyc::CSharedString());
+		desc.AddMember(&CVideoPlayerComponent::SErrorSignal::code, p[0].id, p[0].name, p[0].name, p[0].description, 0);
+		desc.AddMember(&CVideoPlayerComponent::SErrorSignal::message, p[1].id, p[1].name, p[1].name, p[1].description, Schematyc::CSharedString());
 	}
 
 	// ------------------------------------------------------------------------------------------------ functions
@@ -114,7 +114,7 @@ namespace CEVPlayer
 				for (uint32_t i = 0; i < entry.paramCount; ++i)
 				{
 					SPort port;
-					port.id = kInputBase + i;
+					port.id = entry.params[i].id; // fixed per parameter (ApiTable), not the position
 					port.name = entry.params[i].name;
 					port.description = entry.params[i].description;
 					port.pData = MakeDefault(entry.params[i]);
@@ -181,7 +181,6 @@ namespace CEVPlayer
 			}
 
 		private:
-			static constexpr uint32 kInputBase = 'in00';
 			static constexpr uint32 kOutputBase = 'out0';
 
 			struct SPort
@@ -340,7 +339,7 @@ namespace CEVPlayer
 		if (m_handle != 0 && mEnv->pApi->Find(m_handle, false) != nullptr)
 			return true;
 
-		m_handle = mEnv->pApi->Create(m_outputMode == Api::EOutputMode::Texture ? m_name.c_str() : nullptr);
+		m_handle = mEnv->pApi->Create(m_outputMode == Api::EOutputMode::Texture ? m_name.c_str() : nullptr, true);
 		if (m_handle == 0)
 			return false;
 		mEnv->pApi->Subscribe(m_handle, this);

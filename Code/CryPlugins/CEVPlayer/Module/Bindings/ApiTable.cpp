@@ -175,34 +175,34 @@ namespace CEVPlayer
 			bool FnCaps(const SCall& c) { *c.pResult = SValue::FromInt(static_cast<int>(kPluginCaps)); return true; }
 
 			// ======================================================================================== parameters
-			const SParam kCreateParams[]      = { { EType::String, "TextureName", "Name of the output texture, normally \"$something\"; empty = generated \"$cev_video_<w>x<h>_<k>\" (see the TextureName query once loaded)", 0, "" } };
-			const SParam kLoadParams[]        = { { EType::String, "Path", "CryPak path of a .webm video or a .cevvideo descriptor, e.g. Videos/intro.webm", 0, "" } };
-			const SParam kSeekParams[]        = { { EType::Float, "Seconds", "Target time in seconds", 0, nullptr } };
-			const SParam kSetLoopParams[]     = { { EType::Bool, "Loop", "Restart at 0 when the end is reached", 0, nullptr } };
-			const SParam kSetRateParams[]     = { { EType::Float, "Rate", "Playback speed, 0.25 .. 4 (1 = normal; values outside are clamped)", 1.0, nullptr } };
-			const SParam kSetLanguageParams[] = { { EType::String, "Language", "Audio language as named in the .cevvideo descriptor; empty = default choice", 0, "" } };
-			const SParam kSetVolumeParams[]   = { { EType::Float, "Volume", "Player volume 0..1 (multiplied with the global volumes cev_volume / vp_audio_volume)", 1.0, nullptr } };
+			const SParam kCreateParams[]      = { { EType::String, "TextureName", "Name of the output texture, normally \"$something\"; empty = generated \"$cev_video_<w>x<h>_<k>\" (see the TextureName query once loaded)", 0, "", 'in00' } };
+			const SParam kLoadParams[]        = { { EType::String, "Path", "CryPak path of a .webm video or a .cevvideo descriptor, e.g. Videos/intro.webm", 0, "", 'in00' } };
+			const SParam kSeekParams[]        = { { EType::Float, "Seconds", "Target time in seconds", 0, nullptr, 'in00' } };
+			const SParam kSetLoopParams[]     = { { EType::Bool, "Loop", "Restart at 0 when the end is reached", 0, nullptr, 'in00' } };
+			const SParam kSetRateParams[]     = { { EType::Float, "Rate", "Playback speed, 0.25 .. 4 (1 = normal; values outside are clamped)", 1.0, nullptr, 'in00' } };
+			const SParam kSetLanguageParams[] = { { EType::String, "Language", "Audio language as named in the .cevvideo descriptor; empty = default choice", 0, "", 'in00' } };
+			const SParam kSetVolumeParams[]   = { { EType::Float, "Volume", "Player volume 0..1 (multiplied with the global volumes cev_volume / vp_audio_volume)", 1.0, nullptr, 'in00' } };
 			const SParam kSetOutputParams[]   =
 			{
-				{ EType::Int,    "Mode", "0 = Texture only (the named texture), 1 = Screen (fullscreen on the top layer), 2 = Material (bind to a texture slot of a material)", 0, nullptr },
-				{ EType::String, "Name", "Mode Material: material name (empty = the entity's own material where there is one). Mode Texture: informational, the texture name is chosen by Create", 0, "" },
-				{ EType::Int,    "Slot", "Mode Material: texture slot (EEfResTextures value, 0 = diffuse)", 0, nullptr },
-				{ EType::Int,    "SubMaterial", "Mode Material: sub-material index, -1 = the material itself", -1.0, nullptr },
-				{ EType::Int,    "Fit", "Mode Screen: 0 = Fill (stretch), 1 = Fit (keep aspect, scene visible in the bars), 2 = Letterbox (keep aspect, black bars)", 2.0, nullptr },
+				{ EType::Int,    "Mode", "0 = Texture only (the named texture), 1 = Screen (fullscreen on the top layer), 2 = Material (bind to a texture slot of a material)", 0, nullptr, 'in00' },
+				{ EType::String, "Name", "Mode Material: material name (empty = the entity's own material where there is one). Mode Texture: informational, the texture name is chosen by Create", 0, "", 'in01' },
+				{ EType::Int,    "Slot", "Mode Material: texture slot (EEfResTextures value, 0 = diffuse)", 0, nullptr, 'in02' },
+				{ EType::Int,    "SubMaterial", "Mode Material: sub-material index, -1 = the material itself", -1.0, nullptr, 'in03' },
+				{ EType::Int,    "Fit", "Mode Screen: 0 = Fill (stretch), 1 = Fit (keep aspect, scene visible in the bars), 2 = Letterbox (keep aspect, black bars)", 2.0, nullptr, 'in04' },
 			};
-			const SParam kSetVariantParams[]  = { { EType::Int, "Variant", "-2 = follow the cvar cev_variant, -1 = automatic, 0 = main video, n = n-th variant of the .cevvideo descriptor", -2.0, nullptr } };
-			const SParam kSetSkippableParams[] = { { EType::Bool, "Skippable", "A key / mouse / gamepad button press stops the video while it plays and sends the Skipped event", 0, nullptr } };
+			const SParam kSetVariantParams[]  = { { EType::Int, "Variant", "-2 = follow the cvar cev_variant, -1 = automatic, 0 = main video, n = n-th variant of the .cevvideo descriptor", -2.0, nullptr, 'in00' } };
+			const SParam kSetSkippableParams[] = { { EType::Bool, "Skippable", "A key / mouse / gamepad button press stops the video while it plays and sends the Skipped event", 0, nullptr, 'in00' } };
 
-			const SParam kNewFrameParams[]    = { { EType::Int, "Serial", "Number of the uploaded picture (counts up, wraps at 2^31)", 0, nullptr } };
+			const SParam kNewFrameParams[]    = { { EType::Int, "Serial", "Number of the uploaded picture (counts up, wraps at 2^31)", 0, nullptr, 'seri' } };
 			const SParam kMarkerParams[]      =
 			{
-				{ EType::String, "Name", "Marker name from the .cevvideo descriptor", 0, "" },
-				{ EType::Float,  "Time", "Marker time in the media (seconds)", 0, nullptr },
+				{ EType::String, "Name", "Marker name from the .cevvideo descriptor", 0, "", 'name' },
+				{ EType::Float,  "Time", "Marker time in the media (seconds)", 0, nullptr, 'time' },
 			};
 			const SParam kErrorParams[]       =
 			{
-				{ EType::Int,    "Code", "Status code of the failure", 0, nullptr },
-				{ EType::String, "Message", "Short text, may be empty", 0, "" },
+				{ EType::Int,    "Code", "Status code of the failure", 0, nullptr, 'code' },
+				{ EType::String, "Message", "Short text, may be empty", 0, "", 'mesg' },
 			};
 
 #define CEV_ARRAY(a) a, static_cast<uint32_t>(sizeof(a) / sizeof(a[0]))
@@ -216,7 +216,7 @@ namespace CEVPlayer
 				{ EKind::Control, "CC294648-3872-4574-B532-8599A1EF0872"_cry_guid, "Play", "Plays from Stopped / Paused / Ended; queued while the video is loading.", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnPlay },
 				{ EKind::Control, "9A5627F9-47EE-40F7-A272-1C3E21562BD6"_cry_guid, "Pause", "Pauses playback.", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnPause },
 				{ EKind::Control, "1750FB12-2102-4635-98D3-361F88B7F73F"_cry_guid, "Resume", "Continues a paused video.", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnResume },
-				{ EKind::Control, "40BDAADD-C428-4A47-A16C-930B74F4EC42"_cry_guid, "Stop", "Stops and goes back to time 0 (the first frame stays visible).", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnStop },
+				{ EKind::Control, "40BDAADD-C428-4A47-A16C-930B74F4EC42"_cry_guid, "Stop", "Stops and goes back to time 0. A Screen output is hidden until the next Play; a texture / material output keeps showing the first frame.", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnStop },
 				{ EKind::Control, "C89FA6A6-1EDF-4BDA-A6A6-5C08915A887C"_cry_guid, "Seek", "Jumps to a time in seconds.", CEV_ARRAY(kSeekParams), EType::Void, nullptr, false, 0, &FnSeek },
 				{ EKind::Control, "ACDCF5FB-070D-439A-B430-A92609F06348"_cry_guid, "SetLoop", "Sets looping.", CEV_ARRAY(kSetLoopParams), EType::Void, nullptr, false, 0, &FnSetLoop },
 				{ EKind::Control, "510FE2B6-D098-4C1A-9C7E-D74B77A1D22F"_cry_guid, "SetRate", "Sets the playback speed.", CEV_ARRAY(kSetRateParams), EType::Void, nullptr, false, 0, &FnSetRate },
@@ -438,6 +438,19 @@ namespace CEVPlayer
 						{
 							LogWarning("api table: <%s> parameter %u is malformed", e.name, i);
 							++problems;
+						}
+						if (e.params[i].id == 0)
+						{
+							LogWarning("api table: <%s> parameter %u has no fixed id", e.name, i);
+							++problems;
+						}
+						for (uint32_t j = 0; j < i; ++j)
+						{
+							if (e.params[j].id == e.params[i].id)
+							{
+								LogWarning("api table: <%s> parameters %u and %u share the id 0x%08x", e.name, j, i, e.params[i].id);
+								++problems;
+							}
 						}
 					}
 					if ((e.kind == EKind::Event) != (e.fn == nullptr))

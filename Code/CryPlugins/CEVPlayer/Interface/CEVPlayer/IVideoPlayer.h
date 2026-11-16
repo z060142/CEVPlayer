@@ -103,6 +103,15 @@ namespace CEVPlayer
 		virtual void OnResumed(IVideoPlayer& player) { (void)player; }
 		virtual void OnStopped(IVideoPlayer& player) { (void)player; }
 		// ---- appended in version 3 ----
+		// COMPATIBILITY: the plug-in is the CALLER of these virtuals. An IVideoPlayerListener implementation built
+		// against a header older than the plug-in's (before version 3 = without OnMarker) has a shorter vtable than
+		// the plug-in expects, and the plug-in then calls a slot that does not exist (undefined behaviour, typically a
+		// crash). There is no run time check (the plug-in cannot see which header a listener was built with):
+		// rebuild every IVideoPlayerListener implementer against the current header, at the latest when
+		// kVideoPlayerInterfaceVersion grows past the version it was built with; compare it with
+		// IVideoPlugin::GetVideoPlayerInterfaceVersion() at start up. The opposite direction is safe (virtuals are
+		// only appended, never inserted or removed: a listener built against a newer header works with an older plug-in,
+		// which simply never calls the callbacks it does not know).
 		//! The playback position reached a marker of the .cevvideo descriptor. `time` is the marker's media
 		//! timestamp in seconds (not the time of the dispatch). Markers fire again after a loop and after a seek
 		//! backwards; a seek forwards skips the markers it jumps over.
@@ -128,7 +137,9 @@ namespace CEVPlayer
 		virtual void Play() = 0;    //!< from Stopped / Paused / Ended; queued while loading
 		virtual void Pause() = 0;
 		virtual void Resume() = 0;
-		virtual void Stop() = 0;    //!< back to time 0, shows the first frame
+		//! Back to time 0. The texture shows the first frame; a player in fullscreen output (SetFullscreen) stops
+		//! drawing until the next Play() (so a stopped or skipped video does not stay on the screen).
+		virtual void Stop() = 0;
 		virtual void Seek(double seconds) = 0;
 		virtual void SetLoop(bool loop) = 0;
 		virtual void SetRate(float rate) = 0;     //!< playback speed, clamped to 0.25 .. 4 (rate <= 0 / NaN ignored)

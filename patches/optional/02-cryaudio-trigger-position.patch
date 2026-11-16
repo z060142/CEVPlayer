@@ -43,10 +43,57 @@ diff --git a/Code/CryEngine/CryAudioSystem/Object.cpp b/Code/CryEngine/CryAudioS
 index 925feb2..4d84afc 100644
 --- a/Code/CryEngine/CryAudioSystem/Object.cpp
 +++ b/Code/CryEngine/CryAudioSystem/Object.cpp
-@@ -37,6 +37,17 @@ void PushRequest(SRequestData const& requestData, SRequestUserData const& userDa
+@@ -20,6 +20,10 @@
+ #include "Common/IObject.h"
+ #include <CryEntitySystem/IEntitySystem.h>
+ #include <CryMath/Cry_Camera.h>
++#include <atomic>
++#if CRY_PLATFORM_WINDOWS && !defined(CRY_IS_MONOLITHIC_BUILD)
++	#include <CryCore/Platform/CryWindows.h>
++#endif
+ 
+ #if defined(CRY_AUDIO_USE_DEBUG_CODE)
+ 	#include "PreviewTrigger.h"
+@@ -37,6 +41,53 @@ void PushRequest(SRequestData const& requestData, SRequestUserData const& userDa
  	g_system.PushRequest(request);
  }
  
++//////////////////////////////////////////////////////////////////////////
++namespace
++{
++// CEVPlayer patch 02-cryaudio-trigger-position appended a virtual to Impl::IObject. An implementation module that was not
++// rebuilt with the patch (a stale CryAudioImplSDLMixer.dll, or any other implementation that was built earlier) has a
++// vtable without that slot: calling it would jump into garbage. Only the patched SDL_mixer implementation exports the
++// marker CEVPlayer_AudioImplPositionPatched, and the slot is called only when the loaded SDL_mixer module has it.
++bool ImplHasPlaybackPosition()
++{
++#if CRY_PLATFORM_WINDOWS && !defined(CRY_IS_MONOLITHIC_BUILD)
++	static std::atomic<HMODULE> s_hModule{ nullptr };
++	static std::atomic<bool> s_supported{ false };
++
++	HMODULE const hImpl = ::GetModuleHandleA("CryAudioImplSDLMixer.dll");
++
++	if (hImpl == nullptr)
++	{
++		return false;
++	}
++
++	if (hImpl != s_hModule.load(std::memory_order_acquire))
++	{
++		// First query (or the implementation module was reloaded): look the marker up once per module.
++		bool const supported = ::GetProcAddress(hImpl, "CEVPlayer_AudioImplPositionPatched") != nullptr;
++		s_supported.store(supported, std::memory_order_relaxed);
++		s_hModule.store(hImpl, std::memory_order_release);
++		return supported;
++	}
++
++	return s_supported.load(std::memory_order_relaxed);
++#else
++	return true;
++#endif
++}
++} // namespace
++
 +//////////////////////////////////////////////////////////////////////////
 +bool CObject::GetTriggerPlaybackPosition(ControlId const triggerId, float& outSeconds) const
 +{
@@ -55,7 +102,7 @@ index 925feb2..4d84afc 100644
 +	// thread safe state (see Impl::IObject::GetTriggerPlaybackPosition). The caller must not query an object that
 +	// it has already passed to ReleaseObject.
 +	Impl::IObject const* const pIObject = m_pIObject;
-+	return (pIObject != nullptr) && pIObject->GetTriggerPlaybackPosition(triggerId, outSeconds);
++	return (pIObject != nullptr) && ImplHasPlaybackPosition() && pIObject->GetTriggerPlaybackPosition(triggerId, outSeconds);
 +}
 +
  //////////////////////////////////////////////////////////////////////////
@@ -313,6 +360,18 @@ index 4626a58..177a002 100644
  //////////////////////////////////////////////////////////////////////////
  int GetAbsoluteVolume(int const eventVolume, float const multiplier)
  {
+@@ -222,3 +444,11 @@ size_t g_loadedSampleSize = 0;
+ }      // namespace SDL_mixer
+ }      // namespace Impl
+ }      // namespace CryAudio
++
++// CEVPlayer patch 02-cryaudio-trigger-position: marker export. CryAudioSystem.dll calls the appended virtual
++// Impl::IObject::GetTriggerPlaybackPosition only when the loaded implementation module exports this symbol, so a module that was
++// built before the patch (vtable without the slot) is never called through it.
++extern "C" DLL_EXPORT int CEVPlayer_AudioImplPositionPatched()
++{
++	return 1;
++}
 diff --git a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.h b/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.h
 index 9de52b1..a97b689 100644
 --- a/Code/CryEngine/CryAudioSystem/implementations/CryAudioImplSDLMixer/Common.h

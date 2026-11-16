@@ -679,6 +679,7 @@ namespace CEVPlayer
 	{
 		if (m_destroyed)
 			return;
+		m_fullscreenHidden = false; // a Stop() hid the fullscreen picture: Play shows it again
 		if (m_phase == EPhase::Loading || m_phase == EPhase::None)
 		{
 			m_playPending = true; // starts as soon as the media is ready
@@ -733,6 +734,7 @@ namespace CEVPlayer
 	{
 		if (m_destroyed)
 			return;
+		m_fullscreenHidden = true; // Stop (also: a skipped video) takes the fullscreen picture off the screen until Play()
 		if (m_phase != EPhase::Ready)
 		{
 			m_playPending = false;
@@ -1340,7 +1342,7 @@ namespace CEVPlayer
 		}
 		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  uploads=%llu  tex=%s(%d)%s  audio=%s  peak=%.3f  clock=%s%s  lang=%s  variant=%s  <%s>",
 			m_id, StateName(GetState()), GetTime(), GetDuration(), GetWidth(), GetHeight(), HasAlpha() ? " alpha" : "",
-			static_cast<unsigned long long>(m_uploads), m_textureName.c_str(), m_textureId, m_fullscreen ? "  fullscreen" : "",
+			static_cast<unsigned long long>(m_uploads), m_textureName.c_str(), m_textureId, m_fullscreen ? (m_fullscreenHidden ? "  fullscreen(hidden)" : "  fullscreen") : "",
 			!m_hasAudio ? "none" : (m_voice >= 0 ? (m_audioCore ? "external" : "embedded") : (m_cueClock ? "cue" : "silent")), peak, ClockSourceName(), cue,
 			m_language.empty() ? "-" : m_language.c_str(), m_variantIndex < 0 ? "main" : std::to_string(m_variantIndex).c_str(), m_path.c_str());
 	}

@@ -125,9 +125,12 @@ namespace CEVPlayer
 			return false;
 
 		Registry()[m_token] = this;
-		pAudio->AddRequestListener(&CCueClock::OnAudioEvent, reinterpret_cast<void*>(m_token),
-			CryAudio::ESystemEvents::TriggerExecuted | CryAudio::ESystemEvents::TriggerFinished);
-		m_listening = true;
+		if (!m_listening) // a failed CreateObject is retried at the next start: register the listener only once
+		{
+			pAudio->AddRequestListener(&CCueClock::OnAudioEvent, reinterpret_cast<void*>(m_token),
+				CryAudio::ESystemEvents::TriggerExecuted | CryAudio::ESystemEvents::TriggerFinished);
+			m_listening = true;
+		}
 
 		char name[48];
 		std::snprintf(name, sizeof(name), "CEVPlayer_cue_%u", m_playerId);

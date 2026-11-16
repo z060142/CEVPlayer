@@ -45,7 +45,7 @@ namespace CEVPlayer
 			Shutdown();
 		}
 
-		int CApiPlayers::Create(const char* textureName)
+		int CApiPlayers::Create(const char* textureName, bool componentOwned)
 		{
 			if (m_shutdown)
 				return 0;
@@ -56,6 +56,7 @@ namespace CEVPlayer
 			pRecord->pOwner = this;
 			pRecord->handle = m_nextHandle++;
 			pRecord->pPlayer = pPlayer;
+			pRecord->componentOwned = componentOwned;
 			pPlayer->AddListener(pRecord.get());
 			const int handle = pRecord->handle;
 			m_records[handle] = std::move(pRecord);
@@ -119,6 +120,27 @@ namespace CEVPlayer
 			UpdateInputListener();
 			LogDebug("api: player handle %d destroyed", handle);
 			return true;
+		}
+
+		uint32_t CApiPlayers::DestroyScriptOwned()
+		{
+			if (m_shutdown)
+				return 0;
+			std::vector<int> handles;
+			for (const std::pair<const int, std::unique_ptr<SRecord>>& entry : m_records)
+			{
+				if (!entry.second->componentOwned)
+					handles.push_back(entry.first);
+			}
+			uint32_t count = 0;
+			for (const int handle : handles)
+			{
+				if (Destroy(handle))
+					++count;
+			}
+			if (count != 0)
+				Log("api: %u script owned player(s) destroyed (game mode ended / level unloaded)", count);
+			return count;
 		}
 
 		// ------------------------------------------------------------------------------------------------ skippable

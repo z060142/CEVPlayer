@@ -54,6 +54,9 @@ namespace CEVPlayer
 		ITexture* GetTexture() const override { return m_pTexture; }
 		void SetFullscreen(bool enable, EVideoFit fit) override;
 		bool IsFullscreen() const override { return m_fullscreen; }
+		//! A fullscreen player that was Stop()ped draws nothing until the next Play() (texture / material outputs keep
+		//! showing the first frame).
+		bool FullscreenHidden() const { return m_fullscreenHidden; }
 		bool BindMaterial(IMaterial* pMaterial, int subMaterial, int textureSlot) override;
 		void UnbindMaterial(IMaterial* pMaterial) override;
 		void AddListener(IVideoPlayerListener* pListener) override;
@@ -228,6 +231,7 @@ namespace CEVPlayer
 		uint64_t m_statsMark = 0;
 
 		bool m_fullscreen = false;
+		bool m_fullscreenHidden = false; // set by Stop(), cleared by Play()
 		EVideoFit m_fit = EVideoFit::Letterbox;
 		std::vector<SBinding> m_bindings;
 		int m_voice = -1;

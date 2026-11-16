@@ -234,6 +234,8 @@ namespace CEVPlayer
 				m_pLegacy->DetachListeners();
 				m_pLegacy->ClearTextureVideos();
 			}
+			if (m_pApi)
+				m_pApi->DestroyScriptOwned(); // players of flow graph nodes / scripts: their graphs are gone, nothing may stay on screen
 			break;
 		case ESYSTEM_EVENT_GAME_PAUSED:
 			if (m_pLegacy)
@@ -250,6 +252,8 @@ namespace CEVPlayer
 				m_pLegacy->DetachListeners(); // the game mode's flow graphs are destroyed now
 				m_pLegacy->ClearTextureVideos();
 			}
+			if (wparam == 0 && m_pApi)
+				m_pApi->DestroyScriptOwned(); // the flow graphs of the game mode are reset: their Screen players must not stay on screen
 			break;
 		}
 		default:

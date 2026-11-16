@@ -139,7 +139,7 @@ namespace CEVPlayer
 						return false;
 					if (m_handle != 0 && mEnv->pApi->Find(m_handle, false) != nullptr)
 						return true;
-					m_handle = mEnv->pApi->Create(m_props.outputMode == Api::EOutputMode::Texture ? m_props.name.c_str() : nullptr);
+					m_handle = mEnv->pApi->Create(m_props.outputMode == Api::EOutputMode::Texture ? m_props.name.c_str() : nullptr, true);
 					if (m_handle == 0)
 						return false;
 					mEnv->pApi->Subscribe(m_handle, this);

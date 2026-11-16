@@ -391,7 +391,7 @@ namespace CEVPlayer
 		s_layers.clear();
 		for (const CVideoPlayerImpl* p : m_fullscreen)
 		{
-			if (!p->IsLoaded() || p->GetTextureId() <= 0)
+			if (!p->IsLoaded() || p->GetTextureId() <= 0 || p->FullscreenHidden())
 				continue;
 			FullscreenOutput::SLayer layer;
 			layer.textureId = p->GetTextureId();

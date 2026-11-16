@@ -6,6 +6,7 @@
 
 #include "Bindings/ApiPlayers.h"
 #include "Bindings/ApiTable.h"
+#include "Player/VideoPlayerImpl.h"
 
 namespace CEVPlayer
 {
@@ -60,7 +61,27 @@ namespace CEVPlayer
 				t.Check(Call(STest::E("Destroy"), t.handle, nullptr, 0, nullptr), "Destroy");
 				SValue ignored;
 				t.Check(!Call(STest::E("State"), t.handle, nullptr, 0, &ignored), "State on the destroyed handle is rejected");
+
+				// script owned players are destroyed by DestroyScriptOwned (game mode ended / level unloaded), component owned stay
+				SValue scriptMade;
+				const SValue noName[1] = { SValue::FromString("") };
+				t.Check(Call(STest::E("Create"), 0, noName, 1, &scriptMade) && scriptMade.i != 0, "Create (script owned)");
+				const int componentMade = mEnv->pApi->Create(nullptr, true);
+				t.Check(componentMade != 0, "Create (component owned)");
+				const uint32_t destroyed = mEnv->pApi->DestroyScriptOwned();
+				t.Check(destroyed >= 1 && mEnv->pApi->Find(scriptMade.i, false) == nullptr, "DestroyScriptOwned destroyed the script owned player (" + std::to_string(destroyed) + ")");
+				t.Check(mEnv->pApi->Find(componentMade, false) != nullptr, "DestroyScriptOwned left the component owned player");
+				if (componentMade != 0)
+					mEnv->pApi->Destroy(componentMade);
+
 				LogAlways("cev_apitest: %s (%d checks, %d failed)", t.failed == 0 ? "PASS" : "FAIL", t.checks, t.failed);
+			}
+
+			//! Stop hides a fullscreen player until Play (CVideoPlayerImpl::FullscreenHidden).
+			bool FullscreenHidden(STest& t)
+			{
+				IVideoPlayer* const pPlayer = mEnv->pApi->Find(t.handle, false);
+				return pPlayer != nullptr && static_cast<CVideoPlayerImpl*>(pPlayer)->FullscreenHidden();
 			}
 		}
 
@@ -139,6 +160,7 @@ namespace CEVPlayer
 			{
 				t.Check(t.Query("State").i == static_cast<int>(EVideoPlayerState::Stopped), "key press stopped the skippable video");
 				t.Check(t.events[eEvent_Skipped] == 1, "Skipped event arrived (" + std::to_string(t.events[eEvent_Skipped]) + ")");
+				t.Check(FullscreenHidden(t), "the skipped video is no longer drawn on the screen");
 				Finish(t);
 				return;
 			}
@@ -163,11 +185,13 @@ namespace CEVPlayer
 
 			t.Check(Call(STest::E("Stop"), t.handle, nullptr, 0, nullptr), "Stop");
 			t.Check(t.Query("State").i == static_cast<int>(EVideoPlayerState::Stopped), "State after Stop is Stopped");
+			t.Check(FullscreenHidden(t), "Stop hides the fullscreen output");
 
 			// skippable: play again, post a key press, the player must stop and send Skipped
 			const SValue skippable[1] = { SValue::FromBool(true) };
 			t.Check(Call(STest::E("SetSkippable"), t.handle, skippable, 1, nullptr), "SetSkippable(true)");
 			t.Check(Call(STest::E("Play"), t.handle, nullptr, 0, nullptr), "Play again");
+			t.Check(!FullscreenHidden(t), "Play shows the fullscreen output again");
 			t.startTime = t.Now();
 			t.step = STest::EStep::SkipPlay;
 		}
