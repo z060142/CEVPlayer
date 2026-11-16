@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings (Git Bash breaks on CRLF), also with core.autocrlf=true.
+*.sh text eol=lf
+# Patches carry the line endings of the engine files they patch (CRLF); never normalise them.
+patches/** -text

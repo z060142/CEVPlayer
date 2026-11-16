@@ -73,11 +73,13 @@ add_sources("CEVPlayer_video_uber_0.cpp"
 		"Video/TextureVideoQueue.cpp"
 		"Video/VideoFileReader.cpp"
 		"Video/VideoPlayer.cpp"
+		"Video/YuvToRgba.cpp"
 		"Video/2DVideoQueue.h"
 		"Video/Packet.h"
 		"Video/TextureVideoQueue.h"
 		"Video/VideoFileReader.h"
 		"Video/VideoPlayer.h"
+		"Video/YuvToRgba.h"
 )
 
 end_sources()
@@ -96,52 +98,19 @@ target_include_directories(${THIS_PROJECT}
 add_definitions("/wd4996 /wd4800")
 set_target_properties(${THIS_PROJECT} PROPERTIES LINK_FLAGS "/ignore:4099 /ignore:4075 /ignore:4098")
 
-# libvpx
-set(LIBVPX_INCLUDE "${SDK_DIR}/_CustomSDKs/libvpx/includes")
-set(LIBVPX_LIB "${SDK_DIR}/_CustomSDKs/libvpx/lib")
+# Third-party SDKs (prebuilt static libs under ${SDK_DIR}/<name>, see Tools/CMake/modules/CEVPlayerSDK.cmake).
+# Libav/swscale is no longer used: the I420 -> RGBA conversion is Video/YuvToRgba.cpp.
+foreach(CEV_SDK libvpx libwebm libogg libvorbis)
+	if(NOT TARGET ${CEV_SDK})
+		include("${TOOLS_CMAKE_DIR}/modules/${CEV_SDK}.cmake")
+	endif()
+endforeach()
 
-# libwebm
-set(LIBWEBM_INCLUDE "${SDK_DIR}/_CustomSDKs/libwebm/includes")
-set(LIBWEBM_LIB "${SDK_DIR}/_CustomSDKs/libwebm/lib")
+# libvorbis (packet level API only, no vorbisfile) pulls in libogg. libopus is not used by this code yet.
+target_link_libraries(${THIS_PROJECT} PRIVATE libvpx libwebm libvorbis libogg)
 
-# libogg
-set(LIBOGG_INCLUDE "${SDK_DIR}/_CustomSDKs/libogg/includes")
-set(LIBOGG_LIB "${SDK_DIR}/_CustomSDKs/libogg/lib")
-
-# libvorbis
-set(LIBVORBIS_INCLUDE "${SDK_DIR}/_CustomSDKs/libvorbis/includes")
-set(LIBVORBIS_LIB "${SDK_DIR}/_CustomSDKs/libvorbis/lib")
-
-# libav
-set(LIBAV_INCLUDE "${SDK_DIR}/_CustomSDKs/libav/include")
-set(LIBAV_LIB "${SDK_DIR}/_CustomSDKs/libav/bin")
-
-include_directories( 
-	${LIBVPX_INCLUDE} 
-	${LIBWEBM_INCLUDE} 
-	${LIBOGG_INCLUDE}
-	${LIBVORBIS_INCLUDE} 
-	${LIBAV_INCLUDE})
-	
-#if(NOT OPTION_STATIC_LINKING)
-	target_link_libraries(${THIS_PROJECT} PRIVATE 
-		${LIBWEBM_LIB}/release/libwebm.lib
-		${LIBVPX_LIB}/libvpx.lib
-		${LIBOGG_LIB}/release/libogg_static.lib
-		${LIBVORBIS_LIB}/release/libvorbis_static.lib
-		${LIBVORBIS_LIB}/release/libvorbisfile_static.lib
-		${LIBAV_LIB}/swscale.lib)
-#else()
-#	set_property(TARGET ${THIS_PROJECT} PROPERTY INTERFACE_LINK_LIBRARIES 
-#		${LIBWEBM_LIB}/release/libwebm.lib
-#		${LIBVPX_LIB}/libvpx.lib
-#		${LIBOGG_LIB}/release/libogg_static.lib
-#		${LIBVORBIS_LIB}/release/libvorbis_static.lib
-#		${LIBVORBIS_LIB}/release/libvorbisfile_static.lib
-#		${LIBAV_LIB}/swscale.lib)
-#endif() 
-
+# SDL2 (audio output): the engine's own SDK/module (2.0.8)
+if(NOT TARGET SDL2)
+	include("${TOOLS_CMAKE_DIR}/modules/SDL2.cmake")
+endif()
 target_link_libraries(${THIS_PROJECT} PRIVATE SDL2)
-
-deploy_runtime_files("${LIBAV_LIB}/avutil-54.dll")
-deploy_runtime_files("${LIBAV_LIB}/swscale-3.dll")

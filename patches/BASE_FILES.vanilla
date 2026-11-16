@@ -1,0 +1,3 @@
+# <git blob sha1 of the pristine file, line endings normalised to LF>  <path>
+d0d6786c1ecfd6ec524b65c7419400e506d13413  Code/CryPlugins/CMakeLists.txt
+328e0647658778d6042396fcf85fe3c0e81128e3  Tools/CMake/BuildSandbox.cmake

@@ -16,7 +16,7 @@
 #include <vpx/vpx_decoder.h>
 #include <vpx/vp8dx.h>
 
-#include <mkvparser/mkvparser.hpp>
+#include <mkvparser/mkvparser.h>
 
 #include "Audio/AudioDecoder.h"
 
@@ -32,12 +32,6 @@
 #include "Packet.h"
 
 #include <CEVPlayer/IVideoPluginListeners.h>
-
-extern "C"
-{
-	#pragma warning( disable : 4244 )
-	#include <libswscale/swscale.h>
-}
 
 namespace CEVPlayer
 {
@@ -181,7 +175,6 @@ namespace CEVPlayer
 		SVideoInfo                     m_info;
 
 		std::vector<IVideoPlayerEventListener*> m_Listeners;
-		SwsContext* m_pSwsContext;
 		std::string                    m_fileName;
 		std::string                    m_videoName;
 	};

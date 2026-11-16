@@ -14,3 +14,6 @@
 
 # Log files
 *.log
+
+# Generated test clips (tools/make_test_media.sh)
+/test_media/

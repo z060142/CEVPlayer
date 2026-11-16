@@ -6,6 +6,7 @@
 #include "VideoPlayer.h"
 #include "Core/Timer.h"
 #include "Core/ThreadManager.h"
+#include "Video/YuvToRgba.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -46,7 +47,6 @@ namespace CEVPlayer
 		, m_rgbaWidth(0)
 		, m_rgbaHeight(0)
 		, m_rgbaSize(0)
-		, m_pSwsContext(nullptr)
 		, m_tracks(nullptr)
 	{
 		m_packetPool = new ObjectPool<CPacket>(1024 * 4);
@@ -208,28 +208,10 @@ namespace CEVPlayer
 				// alloc framebuffer
 				m_frameBuffer = new CVideoFrameBuffer(this, m_info.width, m_info.height, 4);
 
-				// video width, height and frame size
-				m_rgbaWidth = (m_info.width >> 2) << 2;
-				m_rgbaHeight = (m_info.height >> 2) << 2;
+				// RGBA output has the full video size (the I420 -> RGBA conversion handles odd sizes)
+				m_rgbaWidth = m_info.width;
+				m_rgbaHeight = m_info.height;
 				m_rgbaSize = m_rgbaWidth * m_rgbaHeight * 4;
-
-				if (m_pSwsContext == nullptr)
-				{
-					m_pSwsContext = sws_getContext(m_rgbaWidth, m_rgbaHeight, AV_PIX_FMT_YUV420P,
-						m_rgbaWidth, m_rgbaHeight, AV_PIX_FMT_RGBA,
-						SWS_BILINEAR, nullptr, nullptr, nullptr);
-
-					if (m_pSwsContext == nullptr)
-					{
-						LogError("<CRenderWrapper> Can't create sws context!");
-						return SVideoPlayerResult::FailedInitializeVideoDecoder;
-					}
-				}
-				else
-				{
-					LogError("<CRenderWrapper> Can't create sws context - previous not deleted!");
-					return SVideoPlayerResult::FailedInitializeVideoDecoder;
-				}
 
 				m_decoderData.initialized = true;
 				m_hasVideo = true;
@@ -321,9 +303,6 @@ namespace CEVPlayer
 		SAFE_DELETE_11(m_frameBuffer);
 
 		SAFE_DELETE_11(m_packetPool);
-
-		sws_freeContext(m_pSwsContext);
-		m_pSwsContext = nullptr;
 	}
 
 	void CVideoPlayer::reset()
@@ -378,13 +357,15 @@ namespace CEVPlayer
 		CVideoFrame* curYUV = m_frameBuffer->lockWrite(time);
 		if (curYUV != nullptr)
 		{
-			int linesize[1];
-			linesize[0] = curYUV->displayWidth() * 4;
+			const vpx_image_t* img = m_decoderData.img;
+			const int width = (int)(std::min<size_t>)(curYUV->displayWidth(), img->d_w);
+			const int height = (int)(std::min<size_t>)(curYUV->displayHeight(), img->d_h);
 
-			uint8_t* outData[1];
-			outData[0] = curYUV->rgba();
-
-			sws_scale(m_pSwsContext, m_decoderData.img->planes, m_decoderData.img->stride, 0, curYUV->displayHeight(), outData, linesize);
+			ConvertI420ToRgba(img->planes[VPX_PLANE_Y], img->stride[VPX_PLANE_Y],
+				img->planes[VPX_PLANE_U], img->stride[VPX_PLANE_U],
+				img->planes[VPX_PLANE_V], img->stride[VPX_PLANE_V],
+				width, height,
+				curYUV->rgba(), (int)(curYUV->displayWidth() * 4));
 		}
 
 		m_frameBuffer->unlockWrite();

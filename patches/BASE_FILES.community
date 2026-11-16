@@ -1,0 +1,2 @@
+# <git blob sha1 of the pristine file, line endings normalised to LF>  <path>
+a4bd84ca96530f36c37b4b68080742ebd62ab8ec  Tools/CMake/BuildSandbox.cmake

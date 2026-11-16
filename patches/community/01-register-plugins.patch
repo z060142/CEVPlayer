@@ -1,0 +1,14 @@
+diff --git a/Tools/CMake/BuildSandbox.cmake b/Tools/CMake/BuildSandbox.cmake
+index 6cd85e8..af20c14 100644
+--- a/Tools/CMake/BuildSandbox.cmake
++++ b/Tools/CMake/BuildSandbox.cmake
+@@ -54,6 +54,9 @@ if (PLUGIN_CRYVS)
+ 	add_subdirectory("Code/Sandbox/Plugins/EditorCryVS")
+ endif()
+ add_subdirectory("Code/Sandbox/Plugins/EditorTrackView")
++if (EXISTS "${CRYENGINE_DIR}/Code/Sandbox/Plugins/EditorCEVPlayer/CMakeLists.txt")
++	add_subdirectory("Code/Sandbox/Plugins/EditorCEVPlayer")
++endif()
+ add_subdirectory("Code/Sandbox/Plugins/EditorBehaviorTree")
+ add_subdirectory("Code/Sandbox/Plugins/EditorUDR")
+ add_subdirectory("Code/Sandbox/Plugins/EditorGameSDK")

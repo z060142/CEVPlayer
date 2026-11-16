@@ -1,0 +1,31 @@
+diff --git a/Code/CryPlugins/CMakeLists.txt b/Code/CryPlugins/CMakeLists.txt
+index 3b3cef4..f783f36 100644
+--- a/Code/CryPlugins/CMakeLists.txt
++++ b/Code/CryPlugins/CMakeLists.txt
+@@ -29,4 +29,9 @@ add_subdirectory(CryGamePlatformNodes/Module)
+ # UQS: Optional plugin; option PLUGIN_CRYUQS to enable/disable it resides in its own sub directory
+ add_subdirectory(CryUQS)
+ 
+-add_subdirectory(CryHTTP/Module)
+\ No newline at end of file
++add_subdirectory(CryHTTP/Module)
++
++# CEVPlayer: engine plugin, synced in by CEVPlayer/tools/sync_sources.sh
++if (OPTION_ENGINE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/CEVPlayer/Module/CMakeLists.txt")
++	add_subdirectory(CEVPlayer/Module)
++endif()
+\ No newline at end of file
+diff --git a/Tools/CMake/BuildSandbox.cmake b/Tools/CMake/BuildSandbox.cmake
+index 64290d1..48ca12e 100644
+--- a/Tools/CMake/BuildSandbox.cmake
++++ b/Tools/CMake/BuildSandbox.cmake
+@@ -48,6 +48,9 @@ if (PLUGIN_SCHEMATYC)
+ 	add_subdirectory("Code/Sandbox/Plugins/EditorSchematyc2")
+ endif()
+ add_subdirectory("Code/Sandbox/Plugins/EditorTrackView")
++if (EXISTS "${CRYENGINE_DIR}/Code/Sandbox/Plugins/EditorCEVPlayer/CMakeLists.txt")
++	add_subdirectory("Code/Sandbox/Plugins/EditorCEVPlayer")
++endif()
+ add_subdirectory("Code/Sandbox/Plugins/EditorBehaviorTree")
+ add_subdirectory("Code/Sandbox/Plugins/EditorUDR")
+ add_subdirectory("Code/Sandbox/Plugins/EditorGameSDK")
