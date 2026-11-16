@@ -4,7 +4,7 @@
 #include "StdAfx.h"
 #include "PluginEnv.h"
 #include "TextureVideoPlayerComponent.h"
-#include "Video/TextureVideoQueue.h"
+#include "Compat/LegacyPlayback.h"
 
 #include <CrySchematyc/Utils/EnumFlags.h>
 #include <CrySchematyc/Env/Elements/EnvComponent.h>
@@ -108,6 +108,11 @@ namespace CEVPlayer
 
 	void CTextureVideoPlayerComponent::OnShutDown()
 	{
+		// Events are delivered later than the call that caused them: detach before the entity goes away.
+		if (mEnv != nullptr && mEnv->pLegacy != nullptr)
+		{
+			mEnv->pLegacy->RemoveVideoListener(this);
+		}
 		Stop();
 	}
 
@@ -163,33 +168,33 @@ namespace CEVPlayer
 			m_IsCanPlayInEditor = canPlayInEditor;
 		}
 
-		if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+		if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 		{
-			mEnv->pTextureVideoQueue->PlayVideo(this, videoFile.c_str(), outputTexture.c_str(), preload, looped);
+			mEnv->pLegacy->PlayVideo(this, videoFile.c_str(), outputTexture.c_str(), preload, looped);
 		}
 	}
 
 	void CTextureVideoPlayerComponent::Pause()
 	{
-		if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+		if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 		{
-			mEnv->pTextureVideoQueue->PauseVideo(m_OutputFileName.c_str());
+			mEnv->pLegacy->PauseVideo(m_OutputFileName.c_str());
 		}
 	}
 
 	void CTextureVideoPlayerComponent::Resume()
 	{
-		if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+		if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 		{
-			mEnv->pTextureVideoQueue->ResumeVideo(m_OutputFileName.c_str());
+			mEnv->pLegacy->ResumeVideo(m_OutputFileName.c_str());
 		}
 	}
 
 	void CTextureVideoPlayerComponent::Stop()
 	{
-		if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+		if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 		{
-			mEnv->pTextureVideoQueue->StopVideo(m_OutputFileName.c_str());
+			mEnv->pLegacy->StopVideo(m_OutputFileName.c_str());
 		}
 	}
 

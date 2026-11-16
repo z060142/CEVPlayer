@@ -3,8 +3,14 @@
 
 #pragma once
 
+#include <memory>
+
 #include <CryEntitySystem/IEntityClass.h>
 #include <CEVPlayer/IVideoPlugin.h>
+
+#include "Compat/LegacyPlayback.h"
+#include "Input/InputDispatcher.h"
+#include "Player/PlayerManager.h"
 
 namespace CEVPlayer
 {
@@ -29,24 +35,36 @@ namespace CEVPlayer
 		virtual const char* GetName() const override { return "CEVPlayer"; }
 		virtual const char* GetCategory() const override { return "Render"; }
 		virtual bool        Initialize(SSystemGlobalEnvironment& env, const SSystemInitParams& initParams) override;
+		virtual void        UpdateBeforeRender() override;
+		virtual void        UpdateAfterRender() override;
 		// ~ICryPlugin
 
 		// ISystemEventListener
 		virtual void        OnSystemEvent(ESystemEvent event, UINT_PTR wparam, UINT_PTR lparam) override;
 		// ~ISystemEventListener
 
-		// IVideoPlugin
+		// IVideoPlugin (legacy)
 		virtual void PlayVideoToMainWindow(const char* videoName, bool preload = false, bool looped = false, int audioTrack = 0,
 			bool isSkippable = false, bool canBePaused = false, IVideoPlayerEventListener * pVideoPlayerListener = nullptr) override;
 		virtual void PlayVideoToTexture(const char* videoName, const char* textureName, bool preload = false, bool looped = false, IVideoPlayerEventListener* pListener = nullptr) override;
 		virtual void PauseVideo(EVideoType videoType, const char* textureName = nullptr) override;
 		virtual void ResumeVideo(EVideoType videoType, const char* textureName = nullptr) override;
 		virtual void StopVideo(EVideoType videoType, const char* textureName = nullptr) override;
+		// IVideoPlugin (player API)
+		virtual uint32_t GetVideoPlayerInterfaceVersion() const override { return kVideoPlayerInterfaceVersion; }
+		virtual uint32_t GetVideoPlayerCaps() const override { return eVideoCap_Alpha | eVideoCap_Premultiplied; }
+		virtual IVideoPlayer* CreatePlayer(const char* textureName = nullptr) override;
+		virtual void DestroyPlayer(IVideoPlayer* pPlayer) override;
+		virtual uint32_t GetPlayerCount() const override;
 		// ~IVideoPlugin
-	public:
-		void        RegisterCVars();
-		void        UnRegisterCVars();
 	protected:
 		void        RegisterComponents(Schematyc::IEnvRegistrar& registrar);
+		void        RegisterLegacyInput();
+		void        ShutdownBridge();
+	private:
+		std::unique_ptr<CPlayerManager> m_pManager;
+		std::unique_ptr<CLegacyPlayback> m_pLegacy;
+		std::unique_ptr<CInputDispatcher> m_pInputDispatcher;
+		bool m_listenerRegistered = false;
 	};
 }

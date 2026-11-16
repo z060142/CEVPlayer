@@ -2,11 +2,9 @@
 // License: https://github.com/afrostalin/CEVPlayer/blob/master/LICENSE
 
 #include "StdAfx.h"
+#include "PluginEnv.h"
 #include "Plugin.h"
-#include "Core/ThreadManager.h"
-#include "Video/2DVideoQueue.h"
-#include "Video/TextureVideoQueue.h"
-#include "Input/InputDispatcher.h"
+#include "Console.h"
 
 #include "Components/TextureVideoPlayerComponent.h"
 
@@ -14,89 +12,12 @@
 #include <CrySchematyc/Env/EnvPackage.h>
 #include <CrySchematyc/Utils/SharedString.h>
 #include <CrySchematyc/CoreAPI.h>
+#include <CryGame/IGameFramework.h>
 
 #include <CryCore/Platform/platform_impl.inl>
-#include <CrySystem/ConsoleRegistration.h>
 
 namespace CEVPlayer
 {
-	void CmdPlay2DVideo(IConsoleCmdArgs* args)
-	{
-		if (args == nullptr)
-			return;
-
-		if (args->GetArgCount() > 1)
-		{
-			const char* video = args->GetArg(1);
-
-			if (mEnv->pVideoQueue != nullptr)
-			{
-				mEnv->pVideoQueue->Play2DVideo(nullptr, video);
-			}
-		}
-	}
-
-	void CmdPause2DVideo(IConsoleCmdArgs* args)
-	{
-		if (mEnv->pVideoQueue != nullptr)
-		{
-			mEnv->pVideoQueue->Pause2DVideo();
-		}
-	}
-
-	void CmdResume2DVideo(IConsoleCmdArgs* args)
-	{
-		if (mEnv->pVideoQueue != nullptr)
-		{
-			mEnv->pVideoQueue->Resume2DVideo();
-		}
-	}
-
-	void CmdStop2DVideo(IConsoleCmdArgs* args)
-	{
-		if (mEnv->pVideoQueue != nullptr)
-		{
-			mEnv->pVideoQueue->Stop2DVideo();
-		}
-	}
-
-	void CVideoPlugin::RegisterCVars()
-	{
-		IConsole* pConsole = gEnv->pConsole;
-		if (pConsole != nullptr && !gEnv->IsDedicated())
-		{
-			// Commands
-			REGISTER_COMMAND("vp_play", CmdPlay2DVideo, VF_NULL, "Play video file. Ex. vp_play logo (without extension name)");
-			REGISTER_COMMAND("vp_pause", CmdPause2DVideo, VF_NULL, "Pause current playing video");
-			REGISTER_COMMAND("vp_resume", CmdResume2DVideo, VF_NULL, "Resume current paused video");
-			REGISTER_COMMAND("vp_stop", CmdStop2DVideo, VF_NULL, "Stop current playing/paused video");
-
-			// CVars
-			REGISTER_CVAR2("vp_debug_log", &mEnv->m_bDebugLog, 0, VF_NULL, "Video plugin debug log");
-			REGISTER_CVAR2("vp_debug_draw", &mEnv->m_bDebugDraw, 0, VF_NULL, "Video plugin debug draw");
-			REGISTER_CVAR2("vp_disableLogs", &mEnv->m_bDisableLog, 0, VF_NULL, "Disable logs from video plugin");
-
-			ConsoleRegistrationHelper::Register("vp_audio_volume", &mEnv->m_audioVolume, 1.f, VF_NULL, "Audio volume (0.0 - 1.0)");
-		}
-	}
-
-	void CVideoPlugin::UnRegisterCVars()
-	{
-		IConsole* pConsole = gEnv->pConsole;
-		if (pConsole != nullptr && !gEnv->IsDedicated())
-		{
-			pConsole->RemoveCommand("vp_play");
-			pConsole->RemoveCommand("vp_pause");
-			pConsole->RemoveCommand("vp_resume");
-			pConsole->RemoveCommand("vp_stop");
-
-			pConsole->UnregisterVariable("vp_debug_log", true);
-			pConsole->UnregisterVariable("vp_debug_draw", true);
-			pConsole->UnregisterVariable("vp_disableLogs", true);
-			pConsole->UnregisterVariable("vp_audio_volume", true);
-		}
-	}
-
 	void CVideoPlugin::RegisterComponents(Schematyc::IEnvRegistrar& registrar)
 	{
 		Schematyc::CEnvRegistrationScope scope = registrar.Scope(IEntity::GetEntityScopeGUID());
@@ -111,40 +32,45 @@ namespace CEVPlayer
 
 	CVideoPlugin::~CVideoPlugin()
 	{
-		if (gEnv->pSystem != nullptr && !gEnv->IsDedicated())
+		ShutdownBridge(); // normally done at ESYSTEM_EVENT_FULL_SHUTDOWN already; idempotent
+
+		if (m_listenerRegistered && gEnv != nullptr && gEnv->pSystem != nullptr)
 		{
 			gEnv->pSystem->GetISystemEventDispatcher()->RemoveListener(this);
 		}
 
-#ifndef CRY_IS_MONOLITHIC_BUILD 
-		if (gEnv->pSchematyc != nullptr && !gEnv->IsDedicated())
+#ifndef CRY_IS_MONOLITHIC_BUILD
+		if (gEnv != nullptr && gEnv->pSchematyc != nullptr && !gEnv->IsDedicated())
 		{
 			gEnv->pSchematyc->GetEnvRegistry().DeregisterPackage(CVideoPlugin::GetCID());
 		}
 #endif
 
-		UnRegisterCVars();
+		UnregisterConsole();
 
-
-		SAFE_RELEASE_11(mEnv->pVideoQueue);
-		SAFE_RELEASE_11(mEnv->pTextureVideoQueue);
-		SAFE_RELEASE_11(mEnv->pThreadManager);
-
-		SAFE_DELETE_11(mEnv->pInputDispatcher);
-		SAFE_DELETE_11(mEnv);
+		mEnv->pInputDispatcher = nullptr;
+		m_pInputDispatcher.reset();
+		mEnv->pLegacy = nullptr;
+		mEnv->pManager = nullptr;
+		m_pLegacy.reset();
+		m_pManager.reset();
 	}
 
 	bool CVideoPlugin::Initialize(SSystemGlobalEnvironment& env, const SSystemInitParams& initParams)
 	{
-		if (gEnv->pSystem != nullptr && !gEnv->IsDedicated())
+		// Nothing here touches the renderer (it may not exist yet): textures are created at the first tick that
+		// needs them.
+		m_pManager = std::make_unique<CPlayerManager>();
+		m_pLegacy = std::make_unique<CLegacyPlayback>(*m_pManager);
+		mEnv->pManager = m_pManager.get();
+		mEnv->pLegacy = m_pLegacy.get();
+
+		RegisterConsole();
+
+		if (gEnv->pSystem != nullptr)
 		{
 			gEnv->pSystem->GetISystemEventDispatcher()->RegisterListener(this, "CVideoPlugin_Listener");
-		}
-
-		if (!gEnv->IsDedicated())
-		{
-			mEnv->pThreadManager = new CVideoPluginThreadManager();
-			mEnv->pThreadManager->SpawnDecoderThread();
+			m_listenerRegistered = true;
 		}
 
 		if (gEnv->pConsole != nullptr)
@@ -156,11 +82,70 @@ namespace CEVPlayer
 			}
 		}
 
+		// One tick per frame before the scene is rendered (frame step, texture upload, listener dispatch) and
+		// the fullscreen aux draw after the game framework drew its own overlays (top layer).
+		EnableUpdate(EUpdateStep::BeforeRender, true);
+		EnableUpdate(EUpdateStep::AfterRender, true);
 		return true;
+	}
+
+	void CVideoPlugin::UpdateBeforeRender()
+	{
+		if (m_pManager)
+			m_pManager->UpdateBeforeRender();
+	}
+
+	void CVideoPlugin::UpdateAfterRender()
+	{
+		if (m_pManager)
+			m_pManager->UpdateAfterRender();
+	}
+
+	void CVideoPlugin::ShutdownBridge()
+	{
+		// Order matters: the legacy layer owns players of the manager, the manager releases the textures (the
+		// renderer is still alive at ESYSTEM_EVENT_FULL_SHUTDOWN / FAST_SHUTDOWN) and the audio device.
+		if (m_pLegacy)
+			m_pLegacy->Shutdown();
+		if (m_pManager)
+			m_pManager->Shutdown();
+	}
+
+	void CVideoPlugin::RegisterLegacyInput()
+	{
+		if (m_pInputDispatcher != nullptr || gEnv->pGameFramework == nullptr || gEnv->pGameFramework->GetIActionMapManager() == nullptr)
+			return;
+
+		m_pInputDispatcher = std::make_unique<CInputDispatcher>();
+		mEnv->pInputDispatcher = m_pInputDispatcher.get();
+
+		CLegacyPlayback* const pLegacy = m_pLegacy.get();
+		m_pInputDispatcher->RegisterAction("video_plugin", "pause_ingame_video", [pLegacy](int activationMode, float value) { pLegacy->OnActionPause2DVideo((EInputState)activationMode, value); });
+		m_pInputDispatcher->RegisterAction("video_plugin", "skip_ingame_video", [pLegacy](int activationMode, float value) { pLegacy->OnActionSkip2DVideo((EInputState)activationMode, value); });
+
+		m_pInputDispatcher->BindAction("video_plugin", "pause_ingame_video", "Shift", eAID_KeyboardMouse, EKeyId::eKI_Space);
+		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "Enter", eAID_KeyboardMouse, EKeyId::eKI_Enter);
+		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "Escape", eAID_KeyboardMouse, EKeyId::eKI_Escape);
+		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "Space", eAID_KeyboardMouse, EKeyId::eKI_Escape);
+		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_a", eAID_KeyboardMouse, EKeyId::eKI_XI_A);
+		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_b", eAID_KeyboardMouse, EKeyId::eKI_XI_B);
+		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_x", eAID_KeyboardMouse, EKeyId::eKI_XI_X);
+		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_y", eAID_KeyboardMouse, EKeyId::eKI_XI_Y);
+		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_start", eAID_KeyboardMouse, EKeyId::eKI_XI_Start);
+		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_back", eAID_KeyboardMouse, EKeyId::eKI_XI_Back);
 	}
 
 	void CVideoPlugin::OnSystemEvent(ESystemEvent event, UINT_PTR wparam, UINT_PTR lparam)
 	{
+		if (event == ESYSTEM_EVENT_FULL_SHUTDOWN || event == ESYSTEM_EVENT_FAST_SHUTDOWN)
+		{
+			ShutdownBridge();
+			return;
+		}
+
+		if (m_pManager)
+			m_pManager->OnSystemEvent(event); // level loading pause / resume
+
 		if (gEnv->IsDedicated())
 		{
 			return;
@@ -170,23 +155,7 @@ namespace CEVPlayer
 		{
 		case ESYSTEM_EVENT_GAME_POST_INIT:
 		{
-			RegisterCVars();
-
-			if (mEnv->pInputDispatcher == nullptr)
-			{
-				mEnv->pInputDispatcher = new CInputDispatcher();
-			}
-
-			if (mEnv->pVideoQueue == nullptr)
-			{
-				mEnv->pVideoQueue = new C2DVideoQueue();
-			}
-
-			if (mEnv->pTextureVideoQueue == nullptr)
-			{
-				mEnv->pTextureVideoQueue = new CTextureVideoQueue();
-			}
-
+			RegisterLegacyInput();
 			break;
 		}
 		case ESYSTEM_EVENT_REGISTER_SCHEMATYC_ENV:
@@ -205,23 +174,44 @@ namespace CEVPlayer
 			}
 			break;
 		}
+		case ESYSTEM_EVENT_LEVEL_UNLOAD:
+			if (m_pLegacy)
+				m_pLegacy->ClearTextureVideos();
+			break;
+		case ESYSTEM_EVENT_GAME_PAUSED:
+			if (m_pLegacy)
+				m_pLegacy->PauseAllTextureVideos(true);
+			break;
+		case ESYSTEM_EVENT_GAME_RESUMED:
+			if (m_pLegacy)
+				m_pLegacy->PauseAllTextureVideos(false);
+			break;
+		case ESYSTEM_EVENT_EDITOR_GAME_MODE_CHANGED:
+		{
+			if (wparam == 0 && m_pLegacy) // Clear when exit from game mode
+			{
+				m_pLegacy->ClearTextureVideos();
+			}
+			break;
+		}
 		default:
 			break;
 		}
 	}
 
+	// ---------------------------------------------------------------------------------------------- legacy API
 	void CVideoPlugin::PlayVideoToMainWindow(const char* videoName, bool preload, bool looped, int audioTrack, bool isSkippable, bool canBePaused, IVideoPlayerEventListener* pVideoPlayerListener)
 	{
 		if (gEnv->pSystem->IsQuitting())
 			return;
 
-		if (mEnv != nullptr && mEnv->pVideoQueue != nullptr)
+		if (m_pLegacy)
 		{
-			mEnv->pVideoQueue->Play2DVideo(pVideoPlayerListener, videoName, preload, looped, audioTrack, isSkippable, canBePaused);
+			m_pLegacy->Play2DVideo(pVideoPlayerListener, videoName, preload, looped, audioTrack, isSkippable, canBePaused);
 		}
 		else
 		{
-			LogError("<CVideoPlugin> Can't play 2D video video queue == nullptr!");
+			LogError("<CVideoPlugin> Can't play 2D video, plug-in is not initialized!");
 		}
 	}
 
@@ -230,46 +220,28 @@ namespace CEVPlayer
 		if (gEnv->pSystem->IsQuitting())
 			return;
 
-		if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+		if (m_pLegacy)
 		{
-			mEnv->pTextureVideoQueue->PlayVideo(pListener, videoName, textureName, preload, looped);
+			m_pLegacy->PlayVideo(pListener, videoName, textureName, preload, looped);
 		}
 		else
 		{
-			LogError("<CVideoPlugin> Can't play texture video, because texture queue == nullptr!");
+			LogError("<CVideoPlugin> Can't play texture video, plug-in is not initialized!");
 		}
 	}
 
 	void CVideoPlugin::PauseVideo(EVideoType videoType, const char* textureName)
 	{
+		if (!m_pLegacy)
+			return;
 		switch (videoType)
 		{
 		case EVideoType::ToMainWindow:
-		{
-			if (mEnv != nullptr && mEnv->pVideoQueue != nullptr)
-			{
-				mEnv->pVideoQueue->Pause2DVideo();
-			}
-			else
-			{
-				LogError("<CVideoPlugin> Can't pause 2D video video queue == nullptr!");
-			}
-
+			m_pLegacy->Pause2DVideo();
 			break;
-		}
 		case EVideoType::ToTexture:
-		{
-			if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
-			{
-				mEnv->pTextureVideoQueue->PauseVideo(textureName);
-			}
-			else
-			{
-				LogError("<CVideoPlugin> Can't pause texture video, because texture queue == nullptr!");
-			}
-
+			m_pLegacy->PauseVideo(textureName);
 			break;
-		}
 		default:
 			break;
 		}
@@ -277,34 +249,16 @@ namespace CEVPlayer
 
 	void CVideoPlugin::ResumeVideo(EVideoType videoType, const char* textureName)
 	{
+		if (!m_pLegacy)
+			return;
 		switch (videoType)
 		{
 		case EVideoType::ToMainWindow:
-		{
-			if (mEnv != nullptr && mEnv->pVideoQueue != nullptr)
-			{
-				mEnv->pVideoQueue->Resume2DVideo();
-			}
-			else
-			{
-				LogError("<CVideoPlugin> Can't resume 2D video video queue == nullptr!");
-			}
-
+			m_pLegacy->Resume2DVideo();
 			break;
-		}
 		case EVideoType::ToTexture:
-		{
-			if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
-			{
-				mEnv->pTextureVideoQueue->ResumeVideo(textureName);
-			}
-			else
-			{
-				LogError("<CVideoPlugin> Can't resume texture video, because texture queue == nullptr!");
-			}
-
+			m_pLegacy->ResumeVideo(textureName);
 			break;
-		}
 		default:
 			break;
 		}
@@ -312,37 +266,36 @@ namespace CEVPlayer
 
 	void CVideoPlugin::StopVideo(EVideoType videoType, const char* textureName)
 	{
+		if (!m_pLegacy)
+			return;
 		switch (videoType)
 		{
 		case EVideoType::ToMainWindow:
-		{
-			if (mEnv != nullptr && mEnv->pVideoQueue != nullptr)
-			{
-				mEnv->pVideoQueue->Stop2DVideo();
-			}
-			else
-			{
-				LogError("<CVideoPlugin> Can't stop 2D video video queue == nullptr!");
-			}
-
+			m_pLegacy->Stop2DVideo();
 			break;
-		}
 		case EVideoType::ToTexture:
-		{
-			if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
-			{
-				mEnv->pTextureVideoQueue->StopVideo(textureName);
-			}
-			else
-			{
-				LogError("<CVideoPlugin> Can't stop texture video, because texture queue == nullptr!");
-			}
-
+			m_pLegacy->StopVideo(textureName);
 			break;
-		}
 		default:
 			break;
 		}
+	}
+
+	// ---------------------------------------------------------------------------------------------- player API
+	IVideoPlayer* CVideoPlugin::CreatePlayer(const char* textureName)
+	{
+		return m_pManager ? m_pManager->CreatePlayer(textureName) : nullptr;
+	}
+
+	void CVideoPlugin::DestroyPlayer(IVideoPlayer* pPlayer)
+	{
+		if (m_pManager)
+			m_pManager->DestroyPlayer(pPlayer);
+	}
+
+	uint32_t CVideoPlugin::GetPlayerCount() const
+	{
+		return m_pManager ? m_pManager->GetPlayerCount() : 0u;
 	}
 
 	CRYREGISTER_SINGLETON_CLASS(CVideoPlugin)

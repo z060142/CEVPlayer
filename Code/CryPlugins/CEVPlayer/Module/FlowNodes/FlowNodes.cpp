@@ -4,8 +4,7 @@
 #include "StdAfx.h"
 #include "PluginEnv.h"
 
-#include "Video/2DVideoQueue.h"
-#include "Video/TextureVideoQueue.h"
+#include "Compat/LegacyPlayback.h"
 
 #include <CEVPlayer/IVideoPluginListeners.h>
 
@@ -49,9 +48,9 @@ namespace CEVPlayer
 		}
 		~CFlowNode_2DVideoPlayer()
 		{
-			if (mEnv && mEnv->pVideoQueue)
+			if (mEnv && mEnv->pLegacy)
 			{
-				mEnv->pVideoQueue->RemoveVideoListener(this);
+				mEnv->pLegacy->RemoveVideoListener(this);
 			}
 		}
 
@@ -95,7 +94,7 @@ namespace CEVPlayer
 
 				if (IsPortActive(pActInfo, eIP_Play))
 				{
-					if (mEnv == nullptr || mEnv->pVideoQueue == nullptr)
+					if (mEnv == nullptr || mEnv->pLegacy == nullptr)
 					{
 						LogError("<CFlowNode_2DVideoPlayer> Can't play 2D video, because video queue == nullptr!");
 						return;
@@ -123,28 +122,28 @@ namespace CEVPlayer
 					}
 					else
 					{
-						mEnv->pVideoQueue->Play2DVideo(this, videoFileName, preload, looped, audioTrackID, isSkippable, canBePaused/*, isLevelLoading*/);
+						mEnv->pLegacy->Play2DVideo(this, videoFileName, preload, looped, audioTrackID, isSkippable, canBePaused/*, isLevelLoading*/);
 					}
 				}
 				else if (IsPortActive(pActInfo, eIP_Pause))
 				{
-					if (mEnv != nullptr && mEnv->pVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
-						mEnv->pVideoQueue->Pause2DVideo();
+						mEnv->pLegacy->Pause2DVideo();
 					}
 				}
 				else if (IsPortActive(pActInfo, eIP_Resume))
 				{
-					if (mEnv != nullptr && mEnv->pVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
-						mEnv->pVideoQueue->Resume2DVideo();
+						mEnv->pLegacy->Resume2DVideo();
 					}
 				}
 				else if (IsPortActive(pActInfo, eIP_Stop))
 				{
-					if (mEnv != nullptr && mEnv->pVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
-						mEnv->pVideoQueue->Stop2DVideo();
+						mEnv->pLegacy->Stop2DVideo();
 					}
 				}
 			}
@@ -218,6 +217,11 @@ namespace CEVPlayer
 		}
 		~CFlowNode_TextureVideoPlayer()
 		{
+			// Events are delivered later than the call that caused them: never leave a dangling listener.
+			if (mEnv && mEnv->pLegacy)
+			{
+				mEnv->pLegacy->RemoveVideoListener(this);
+			}
 		}
 
 		virtual void GetConfiguration(SFlowNodeConfig& config) override
@@ -259,7 +263,7 @@ namespace CEVPlayer
 
 				if (IsPortActive(pActInfo, eIP_Play))
 				{
-					if (mEnv != nullptr && mEnv->pTextureVideoQueue == nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy == nullptr)
 					{
 						LogError("<CFlowNode_TextureVideoPlayer> Can't play texture video, because texture queue == nullptr!");
 						return;
@@ -290,33 +294,33 @@ namespace CEVPlayer
 						return;
 					}
 
-					if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
-						mEnv->pTextureVideoQueue->PlayVideo(this, videoFileName, textureName, preload, looped);
+						mEnv->pLegacy->PlayVideo(this, videoFileName, textureName, preload, looped);
 					}
 				}
 				else if (IsPortActive(pActInfo, eIP_Pause))
 				{
-					if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
 						string textureName = GetPortString(pActInfo, eIP_OutTextureName);
-						mEnv->pTextureVideoQueue->PauseVideo(textureName);
+						mEnv->pLegacy->PauseVideo(textureName);
 					}
 				}
 				else if (IsPortActive(pActInfo, eIP_Resume))
 				{
-					if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
 						string textureName = GetPortString(pActInfo, eIP_OutTextureName);
-						mEnv->pTextureVideoQueue->ResumeVideo(textureName);
+						mEnv->pLegacy->ResumeVideo(textureName);
 					}
 				}
 				else if (IsPortActive(pActInfo, eIP_Stop))
 				{
-					if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
 						string textureName = GetPortString(pActInfo, eIP_OutTextureName);
-						mEnv->pTextureVideoQueue->StopVideo(textureName);
+						mEnv->pLegacy->StopVideo(textureName);
 					}
 				}
 			}
@@ -346,7 +350,7 @@ namespace CEVPlayer
 				ActivateOutput(&m_pActInfo, eOP_StartPlay, true);
 
 				string textureName = GetPortString(&m_pActInfo, eIP_OutTextureName);
-				int textureID = mEnv->pTextureVideoQueue->GetTextureIDByTextureName(textureName.c_str());
+				int textureID = mEnv->pLegacy->GetTextureIDByTextureName(textureName.c_str());
 
 				if (textureID != 0)
 				{
@@ -411,7 +415,13 @@ namespace CEVPlayer
 	public:
 		explicit CFlowNode_FlashVideoPlayer(SActivationInfo* pActInfo) {}
 
-		virtual ~CFlowNode_FlashVideoPlayer() {}
+		virtual ~CFlowNode_FlashVideoPlayer()
+		{
+			if (mEnv && mEnv->pLegacy)
+			{
+				mEnv->pLegacy->RemoveVideoListener(this);
+			}
+		}
 
 		virtual IFlowNodePtr Clone(SActivationInfo* pActInfo)
 		{
@@ -524,7 +534,7 @@ namespace CEVPlayer
 
 				if (IsPortActive(pActInfo, eIP_Play))
 				{
-					if (mEnv != nullptr && mEnv->pTextureVideoQueue == nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy == nullptr)
 					{
 						LogError("<CFlowNode_TextureVideoPlayer> Can't play texture video, because texture queue == nullptr!");
 						return;
@@ -556,33 +566,33 @@ namespace CEVPlayer
 						LogError("<CFlowNode_TextureVideoPlayer> Can't play texture video, because output texture name empty, check you flownodes logic and try again!");
 						return;
 					}
-					if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
-						mEnv->pTextureVideoQueue->PlayVideo(this, videoFileName, textureName, preload, looped);
+						mEnv->pLegacy->PlayVideo(this, videoFileName, textureName, preload, looped);
 					}
 				}
 				else if (IsPortActive(pActInfo, eIP_Pause))
 				{
-					if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
 						string textureName = GetPortString(pActInfo, eIP_OutTextureName);
-						mEnv->pTextureVideoQueue->PauseVideo(textureName);
+						mEnv->pLegacy->PauseVideo(textureName);
 					}
 				}
 				else if (IsPortActive(pActInfo, eIP_Resume))
 				{
-					if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
 						string textureName = GetPortString(pActInfo, eIP_OutTextureName);
-						mEnv->pTextureVideoQueue->ResumeVideo(textureName);
+						mEnv->pLegacy->ResumeVideo(textureName);
 					}
 				}
 				else if (IsPortActive(pActInfo, eIP_Stop))
 				{
-					if (mEnv != nullptr && mEnv->pTextureVideoQueue != nullptr)
+					if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 					{
 						string textureName = GetPortString(pActInfo, eIP_OutTextureName);
-						mEnv->pTextureVideoQueue->StopVideo(textureName);
+						mEnv->pLegacy->StopVideo(textureName);
 					}
 				}
 

@@ -5,7 +5,10 @@
 // Copyright (C) 2017-2020 Ilya Chernetsov. All rights reserved. Contacts: <chernecoff@gmail.com>
 // License: https://github.com/afrostalin/CEVPlayer/blob/master/LICENSE
 
+#include "PluginEnv.h"
+
 namespace CEVPlayer
 {
-	SPluginEnv* mEnv = new SPluginEnv();
+	static SPluginEnv s_pluginEnv;
+	SPluginEnv* mEnv = &s_pluginEnv;
 }
