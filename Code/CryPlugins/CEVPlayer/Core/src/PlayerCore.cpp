@@ -108,6 +108,7 @@ namespace cev
 		// ---------------------------------------------------------------- consumer state
 		std::atomic<uint8_t> state{static_cast<uint8_t>(PlayerState::Stopped)};
 		bool loop = false;
+		bool audioEndNotified = false;          // consumer thread: IClock::NotifyAudioEnded() sent since the last seek
 		double avOffset = 0.0;                 // seconds, see PlayerCore::SetAvOffset()
 		uint32_t loopCount = 0;
 		uint64_t serial = 0;
@@ -600,6 +601,12 @@ namespace cev
 			if (hasVideo)
 				ring.FlushReady();
 			clock->Seek(t);
+			audioEndNotified = false;
+			if (!hasAudio)
+			{
+				clock->NotifyAudioEnded(); // nothing to wait for
+				audioEndNotified = true;
+			}
 			WakeWorker();
 		}
 
@@ -650,6 +657,7 @@ namespace cev
 			seekTarget = 0.0;
 			decodeErrors.store(0);
 			loopCount = 0;
+			audioEndNotified = false;
 			serial = 0;
 			firstVideoPts = 0.0;
 			SetState(PlayerState::Stopped);
@@ -796,12 +804,16 @@ namespace cev
 
 	Status PlayerCore::SetRate(double rate)
 	{
-		if (!(rate > 0.0) || rate > 16.0)
-			return Status::InvalidArgument;
+		if (!(rate > 0.0))
+			return Status::InvalidArgument; // also NaN
+		// The resampler clamps to its own range; clamp here as well so the clock and the video use the same rate.
+		rate = std::min(std::max(rate, kMinRate), kMaxRate);
 		m_impl->audioRate.store(rate, std::memory_order_relaxed);
 		m_impl->clock->SetRate(rate);
 		return Status::Ok;
 	}
+
+	double PlayerCore::GetRate() const { return m_impl->clock->Rate(); }
 
 	Status PlayerCore::SetAvOffset(double seconds)
 	{
@@ -852,6 +864,12 @@ namespace cev
 		}
 		if (d.hasAudio && !d.aEof.load(std::memory_order_relaxed) && d.aring.FreeFrames() >= d.aring.Capacity() / 4)
 			d.WakeWorker();
+		if (!d.audioEndNotified && d.AudioAtEnd() && (!d.hasAudio || d.aring.Buffered() == 0))
+		{
+			// Audio is over (shorter than the video, or none): a clock that holds for audio must stop holding.
+			d.clock->NotifyAudioEnded();
+			d.audioEndNotified = true;
+		}
 
 		if (d.State() == PlayerState::Playing && t >= d.info.durationSeconds - kEndEpsilon)
 		{

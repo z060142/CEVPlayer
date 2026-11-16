@@ -2120,6 +2120,9 @@ namespace
 		uint64_t cbIndex = 0;
 		uint64_t pollIndex = 0;
 		uint32_t minBuffered = 1400;
+		bool legacyClock = false;       // report every block as audible (OnFramesConsumed(frames))
+		uint32_t silentBlocks = 0;      // next callbacks deliver silence without touching the player (worker not ready)
+		uint64_t quietNeeded = 24000;   // silent frames before a sound counts as a new onset
 
 		uint64_t realFrames = 0;
 		uint64_t presented = 0;
@@ -2133,6 +2136,11 @@ namespace
 		int64_t flashPresentedNs[64];
 		int flashCount = 0;
 		bool detectFlash = false;
+		// clock samples (one per video poll), for tests that cannot rely on every flash frame being presented
+		bool recordClock = false;
+		int64_t clockNs[4096];
+		double clockVal[4096];
+		int clockCount = 0;
 
 		// capture of the stereo output
 		float* cap = nullptr;
@@ -2158,12 +2166,21 @@ namespace
 		void AudioCallback()
 		{
 			const MediaInfo& info = p->GetInfo();
-			if (info.hasAudio && p->GetState() == PlayerState::Playing)
+			uint32_t got = 0;
+			if (silentBlocks > 0)
 			{
-				if (!WaitFor([&] { return p->AudioBufferedFrames() >= minBuffered || p->AudioDecoderAtEnd(); }, 15000))
-					timedOut = true;
+				--silentBlocks;
+				std::fill(buf.begin(), buf.end(), 0.0f);
 			}
-			const uint32_t got = p->ReadAudioResampled(buf.data(), kBlock);
+			else
+			{
+				if (info.hasAudio && p->GetState() == PlayerState::Playing)
+				{
+					if (!WaitFor([&] { return p->AudioBufferedFrames() >= minBuffered || p->AudioDecoderAtEnd(); }, 15000))
+						timedOut = true;
+				}
+				got = p->ReadAudioResampled(buf.data(), kBlock);
+			}
 			realFrames += got;
 			const uint64_t base = cbIndex * kBlock;
 			for (uint32_t i = 0; i < kBlock; ++i)
@@ -2175,7 +2192,7 @@ namespace
 				peak = std::max(peak, m);
 				if (m > 0.1f)
 				{
-					if (quietRun >= 24000 && onsetCount < 64)
+					if (quietRun >= quietNeeded && onsetCount < 64)
 						onsetFrame[onsetCount++] = base + i;
 					quietRun = 0;
 				}
@@ -2190,12 +2207,33 @@ namespace
 					++capCount;
 				}
 			}
-			clk->OnFramesConsumed(kBlock);
+			if (legacyClock)
+				clk->OnFramesConsumed(kBlock);
+			else
+				clk->OnFramesConsumed(kBlock, got);
 			++cbIndex;
+		}
+
+		// media time at virtual time `ns`, interpolated between the recorded polls
+		double ClockAt(int64_t ns) const
+		{
+			for (int i = 1; i < clockCount; ++i)
+				if (clockNs[i] >= ns)
+				{
+					const double f = static_cast<double>(ns - clockNs[i - 1]) / static_cast<double>(std::max<int64_t>(1, clockNs[i] - clockNs[i - 1]));
+					return clockVal[i - 1] + f * (clockVal[i] - clockVal[i - 1]);
+				}
+			return -1.0;
 		}
 
 		void VideoPoll(int64_t ns)
 		{
+			if (recordClock && clockCount < 4096)
+			{
+				clockNs[clockCount] = ns;
+				clockVal[clockCount] = clk->NowSeconds();
+				++clockCount;
+			}
 			const MediaInfo& info = p->GetInfo();
 			if (info.hasVideo && p->GetState() == PlayerState::Playing)
 			{
@@ -2555,8 +2593,8 @@ namespace
 					next = Steady::now();
 					continue;
 				}
-				p.ReadAudioResampled(block.data(), 480);
-				clk.OnFramesConsumed(480);
+				const uint32_t got = p.ReadAudioResampled(block.data(), 480);
+				clk.OnFramesConsumed(480, got);
 				callbacks.fetch_add(1);
 			}
 		});
@@ -2880,6 +2918,474 @@ namespace
 			base.meanMs, base.minMs, base.maxMs, plus.meanMs, dPlus, minus.meanMs, dMinus);
 	}
 
+	// ---------------------------------------------------------------------------------------------------------------
+	// m2fix2: rate range, A/V sync after seek / loop / underrun with the AudioClock
+	// ---------------------------------------------------------------------------------------------------------------
+	void TestAudioClockWaiting()
+	{
+		g_context = "audioclock waiting";
+		VirtualTime vt;
+		AudioClock clk(48000);
+		clk.SetTimeSource(&VirtualTime::Now, &vt);
+		const int64_t base = vt.ns.load();
+		const auto tAt = [&](double sec) { return base + static_cast<int64_t>(sec * 1e9); };
+		const auto callbacks = [&](double from, double to, bool audible) // 10 ms blocks of 480 frames
+		{
+			for (double t = from; t < to - 1e-9; t += 0.01)
+			{
+				vt.ns = tAt(t);
+				clk.OnFramesConsumed(480, audible ? 480u : 0u);
+			}
+		};
+
+		// 1. seek: the silence before the audio of the new position arrives does not move the clock
+		clk.Start();
+		callbacks(0.0, 1.0, true);
+		clk.Seek(5.0);
+		callbacks(1.0, 1.1, false);
+		vt.ns = tAt(1.1);
+		CHECK(clk.NowSeconds() == 5.0);
+		callbacks(1.1, 2.1, true);
+		vt.ns = tAt(2.1);
+		const double t1 = clk.NowSeconds();
+		CHECKF(std::fabs(t1 - 6.0) < 0.02, "seek + 100 ms of silence: clock %.4f s, expected ~6.0 (no lag)", t1);
+
+		// 2. underrun (0.2 s, shorter than the timeout): the clock waits, audible time only
+		clk.Seek(10.0);
+		callbacks(2.1, 3.1, true);
+		callbacks(3.1, 3.3, false);
+		vt.ns = tAt(3.3);
+		const double tHold = clk.NowSeconds();
+		CHECKF(std::fabs(tHold - 11.0) < 0.03, "held at %.4f s during the underrun, expected ~11.0", tHold);
+		callbacks(3.3, 4.3, true);
+		vt.ns = tAt(4.3);
+		const double t2 = clk.NowSeconds();
+		CHECKF(std::fabs(t2 - 12.0) < 0.03, "after the underrun the clock is at %.4f s, expected ~12.0", t2);
+		CHECK(!clk.CountsSilence());
+
+		// 3. no audible audio at all: after kStallSeconds the wall clock takes over, never backwards, no freeze
+		clk.Seek(20.0);
+		double last = clk.NowSeconds();
+		double worstStep = 0.0;
+		bool monotonic = true;
+		for (int i = 0; i < 100; ++i)
+		{
+			vt.ns = tAt(4.3 + i * 0.01);
+			clk.OnFramesConsumed(480, 0);
+			if (i % 2 == 0) // poll every 20 ms
+			{
+				const double now = clk.NowSeconds();
+				monotonic = monotonic && now >= last;
+				worstStep = std::max(worstStep, now - last);
+				last = now;
+			}
+		}
+		vt.ns = tAt(5.3);
+		last = clk.NowSeconds();
+		CHECK(monotonic);
+		CHECKF(std::fabs((last - 20.0) - 0.75) < 0.06, "1 s without audio: clock advanced %.4f s, expected ~0.75 (0.25 s hold)", last - 20.0);
+		CHECKF(worstStep < 0.04, "fallback step %.4f s", worstStep);
+		CHECK(clk.CountsSilence());
+		// audio comes back: no jump back, normal speed, underruns hold again
+		callbacks(5.3, 6.3, true);
+		vt.ns = tAt(6.3);
+		const double t3 = clk.NowSeconds();
+		CHECK(t3 >= last);
+		CHECKF(std::fabs((t3 - last) - 1.0) < 0.05, "after the fallback the clock advanced %.4f s over 1 s", t3 - last);
+		CHECK(!clk.CountsSilence());
+		callbacks(6.3, 6.5, false);
+		vt.ns = tAt(6.5);
+		CHECK(std::fabs(clk.NowSeconds() - t3) < 0.03);
+
+		// 4. NotifyAudioEnded(): silence counts at once (audio shorter than the video / no audio)
+		clk.Seek(30.0);
+		clk.NotifyAudioEnded();
+		CHECK(clk.CountsSilence());
+		callbacks(6.5, 7.5, false);
+		vt.ns = tAt(7.5);
+		const double t4 = clk.NowSeconds();
+		CHECKF(std::fabs((t4 - 30.0) - 1.0) < 0.03, "audio ended: clock advanced %.4f s over 1 s of silence", t4 - 30.0);
+		// the next seek is a new audio epoch again
+		clk.Seek(40.0);
+		CHECK(!clk.CountsSilence());
+		callbacks(7.5, 7.6, false);
+		vt.ns = tAt(7.6);
+		CHECK(clk.NowSeconds() == 40.0);
+
+		// 5. latency: the first audible block is heard `latency` later, the clock starts then
+		clk.SetOutputLatencyFrames(960);
+		clk.Seek(50.0);
+		callbacks(7.6, 7.7, false);
+		callbacks(7.7, 8.7, true);
+		vt.ns = tAt(8.7);
+		const double t5 = clk.NowSeconds();
+		CHECKF(std::fabs(t5 - (50.0 + 1.0 - 0.02)) < 0.02, "latency 20 ms: clock %.4f s, expected ~50.98", t5);
+
+		// 6. an audible count above the block size is clamped
+		const uint64_t c0 = clk.FramesCounted();
+		clk.OnFramesConsumed(100, 5000);
+		CHECK(clk.FramesCounted() - c0 == 100);
+		Log("  audioclock waiting ok: seek lag %+.1f ms, underrun hold at %+.3f s, no-audio fallback advanced %.3f s in 1 s\n",
+			(t1 - 6.0) * 1000.0, tHold - 11.0, last - 20.0);
+	}
+
+	struct SeekProbe
+	{
+		bool ok = false;
+		int pairs = 0;
+		double meanMs = 0.0;
+		double worstMs = 0.0;
+	};
+
+	// Seek (or loop wrap) with `gapBlocks` callbacks that deliver silence because the worker has not applied the
+	// seek yet (the gap that used to shift the clock for good), then flash / beep offsets of the next seconds.
+	// legacy = the mixer reports every block as audible (the old OnFramesConsumed(frames) contract).
+	SeekProbe MeasureSeekOffset(bool loopWrap, double seekTo, uint32_t gapBlocks, bool legacy)
+	{
+		SeekProbe r;
+		const Clip& clip = *FindClip("av_sync_flash_beep.webm");
+		VirtualTime vt;
+		AudioClock clk(48000);
+		PlayerCore p(MakeResampledConfig(clk));
+		if (!LoadAndWait(p, ClipPath(clip), true))
+			return r;
+		AvSim s;
+		s.Init(p, clk, vt);
+		s.legacyClock = legacy;
+		s.detectFlash = true;
+		CHECK(p.Update());
+		CHECK(Succeeded(p.Play()));
+		int firstBeepSec = 0;
+		double untilMedia = 0.0;
+		if (loopWrap)
+		{
+			CHECK(Succeeded(p.SetLoop(true)));
+			CHECK(Succeeded(p.Seek(clip.duration - 0.6)));
+			CHECK(s.RunUntilMediaTime(clip.duration - 0.1));
+			const uint32_t loops0 = p.GetLoopCount();
+			int guard = 0;
+			while (p.GetLoopCount() == loops0 && guard++ < 4000)
+				CHECK(s.Step());
+			CHECK(p.GetLoopCount() == loops0 + 1);
+			untilMedia = 3.4;
+		}
+		else
+		{
+			CHECK(s.RunUntilMediaTime(1.5));
+			CHECK(Succeeded(p.Seek(seekTo)));
+			firstBeepSec = static_cast<int>(std::ceil(seekTo));
+			untilMedia = seekTo + 3.0;
+		}
+		s.silentBlocks = gapBlocks;
+		s.flashCount = 0;
+		s.onsetCount = 0;
+		s.quietRun = 1u << 30;
+		CHECK(s.RunUntilMediaTime(untilMedia));
+		CHECK(!s.timedOut);
+		CHECK(!s.nonFinite);
+		double sum = 0.0;
+		for (int f = 0; f < s.flashCount; ++f)
+		{
+			const int sec = static_cast<int>(std::lround(s.flashPts[f]));
+			const int o = sec - firstBeepSec;
+			if (sec < 1 || o < 0 || o >= s.onsetCount)
+				continue;
+			const double ms = static_cast<double>(s.flashPresentedNs[f] - s.HeardNs(s.onsetFrame[o])) * 1e-6;
+			sum += ms;
+			if (std::fabs(ms) > std::fabs(r.worstMs))
+				r.worstMs = ms;
+			++r.pairs;
+		}
+		if (r.pairs > 0)
+			r.meanMs = sum / r.pairs;
+		r.ok = r.pairs >= 2;
+		return r;
+	}
+
+	void TestSeekSync()
+	{
+		g_context = "m2fix2 seek sync";
+		const double frameMs = 1000.0 / 30.0;
+		const SeekProbe fixedSeek = MeasureSeekOffset(false, 3.5, 8, false);
+		const SeekProbe oldSeek = MeasureSeekOffset(false, 3.5, 8, true);
+		CHECK(fixedSeek.ok && oldSeek.ok);
+		CHECKF(std::fabs(fixedSeek.worstMs) < frameMs, "seek: worst flash/beep offset %+.2f ms (limit 1 frame = %.1f ms)", fixedSeek.worstMs, frameMs);
+		CHECKF(oldSeek.meanMs < -50.0, "control (legacy contract): offset %+.2f ms, the 80 ms gap should show up", oldSeek.meanMs);
+		Log("  seek 3.5 s with an 80 ms silent gap: %d pairs, offset %+.2f ms mean / %+.2f ms worst (legacy report: %+.2f ms)\n",
+			fixedSeek.pairs, fixedSeek.meanMs, fixedSeek.worstMs, oldSeek.meanMs);
+
+		g_context = "m2fix2 loop sync";
+		const SeekProbe fixedLoop = MeasureSeekOffset(true, 0.0, 8, false);
+		const SeekProbe oldLoop = MeasureSeekOffset(true, 0.0, 8, true);
+		CHECK(fixedLoop.ok && oldLoop.ok);
+		CHECKF(std::fabs(fixedLoop.worstMs) < frameMs, "loop: worst flash/beep offset %+.2f ms", fixedLoop.worstMs);
+		CHECKF(oldLoop.meanMs < -50.0, "control (legacy contract): loop offset %+.2f ms", oldLoop.meanMs);
+		Log("  loop wrap with an 80 ms silent gap: %d pairs, offset %+.2f ms mean / %+.2f ms worst (legacy report: %+.2f ms)\n",
+			fixedLoop.pairs, fixedLoop.meanMs, fixedLoop.worstMs, oldLoop.meanMs);
+
+		g_context = "m2fix2 underrun sync";
+		{
+			const Clip& clip = *FindClip("av_sync_flash_beep.webm");
+			VirtualTime vt;
+			AudioClock clk(48000);
+			PlayerCore p(MakeResampledConfig(clk));
+			if (LoadAndWait(p, ClipPath(clip), true))
+			{
+				AvSim s;
+				s.Init(p, clk, vt);
+				s.detectFlash = true;
+				CHECK(p.Update());
+				CHECK(Succeeded(p.Play()));
+				CHECK(s.RunUntilMediaTime(1.5));
+				s.silentBlocks = 15; // decoding stalled for 150 ms: silent callbacks, the ring is not read
+				s.flashCount = 0;
+				s.onsetCount = 0;
+				s.quietRun = 1u << 30;
+				CHECK(s.RunUntilMediaTime(5.5));
+				double worst = 0.0;
+				int pairs = 0;
+				for (int f = 0; f < s.flashCount; ++f)
+				{
+					const int sec = static_cast<int>(std::lround(s.flashPts[f]));
+					const int o = sec - 2;
+					if (sec < 2 || o < 0 || o >= s.onsetCount)
+						continue;
+					const double ms = static_cast<double>(s.flashPresentedNs[f] - s.HeardNs(s.onsetFrame[o])) * 1e-6;
+					if (std::fabs(ms) > std::fabs(worst))
+						worst = ms;
+					++pairs;
+				}
+				CHECK(pairs >= 2);
+				CHECKF(std::fabs(worst) < frameMs, "underrun: worst flash/beep offset %+.2f ms", worst);
+				Log("  150 ms underrun at 1.5 s: %d pairs, worst offset %+.2f ms\n", pairs, worst);
+			}
+		}
+	}
+
+	void TestRateRange()
+	{
+		g_context = "m2fix2 rate api";
+		static_assert(PlayerCore::kMinRate == Resampler::kMinRate && PlayerCore::kMaxRate == Resampler::kMaxRate, "rate range");
+		{
+			PlayerCore p;
+			CHECK(p.GetRate() == 1.0);
+			CHECK(Succeeded(p.SetRate(8.0)));
+			CHECK(p.GetRate() == PlayerCore::kMaxRate);
+			CHECK(Succeeded(p.SetRate(0.1)));
+			CHECK(p.GetRate() == PlayerCore::kMinRate);
+			CHECK(Succeeded(p.SetRate(100.0)));
+			CHECK(p.GetRate() == PlayerCore::kMaxRate);
+			CHECK(Succeeded(p.SetRate(1.5)));
+			CHECK(p.GetRate() == 1.5);
+			CHECK(p.SetRate(0.0) == Status::InvalidArgument);
+			CHECK(p.SetRate(-1.0) == Status::InvalidArgument);
+			CHECK(p.SetRate(std::nan("")) == Status::InvalidArgument);
+			CHECK(p.GetRate() == 1.5);
+		}
+
+		g_context = "m2fix2 rate 8 -> 4";
+		const double frameMs = 1000.0 / 30.0;
+		{
+			const Clip& clip = *FindClip("av_sync_flash_beep.webm");
+			VirtualTime vt;
+			AudioClock clk(48000);
+			PlayerCore p(MakeResampledConfig(clk));
+			if (!LoadAndWait(p, ClipPath(clip), true))
+				return;
+			CHECK(Succeeded(p.SetRate(8.0)));
+			CHECK(clk.Rate() == 4.0);
+			CHECK(p.GetRate() == 4.0);
+			AvSim s;
+			s.Init(p, clk, vt);
+			s.recordClock = true;
+			s.minBuffered = 8000;
+			s.quietNeeded = 6000;
+			CHECK(p.Update());
+			CHECK(Succeeded(p.Play()));
+			CHECK(s.RunUntilMediaTime(0.6));
+			const double m0 = clk.NowSeconds();
+			const int64_t v0 = vt.ns.load();
+			const uint64_t a0 = s.realFrames;
+			CHECK(s.RunUntilMediaTime(5.4));
+			const double m1 = clk.NowSeconds();
+			const int64_t v1 = vt.ns.load();
+			const uint64_t a1 = s.realFrames;
+			const double clockSpeed = (m1 - m0) / (static_cast<double>(v1 - v0) * 1e-9);
+			const double audioSpeed = (static_cast<double>(a1 - a0) * 4.0 / 48000.0) / (static_cast<double>(v1 - v0) * 1e-9);
+			CHECKF(std::fabs(clockSpeed - 4.0) < 0.05, "clock speed %.3f, expected 4.0", clockSpeed);
+			CHECKF(std::fabs(audioSpeed - 4.0) < 0.1, "audio consumes %.3f x real time of the source, expected 4.0", audioSpeed);
+			// the beep k (media time k s) is heard when the clock must read k: compare within one video frame
+			double worst = 0.0;
+			int pairs = 0;
+			for (int k = 1; k < s.onsetCount && k <= 5; ++k)
+			{
+				const double c = s.ClockAt(s.HeardNs(s.onsetFrame[k]));
+				if (c < 0.0)
+					continue;
+				const double ms = (c - static_cast<double>(k)) * 1000.0;
+				if (std::fabs(ms) > std::fabs(worst))
+					worst = ms;
+				++pairs;
+			}
+			CHECKF(pairs >= 4, "only %d beeps compared at rate 4", pairs);
+			CHECKF(std::fabs(worst) < frameMs, "rate 8 (-> 4): clock %+.2f ms off at a beep (media time)", worst);
+			CHECK(!s.timedOut);
+			Log("  rate 8.0 requested: effective %.2f, clock speed %.3f, audio speed %.3f, %d beeps, worst clock error %+.2f ms\n",
+				clk.Rate(), clockSpeed, audioSpeed, pairs, worst);
+		}
+
+		g_context = "m2fix2 rate 0.1 -> 0.25";
+		{
+			const Clip& clip = *FindClip("av_sync_flash_beep.webm");
+			VirtualTime vt;
+			AudioClock clk(48000);
+			PlayerCore p(MakeResampledConfig(clk));
+			if (!LoadAndWait(p, ClipPath(clip), true))
+				return;
+			CHECK(Succeeded(p.SetRate(0.1)));
+			CHECK(clk.Rate() == 0.25);
+			AvSim s;
+			s.Init(p, clk, vt);
+			CHECK(p.Update());
+			CHECK(Succeeded(p.Play()));
+			CHECK(s.RunUntilMediaTime(0.3));
+			const double m0 = clk.NowSeconds();
+			const int64_t v0 = vt.ns.load();
+			const uint64_t a0 = s.realFrames;
+			CHECK(s.RunUntilMediaTime(1.3));
+			const double m1 = clk.NowSeconds();
+			const int64_t v1 = vt.ns.load();
+			const uint64_t a1 = s.realFrames;
+			const double elapsed = static_cast<double>(v1 - v0) * 1e-9;
+			const double clockSpeed = (m1 - m0) / elapsed;
+			const double audioSpeed = (static_cast<double>(a1 - a0) * 0.25 / 48000.0) / elapsed;
+			CHECKF(std::fabs(clockSpeed - 0.25) < 0.01, "clock speed %.4f, expected 0.25", clockSpeed);
+			CHECKF(std::fabs(audioSpeed - 0.25) < 0.01, "audio source speed %.4f, expected 0.25", audioSpeed);
+			CHECK(!s.timedOut);
+			Log("  rate 0.1 requested: effective %.2f, clock speed %.4f, audio speed %.4f\n", clk.Rate(), clockSpeed, audioSpeed);
+		}
+	}
+
+	// Audio that ends before the video (and media without audio) must not freeze the clock: the clip still ends.
+	void TestAudioShorterThanVideo()
+	{
+		g_context = "m2fix2 audio ends early";
+		std::vector<uint8_t> bytes;
+		RawLayout lay;
+		if (!ReadClipBytes("vp8_vorbis.webm", bytes) || !ParseLayout(bytes, lay))
+		{
+			CHECK(false);
+			return;
+		}
+		uint32_t audioTrack = 2;
+		{
+			std::unique_ptr<WebmDemuxer> d;
+			CHECK(Succeeded(WebmDemuxer::Open(std::make_unique<MemoryByteSource>(std::vector<uint8_t>(bytes)), d, nullptr, nullptr)));
+			if (d)
+				audioTrack = d->Audio().trackNumber;
+		}
+		// keep the first 40 audio blocks (~0.9 s of 5 s): the rest is re-addressed to a track nobody declared
+		size_t audioBlocks = 0, kept = 0;
+		for (const RawBlock& b : lay.blocks)
+		{
+			if (b.track != audioTrack)
+				continue;
+			++audioBlocks;
+			if (++kept > 40)
+				bytes[b.data] = static_cast<uint8_t>(0x80u | 0x3Fu);
+		}
+		CHECKF(audioBlocks > 80, "clip has %zu audio blocks", audioBlocks);
+
+		VirtualTime vt;
+		AudioClock clk(48000);
+		PlayerCore p(MakeResampledConfig(clk));
+		CHECK(Succeeded(p.Load(std::make_unique<MemoryByteSource>(std::move(bytes)))));
+		CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 20000));
+		if (p.GetLoadState() != LoadState::Ready)
+		{
+			CHECK(false);
+			return;
+		}
+		CHECK(p.GetInfo().hasAudio && p.GetInfo().hasVideo);
+		AvSim s;
+		s.Init(p, clk, vt);
+		CHECK(p.Update());
+		CHECK(Succeeded(p.Play()));
+		const bool ended = s.RunToEnd(p.GetInfo().durationSeconds + 2.0);
+		const double virt = static_cast<double>(vt.ns.load() - s.t0) * 1e-9;
+		CHECK(ended);
+		CHECK(!s.timedOut);
+		CHECK(p.GetState() == PlayerState::Ended);
+		CHECK(p.AudioEnded());
+		CHECKF(s.realFrames < 48000u * 2u, "audio frames %llu: the audio was not shortened", (unsigned long long)s.realFrames);
+		CHECKF(std::fabs(virt - p.GetInfo().durationSeconds) < 0.15, "ended after %.3f s of virtual time, duration %.3f s", virt,
+			p.GetInfo().durationSeconds);
+		Log("  audio %.2f s of %.2f s: Ended after %.3f s of virtual time\n", static_cast<double>(s.realFrames) / 48000.0,
+			p.GetInfo().durationSeconds, virt);
+
+		// the same for a clip without any audio track
+		g_context = "m2fix2 no audio track";
+		{
+			VirtualTime vt2;
+			AudioClock clk2(48000);
+			PlayerCore q(MakeResampledConfig(clk2));
+			if (!LoadAndWait(q, ClipPath(*FindClip("vp9_alpha.webm")), true))
+				return;
+			CHECK(!q.GetInfo().hasAudio);
+			AvSim s2;
+			s2.Init(q, clk2, vt2);
+			CHECK(q.Update());
+			CHECK(Succeeded(q.Play()));
+			const bool ended2 = s2.RunToEnd(q.GetInfo().durationSeconds + 2.0);
+			const double virt2 = static_cast<double>(vt2.ns.load() - s2.t0) * 1e-9;
+			CHECK(ended2);
+			CHECK(!s2.timedOut);
+			CHECKF(std::fabs(virt2 - q.GetInfo().durationSeconds) < 0.15, "no audio: ended after %.3f s, duration %.3f s", virt2,
+				q.GetInfo().durationSeconds);
+			Log("  no audio track: Ended after %.3f s of virtual time (duration %.3f s)\n", virt2, q.GetInfo().durationSeconds);
+		}
+	}
+
+	// Steady state with the audible-frames overload: no allocations, also at a non-trivial rate.
+	void TestHoldAllocations()
+	{
+		g_context = "m2fix2 allocs";
+		const Clip& clip = *FindClip("av_sync_flash_beep.webm");
+		VirtualTime vt;
+		AudioClock clk(48000);
+		PlayerCore p(MakeResampledConfig(clk));
+		if (!LoadAndWait(p, ClipPath(clip), true))
+			return;
+		CHECK(Succeeded(p.SetRate(2.0)));
+		AvSim s;
+		s.Init(p, clk, vt);
+		s.minBuffered = 4000;
+		CHECK(p.Update());
+		s.presented = 1;
+		CHECK(Succeeded(p.Play()));
+		CHECK(s.RunUntilPresented(40));
+		const uint64_t n0 = g_newCount.load();
+		const uint64_t d0 = g_deleteCount.load();
+		const uint64_t audio0 = s.realFrames;
+		CHECK(s.RunUntilPresented(s.presented + 60));
+		const uint64_t n1 = g_newCount.load();
+		const uint64_t d1 = g_deleteCount.load();
+		CHECK(!s.timedOut);
+		CHECKF(n1 == n0, "%llu allocations in the steady state window", (unsigned long long)(n1 - n0));
+		CHECKF(d1 == d0, "%llu frees in the steady state window", (unsigned long long)(d1 - d0));
+		CHECK(s.realFrames > audio0 + 24000);
+		Log("  %-34s ok: %llu allocations / %llu frees\n", g_context.c_str(), (unsigned long long)(n1 - n0), (unsigned long long)(d1 - d0));
+	}
+
+	void TestM2Fix2()
+	{
+		TestRateRange();
+		TestAudioClockWaiting();
+		TestSeekSync();
+		TestAudioShorterThanVideo();
+		TestHoldAllocations();
+	}
+
 	void TestM2Fix()
 	{
 		TestDecodeVideoOff();
@@ -2982,6 +3488,8 @@ int main(int argc, char** argv)
 		TestAudio2();
 	if (wanted("m2fix"))
 		TestM2Fix();
+	if (wanted("m2fix2"))
+		TestM2Fix2();
 	if (wanted("harden"))
 	{
 		TestMalformedIndex();

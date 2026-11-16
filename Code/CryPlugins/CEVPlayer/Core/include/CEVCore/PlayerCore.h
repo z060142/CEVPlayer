@@ -23,6 +23,7 @@
 #include "CEVCore/DecodePool.h"
 #include "CEVCore/IByteSource.h"
 #include "CEVCore/IClock.h"
+#include "CEVCore/Resampler.h"
 #include "CEVCore/Stats.h"
 #include "CEVCore/Status.h"
 #include "CEVCore/WebmDemuxer.h"
@@ -98,6 +99,9 @@ namespace cev
 	{
 	public:
 		static constexpr double kMaxAvOffsetSeconds = 2.0;
+		// Playback rate range of SetRate(): the range the audio resampler supports (Resampler::kMinRate / kMaxRate).
+		static constexpr double kMinRate = Resampler::kMinRate;
+		static constexpr double kMaxRate = Resampler::kMaxRate;
 
 		explicit PlayerCore(const PlayerConfig& config = PlayerConfig());
 		~PlayerCore();
@@ -121,7 +125,11 @@ namespace cev
 		Status Stop();                       // back to time 0, Stopped, first frame shown again
 		Status Seek(double seconds);
 		Status SetLoop(bool loop);
+		// rate > 0 (NaN / <= 0 -> InvalidArgument, value unchanged); values outside kMinRate .. kMaxRate are CLAMPED
+		// into that range (and return Ok) so that the clock, the audio resampler and the video all run at the same
+		// speed: GetRate() returns the rate that is in effect.
 		Status SetRate(double rate);
+		double GetRate() const;              // effective (clamped) playback rate, 1.0 by default
 		// A/V offset, seconds, consumer thread, applied in Update() only (the audio path is not touched).
 		// Update() looks the picture up at   clockTime - offset:
 		//   offset > 0: the picture waits `offset` longer, i.e. it is shown that much later relative to the clock
@@ -161,6 +169,8 @@ namespace cev
 		// contract as ReadAudio(); the resampler is reset automatically after a seek / loop / stop (no stale
 		// audio). Never allocates; if Load() / Unload() holds the resampler it outputs silence for that call.
 		// Do not mix ReadAudio() and ReadAudioResampled() on one player.
+		// With an AudioClock pass the return value to AudioClock::OnFramesConsumed(frames, returned): the clock holds
+		// while the callback delivers silence after a seek / loop / start / underrun (see AudioClock.h).
 		uint32_t ReadAudioResampled(float* dst, uint32_t frames);
 		// PCM frames ready for ReadAudio() (0 while a seek is pending).
 		uint32_t AudioBufferedFrames() const;

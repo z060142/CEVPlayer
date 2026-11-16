@@ -23,6 +23,11 @@ namespace cev
 		virtual void SetRate(double rate) = 0;
 		virtual double Rate() const = 0;
 		virtual bool IsRunning() const = 0;
+		// PlayerCore tells the clock that the current media has no (more) audio to wait for: no audio track, or
+		// the audio decoder is at its end and the PCM ring is drained. Called from the consumer thread, again after
+		// every Seek() once it applies. Default: ignored. AudioClock uses it to stop holding for audio that will
+		// never come.
+		virtual void NotifyAudioEnded() {}
 	};
 
 	class InternalClock final : public IClock
