@@ -1,0 +1,171 @@
+# Builds the CEVPlayer minimal FFmpeg (win64, static, LGPL; scope in docs/design/M5-ffmpeg.md) and, on request,
+# publishes it as an asset of a GitHub release of this repository.
+#
+#   * Manual run (Actions -> ffmpeg-minimal -> Run workflow): builds, tests, uploads the zip as a workflow artifact;
+#     "publish" additionally creates / updates the release ffmpeg-minimal-v<version> and attaches the zip.
+#   * Tag push ffmpeg-minimal-v*: same, always publishes. The tag must equal ffmpeg-minimal-v<FFMPEG_VERSION>-cev<CEV_BUILD_REV>
+#     from tools/ffmpeg/versions.env.
+#
+# After a release exists, pin it in Core/offline/include/CEVOffline/FfmpegInstall.h: kFfmpegMinimalVersion and
+# kFfmpegMinimalSha256 (the job summary prints both). The plugin refuses any download whose SHA-256 differs.
+#
+# NOTE: this workflow has not been run yet (it was written in a session without access to Actions / MSYS2); expect
+# to fix small things on the first run.
+name: ffmpeg-minimal
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Also create / update the release ffmpeg-minimal-v<version> and attach the zip"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "ffmpeg-minimal-v*"
+
+concurrency:
+  group: ffmpeg-minimal-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build minimal FFmpeg (MSYS2 MINGW64)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      zip: ${{ steps.version.outputs.zip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          source <(tr -d '\r' < tools/ffmpeg/versions.env)
+          version="${FFMPEG_VERSION}-cev${CEV_BUILD_REV}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "zip=ffmpeg-minimal-${version}-win64.zip" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "ffmpeg-minimal-v${version}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match tools/ffmpeg/versions.env (expected ffmpeg-minimal-v${version})" >&2
+            exit 1
+          fi
+
+      - name: Cache source downloads
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-build/downloads
+          key: ffmpeg-sources-${{ hashFiles('tools/ffmpeg/versions.env') }}
+
+      - name: Set up MSYS2 (MINGW64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            curl
+            tar
+            xz
+            zip
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          tools/ffmpeg/build_minimal.sh --work "$PWD/ffmpeg-build" --out "$PWD/ffmpeg-out"
+
+      # The reference ffmpeg is installed AFTER the build so that none of its libraries can leak into the build.
+      - name: Install a reference ffmpeg (test sources and ffprobe)
+        shell: msys2 {0}
+        run: |
+          pacman -S --noconfirm --needed mingw-w64-x86_64-ffmpeg
+
+      - name: Smoke test
+        shell: msys2 {0}
+        run: |
+          tools/ffmpeg/smoke_test_minimal.sh "$PWD/ffmpeg-build/ffmpeg-build/ffmpeg.exe"
+
+      - name: Checksum and summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ffmpeg-out
+          zip="${{ steps.version.outputs.zip }}"
+          sha="$(sha256sum "$zip" | cut -d' ' -f1)"
+          {
+            echo "### ffmpeg-minimal ${{ steps.version.outputs.version }}"
+            echo
+            echo "- file: \`$zip\` ($(stat -c %s "$zip") bytes)"
+            echo "- SHA-256: \`$sha\`"
+            echo
+            echo "Pin in \`FfmpegInstall.h\`:"
+            echo
+            echo '```cpp'
+            echo "constexpr const char* kFfmpegMinimalVersion = \"${{ steps.version.outputs.version }}\";"
+            echo "constexpr const char* kFfmpegMinimalSha256 = \"$sha\";"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.zip }}
+          path: |
+            ffmpeg-out/*.zip
+            ffmpeg-out/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish the release asset
+    needs: build
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+      ZIP: ${{ needs.build.outputs.zip }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.zip }}
+          path: dist
+
+      - name: Verify the checksum file
+        working-directory: dist
+        run: sha256sum -c "${ZIP}.sha256"
+
+      - name: Create or update the release
+        run: |
+          set -euo pipefail
+          tag="ffmpeg-minimal-v${VERSION}"
+          sha="$(cut -d' ' -f1 "dist/${ZIP}.sha256")"
+          notes="$(mktemp)"
+          {
+            echo "Minimal LGPL FFmpeg ${VERSION} for CEVPlayer (win64, static). Built by .github/workflows/ffmpeg-minimal.yml."
+            echo
+            echo "SHA-256 of ${ZIP}: \`${sha}\`"
+            echo
+            echo "The zip contains ffmpeg.exe, the licenses of every component, BUILD.txt (sources with SHA-256, toolchain, configure"
+            echo "arguments) and the build scripts. Scope and design: docs/design/M5-ffmpeg.md."
+          } > "$notes"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "dist/${ZIP}" "dist/${ZIP}.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
+          else
+            gh release create "$tag" "dist/${ZIP}" "dist/${ZIP}.sha256" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --title "FFmpeg minimal ${VERSION}" --notes-file "$notes"
+          fi
