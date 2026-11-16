@@ -11,7 +11,7 @@
 #   Code/SDKs/CEVPlayer/{libvpx,libwebm,libogg,libvorbis,libopus}  (one parent folder; stale
 #   pre-2026-11 copies directly under Code/SDKs/<lib> are removed)
 # Single files (overwritten, other files in the destination directory are left alone):
-#   cmake/modules/{CEVPlayerSDK,libvpx,libwebm,libogg,libvorbis,libopus}.cmake
+#   cmake/modules/{CEVPlayerSDK,libvpx,libwebm,libogg,libvorbis,libvorbisenc,libvorbisfile,libopus}.cmake
 #       -> <engine>/Tools/CMake/modules/
 # (The modules live in cmake/ here, not Tools/CMake/: on Windows "Tools" and the existing "tools"
 # script directory would be the same folder.)
@@ -69,7 +69,7 @@ for sdk in libvpx libwebm libogg libvorbis libopus; do # old flat layout
     if [ "$dry" -eq 1 ]; then echo "would remove old: Code/SDKs/$sdk"; else rm -rf "${old:?}"; echo "removed old: Code/SDKs/$sdk"; fi
   fi
 done
-for mod in CEVPlayerSDK libvpx libwebm libogg libvorbis libopus; do
+for mod in CEVPlayerSDK libvpx libwebm libogg libvorbis libvorbisenc libvorbisfile libopus; do
   sync_file "cmake/modules/$mod.cmake" "Tools/CMake/modules/$mod.cmake"
 done
 echo "sync_sources: done -> $engine"
