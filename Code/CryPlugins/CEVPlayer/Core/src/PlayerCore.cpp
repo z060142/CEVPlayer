@@ -13,6 +13,7 @@
 #include "AudioRing.h"
 #include "CEVCore/AudioDecoder.h"
 #include "CEVCore/FrameRing.h"
+#include "CEVCore/Resampler.h"
 #include "CEVCore/VideoDecoder.h"
 
 namespace cev
@@ -30,6 +31,7 @@ namespace cev
 		constexpr double kEndEpsilon = 1e-3;
 		constexpr double kEndGraceMin = 0.25;     // seconds past the duration after which remaining frames are discarded
 		constexpr uint32_t kMaxAudioBufferMs = 4000;
+		constexpr uint32_t kResampleBlock = 1024; // input frames moved from the PCM ring to the resampler at a time
 	}
 
 	struct PlayerCore::Impl final : public IDecodeTask
@@ -84,6 +86,18 @@ namespace cev
 		std::atomic<uint32_t> audioChannels{1};
 		std::atomic<uint32_t> appliedSeekGen{0};
 		std::atomic<uint32_t> decodeErrors{0};
+
+		// ---------------------------------------------------------------- resampled audio output
+		// Owned by the audio thread (ReadAudioResampled). Load / Unload touch it only under resMutex, the audio
+		// thread uses try_lock so it never waits for them.
+		std::mutex resMutex;
+		Resampler resampler;
+		std::vector<float> resIn;               // kResampleBlock * source channels
+		bool resReady = false;                  // resampler initialised for the loaded media (under resMutex)
+		uint32_t resGen = 0;                    // appliedSeekGen the resampler state belongs to
+		bool resFlushed = false;                // the tail of the stream was flushed for this generation
+		std::atomic<bool> resEnabled{false};    // set at the end of the load step, cleared when Unload starts
+		std::atomic<double> audioRate{1.0};     // SetRate() value, applied by the audio thread
 
 		// ---------------------------------------------------------------- seek command (consumer -> worker)
 		std::mutex cmdMutex;
@@ -312,6 +326,22 @@ namespace cev
 				aring.Init(info.audioChannels, static_cast<uint32_t>(cap));
 				ApplyAudioSeek(0.0);
 				audioChannels.store(std::max(1u, info.audioChannels), std::memory_order_relaxed);
+				if (cfg.outputSampleRate != 0)
+				{
+					std::lock_guard<std::mutex> lock(resMutex);
+					if (Succeeded(resampler.Init(info.audioSampleRate, std::max(1u, info.audioChannels), cfg.outputSampleRate,
+						2, kResampleBlock)))
+					{
+						resIn.assign(static_cast<size_t>(kResampleBlock) * std::max(1u, info.audioChannels), 0.0f);
+						resampler.SetRate(audioRate.load(std::memory_order_relaxed));
+						resGen = appliedSeekGen.load(std::memory_order_relaxed);
+						resFlushed = false;
+						resReady = true;
+						info.outputAudioSampleRate = cfg.outputSampleRate;
+						info.outputAudioChannels = 2;
+						resEnabled.store(true, std::memory_order_release);
+					}
+				}
 				audioActive.store(true, std::memory_order_release);
 			}
 			else
@@ -565,11 +595,19 @@ namespace cev
 			if (loadState.load(std::memory_order_acquire) == LoadState::Unloaded && handle == DecodePool::kInvalidHandle)
 				return;
 			audioActive.store(false, std::memory_order_release); // ReadAudio() returns 0 from here on
+			resEnabled.store(false, std::memory_order_release);
 			cancel.store(true, std::memory_order_release);
 			if (pool && handle != DecodePool::kInvalidHandle)
 				pool->Unregister(handle);
 			handle = DecodePool::kInvalidHandle;
 			pool.reset();
+			{
+				// Waits for a ReadAudioResampled() call that is still inside the resampler.
+				std::lock_guard<std::mutex> lock(resMutex);
+				resReady = false;
+				resampler.Shutdown();
+				std::vector<float>().swap(resIn);
+			}
 
 			vdec.reset();
 			adec.reset();
@@ -747,6 +785,7 @@ namespace cev
 	{
 		if (!(rate > 0.0) || rate > 16.0)
 			return Status::InvalidArgument;
+		m_impl->audioRate.store(rate, std::memory_order_relaxed);
 		m_impl->clock->SetRate(rate);
 		return Status::Ok;
 	}
@@ -870,6 +909,69 @@ namespace cev
 			std::memset(dst + static_cast<size_t>(n) * channels, 0, static_cast<size_t>(frames - n) * channels * sizeof(float));
 		// No worker wake-up here: Update() (consumer thread) wakes the worker when a quarter of the ring is free.
 		return n;
+	}
+
+	uint32_t PlayerCore::ReadAudioResampled(float* dst, uint32_t frames)
+	{
+		Impl& d = *m_impl;
+		if (dst == nullptr || frames == 0)
+			return 0;
+		if (!d.resEnabled.load(std::memory_order_acquire) || d.loadState.load(std::memory_order_acquire) != LoadState::Ready ||
+			!d.audioActive.load(std::memory_order_acquire))
+			return 0;
+		const size_t silenceBytes = static_cast<size_t>(frames) * 2 * sizeof(float);
+		// Load / Unload hold this while (re)building or freeing the resampler: never wait for them.
+		std::unique_lock<std::mutex> lock(d.resMutex, std::try_to_lock);
+		if (!lock.owns_lock() || !d.resReady)
+		{
+			std::memset(dst, 0, silenceBytes);
+			return 0;
+		}
+		if (d.State() != PlayerState::Playing ||
+			d.seekGen.load(std::memory_order_acquire) != d.appliedSeekGen.load(std::memory_order_acquire))
+		{
+			std::memset(dst, 0, silenceBytes);
+			return 0;
+		}
+		// A seek / loop / stop was applied since the last call: drop the resampler's history and buffered input.
+		const uint32_t gen = d.appliedSeekGen.load(std::memory_order_acquire);
+		if (gen != d.resGen)
+		{
+			d.resampler.Reset();
+			d.resGen = gen;
+			d.resFlushed = false;
+		}
+		d.resampler.SetRate(d.audioRate.load(std::memory_order_relaxed));
+
+		uint32_t produced = 0;
+		while (produced < frames)
+		{
+			const bool atEnd = d.AudioAtEnd(); // evaluated before the read: the ring is then really drained
+			uint32_t need = d.resampler.InputNeeded(frames - produced);
+			need = std::min(std::min(need, d.resampler.InputSpace()), kResampleBlock);
+			uint32_t got = 0;
+			if (need > 0)
+			{
+				got = d.aring.Read(d.resIn.data(), need);
+				if (got > 0)
+					d.resampler.Push(d.resIn.data(), got);
+			}
+			const uint32_t n = d.resampler.Pull(dst + static_cast<size_t>(produced) * 2, frames - produced);
+			produced += n;
+			if (n == 0 && got == 0)
+			{
+				if (need > 0 && atEnd && !d.resFlushed)
+				{
+					d.resampler.Flush(); // end of stream: let the filter tail out
+					d.resFlushed = true;
+					continue;
+				}
+				break; // underrun (or nothing more to do)
+			}
+		}
+		if (produced < frames)
+			std::memset(dst + static_cast<size_t>(produced) * 2, 0, static_cast<size_t>(frames - produced) * 2 * sizeof(float));
+		return produced;
 	}
 
 	uint32_t PlayerCore::AudioBufferedFrames() const

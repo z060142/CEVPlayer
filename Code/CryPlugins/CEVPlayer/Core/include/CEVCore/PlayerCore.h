@@ -41,8 +41,11 @@ namespace cev
 		uint32_t audioBufferMs = 500;        // PCM ring size
 		ColorStandard colorStandard = ColorStandard::Auto;
 		bool enableStats = false;
-		IClock* externalClock = nullptr;     // not owned; nullptr = InternalClock
+		IClock* externalClock = nullptr;     // not owned; nullptr = InternalClock (e.g. an AudioClock, see AudioClock.h)
 		std::shared_ptr<DecodePool> pool;    // nullptr = DecodePool::AcquireShared()
+		// Device rate for ReadAudioResampled(): 0 = disabled, otherwise the audio is converted to this rate and
+		// to stereo (the engine's SDL device uses 48000). ReadAudio() is not affected.
+		uint32_t outputSampleRate = 0;
 	};
 
 	struct MediaInfo
@@ -59,6 +62,8 @@ namespace cev
 		double durationSeconds = 0.0;
 		uint32_t audioSampleRate = 0;        // PCM output rate of ReadAudio()
 		uint32_t audioChannels = 0;
+		uint32_t outputAudioSampleRate = 0;  // ReadAudioResampled() rate (0 = resampling disabled / not available)
+		uint32_t outputAudioChannels = 0;    // 2 when outputAudioSampleRate != 0
 		uint32_t videoPacketCount = 0;
 		ColorStandard colorStandard = ColorStandard::BT601; // resolved
 		ColorRange colorRange = ColorRange::Limited;
@@ -125,6 +130,15 @@ namespace cev
 		// of the media currently loaded, so after loading other media re-read GetInfo().audioChannels once the
 		// player is Ready again before sizing the next callback buffer.
 		uint32_t ReadAudio(float* dst, uint32_t frames);
+		// Like ReadAudio(), but the PCM goes through the Resampler: dst receives `frames` interleaved STEREO
+		// frames at PlayerConfig::outputSampleRate (GetInfo().outputAudioSampleRate), at the current playback
+		// rate (SetRate(): varispeed, 0.25 .. 4.0). Returns the number of frames that came from decoded audio;
+		// the rest of dst is zero filled. Requires PlayerConfig::outputSampleRate != 0 and media with audio:
+		// otherwise dst is left untouched and 0 is returned (as for ReadAudio() before Ready). Same thread
+		// contract as ReadAudio(); the resampler is reset automatically after a seek / loop / stop (no stale
+		// audio). Never allocates; if Load() / Unload() holds the resampler it outputs silence for that call.
+		// Do not mix ReadAudio() and ReadAudioResampled() on one player.
+		uint32_t ReadAudioResampled(float* dst, uint32_t frames);
 		// PCM frames ready for ReadAudio() (0 while a seek is pending).
 		uint32_t AudioBufferedFrames() const;
 		bool AudioEnded() const;             // decoder at the end and PCM ring drained

@@ -70,6 +70,7 @@ endforeach()
 # Library
 # ---------------------------------------------------------------------------------------------------------------
 set(CEV_CORE_SOURCES
+	src/AudioClock.cpp
 	src/AudioDecoder.cpp
 	src/AudioRing.h
 	src/Clock.cpp
@@ -78,12 +79,14 @@ set(CEV_CORE_SOURCES
 	src/FrameRing.cpp
 	src/IByteSource.cpp
 	src/PlayerCore.cpp
+	src/Resampler.cpp
 	src/Stats.cpp
 	src/Status.cpp
 	src/VideoDecoder.cpp
 	src/WebmDemuxer.cpp)
 
 set(CEV_CORE_HEADERS
+	include/CEVCore/AudioClock.h
 	include/CEVCore/AudioDecoder.h
 	include/CEVCore/ColorConvert.h
 	include/CEVCore/DecodePool.h
@@ -91,6 +94,7 @@ set(CEV_CORE_HEADERS
 	include/CEVCore/IByteSource.h
 	include/CEVCore/IClock.h
 	include/CEVCore/PlayerCore.h
+	include/CEVCore/Resampler.h
 	include/CEVCore/Stats.h
 	include/CEVCore/Status.h
 	include/CEVCore/VideoDecoder.h

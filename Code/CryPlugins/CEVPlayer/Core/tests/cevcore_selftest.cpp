@@ -23,6 +23,7 @@
 #include <thread>
 #include <vector>
 
+#include "CEVCore/AudioClock.h"
 #include "CEVCore/AudioDecoder.h"
 #include "CEVCore/ColorConvert.h"
 #include "CEVCore/DecodePool.h"
@@ -30,6 +31,7 @@
 #include "CEVCore/IByteSource.h"
 #include "CEVCore/IClock.h"
 #include "CEVCore/PlayerCore.h"
+#include "CEVCore/Resampler.h"
 #include "CEVCore/Stats.h"
 #include "CEVCore/WebmDemuxer.h"
 
@@ -1660,6 +1662,962 @@ namespace
 		}
 		Log("  stress ok: %d iterations x 4 players, live allocations %s\n", iterations, "stable");
 	}
+
+	// =================================================================================================================
+	// M2a: Resampler, AudioClock, ReadAudioResampled
+	// =================================================================================================================
+	constexpr double kTwoPi = 6.283185307179586;
+
+	struct SineStats
+	{
+		bool finite = true;
+		double freq = 0.0;
+		double amp = 0.0;       // sqrt(2 * mean(x^2)) of the left channel
+		double maxDelta = 0.0;  // max |x[i] - x[i-1]| of the left channel
+	};
+
+	// Left channel of interleaved stereo `st`, frames [head, count - tail).
+	SineStats AnalyzeSine(const float* st, size_t count, size_t head, size_t tail, double sampleRate)
+	{
+		SineStats r;
+		if (count <= head + tail + 8)
+			return r;
+		const size_t end = count - tail;
+		double sumSq = 0.0;
+		int crossings = 0;
+		double firstCross = 0.0, lastCross = 0.0;
+		for (size_t i = head; i < end; ++i)
+		{
+			const double x = st[2 * i];
+			if (!std::isfinite(x) || !std::isfinite(st[2 * i + 1]))
+				r.finite = false;
+			sumSq += x * x;
+			if (i > head)
+			{
+				const double p = st[2 * (i - 1)];
+				r.maxDelta = std::max(r.maxDelta, std::fabs(x - p));
+				if (p < 0.0 && x >= 0.0)
+				{
+					const double pos = static_cast<double>(i - 1) + (-p) / (x - p);
+					if (crossings == 0)
+						firstCross = pos;
+					lastCross = pos;
+					++crossings;
+				}
+			}
+		}
+		r.amp = std::sqrt(2.0 * sumSq / static_cast<double>(end - head));
+		if (crossings >= 2)
+			r.freq = (crossings - 1) * sampleRate / (lastCross - firstCross);
+		return r;
+	}
+
+	uint32_t Lcg(uint32_t& s)
+	{
+		s = s * 1664525u + 1013904223u;
+		return s >> 8;
+	}
+
+	// Runs `in` (srcCh interleaved) through a fresh resampler in chunks of random size. Returns stereo output.
+	std::vector<float> RunResampler(Resampler& r, const std::vector<float>& in, uint32_t srcCh, bool randomChunks, bool flush)
+	{
+		const size_t frames = in.size() / srcCh;
+		std::vector<float> out;
+		out.reserve(static_cast<size_t>(frames / std::max(0.05, r.Step()) + 4096) * 2);
+		std::vector<float> tmp(2 * 1024);
+		uint32_t seed = 12345;
+		size_t ci = 0;
+		int guard = 0;
+		while (ci < frames && guard++ < 10000000)
+		{
+			const uint32_t chunk = randomChunks ? 1 + Lcg(seed) % 700 : 1024;
+			const uint32_t outCap = randomChunks ? 1 + Lcg(seed) % 900 : 1024;
+			const uint32_t n = static_cast<uint32_t>(std::min<size_t>(chunk, frames - ci));
+			uint32_t consumed = 0, produced = 0;
+			CHECK(Succeeded(r.Process(in.data() + ci * srcCh, n, tmp.data(), outCap, &consumed, &produced)));
+			out.insert(out.end(), tmp.begin(), tmp.begin() + static_cast<ptrdiff_t>(produced) * 2);
+			ci += consumed;
+		}
+		if (flush)
+		{
+			uint32_t got = 0;
+			do
+			{
+				got = r.Pull(tmp.data(), 1024); // input may still be buffered (small output capacity above)
+				out.insert(out.end(), tmp.begin(), tmp.begin() + static_cast<ptrdiff_t>(got) * 2);
+			} while (got > 0);
+			r.Flush();
+			do
+			{
+				got = r.Pull(tmp.data(), 1024);
+				out.insert(out.end(), tmp.begin(), tmp.begin() + static_cast<ptrdiff_t>(got) * 2);
+			} while (got > 0);
+		}
+		return out;
+	}
+
+	void CheckSine(uint32_t srcRate, double rate, double freq, uint32_t dstRate = 48000)
+	{
+		char ctx[96];
+		std::snprintf(ctx, sizeof(ctx), "resampler %u->%u rate %.2f", srcRate, dstRate, rate);
+		g_context = ctx;
+		Resampler r;
+		CHECK(Succeeded(r.Init(srcRate, 1, dstRate, 2, 1024)));
+		r.SetRate(rate);
+		const size_t n = srcRate; // one second
+		std::vector<float> in(n);
+		for (size_t i = 0; i < n; ++i)
+			in[i] = static_cast<float>(0.5 * std::sin(kTwoPi * freq * static_cast<double>(i) / srcRate));
+
+		const std::vector<float> out = RunResampler(r, in, 1, true, true);
+		const size_t frames = out.size() / 2;
+		const double expectFrames = static_cast<double>(n) / r.Step();
+		CHECKF(std::fabs(static_cast<double>(frames) - expectFrames) <= 3.0, "output %zu frames, expected %.1f", frames, expectFrames);
+		const SineStats s = AnalyzeSine(out.data(), frames, 128, 128, dstRate);
+		const double ideal = freq * rate; // Hz heard at the output rate: stream plays `rate` times faster
+		CHECK(s.finite);
+		CHECKF(std::fabs(s.freq - ideal) < ideal * 0.005, "frequency %.2f Hz, expected %.2f", s.freq, ideal);
+		const double db = 20.0 * std::log10(std::max(1e-9, s.amp / 0.5));
+		CHECKF(std::fabs(db) < 1.0, "amplitude %.4f (%.2f dB)", s.amp, db);
+		const double bound = 1.05 * 0.5 * kTwoPi * ideal / dstRate + 1e-4;
+		CHECKF(s.maxDelta <= bound, "max sample delta %.5f > %.5f (click)", s.maxDelta, bound);
+		// right channel is a copy of the left one
+		bool same = true;
+		for (size_t i = 0; i < frames && same; ++i)
+			same = out[2 * i] == out[2 * i + 1];
+		CHECK(same);
+
+		// Chunking must not change the signal: compare with 1024 sized blocks.
+		Resampler ref;
+		CHECK(Succeeded(ref.Init(srcRate, 1, dstRate, 2, 1024)));
+		ref.SetRate(rate);
+		const std::vector<float> out2 = RunResampler(ref, in, 1, false, true);
+		CHECK(out2.size() / 2 + 1 >= frames && frames + 1 >= out2.size() / 2);
+		double maxDiff = 0.0;
+		for (size_t i = 0; i < std::min(out.size(), out2.size()); ++i)
+			maxDiff = std::max(maxDiff, static_cast<double>(std::fabs(out[i] - out2[i])));
+		CHECKF(maxDiff < 1e-4, "block boundary difference %.2e", maxDiff);
+		Log("  %-34s ok: %zu frames, %.2f Hz, %.3f dB, max delta %.4f (bound %.4f)\n", ctx, frames, s.freq, db, s.maxDelta, bound);
+	}
+
+	void TestResampler()
+	{
+		g_context = "resampler";
+		// Rates required by the spec: 44.1k and 22.05k to 48k, identity, plus the varispeed range.
+		CheckSine(44100, 1.0, 1000.0);
+		CheckSine(48000, 1.0, 1000.0);
+		CheckSine(22050, 1.0, 1000.0);
+		CheckSine(44100, 0.5, 1000.0);
+		CheckSine(44100, 1.5, 1000.0);
+		CheckSine(48000, 2.0, 1000.0);
+		CheckSine(48000, 0.5, 1000.0);
+		CheckSine(96000, 1.0, 1000.0);   // downsampling (anti-alias kernel)
+		CheckSine(16000, 1.25, 700.0);
+
+		// 48k -> 48k at rate 1 is a bit exact pass through.
+		{
+			g_context = "resampler passthrough";
+			Resampler r;
+			CHECK(Succeeded(r.Init(48000, 2, 48000, 2, 512)));
+			std::vector<float> in(2 * 5000);
+			for (size_t i = 0; i < in.size(); ++i)
+				in[i] = static_cast<float>(std::sin(0.01 * static_cast<double>(i)));
+			const std::vector<float> out = RunResampler(r, in, 2, true, true);
+			CHECK(out.size() == in.size());
+			CHECK(out == in);
+		}
+
+		// Rate change while streaming (varispeed sweep): no discontinuity, nothing non finite.
+		{
+			g_context = "resampler rate sweep";
+			Resampler r;
+			CHECK(Succeeded(r.Init(44100, 1, 48000, 2, 1024)));
+			std::vector<float> in(44100);
+			for (size_t i = 0; i < in.size(); ++i)
+				in[i] = static_cast<float>(0.5 * std::sin(kTwoPi * 800.0 * static_cast<double>(i) / 44100.0));
+			std::vector<float> out;
+			std::vector<float> tmp(2 * 2048);
+			size_t ci = 0;
+			double rate = 1.0;
+			while (ci < in.size())
+			{
+				rate = 0.6 + 1.2 * std::min(1.0, static_cast<double>(ci) / in.size()); // 0.6 .. 1.8
+				r.SetRate(rate);
+				const uint32_t n = static_cast<uint32_t>(std::min<size_t>(480, in.size() - ci));
+				uint32_t consumed = 0, produced = 0;
+				CHECK(Succeeded(r.Process(in.data() + ci, n, tmp.data(), 1024, &consumed, &produced)));
+				out.insert(out.end(), tmp.begin(), tmp.begin() + static_cast<ptrdiff_t>(produced) * 2);
+				ci += consumed;
+			}
+			const SineStats s = AnalyzeSine(out.data(), out.size() / 2, 128, 2048, 48000.0);
+			const double bound = 1.05 * 0.5 * kTwoPi * 800.0 * 1.8 / 48000.0 + 1e-4;
+			CHECK(s.finite);
+			CHECKF(s.maxDelta <= bound, "max delta %.5f > %.5f", s.maxDelta, bound);
+			CHECKF(s.amp > 0.45 && s.amp < 0.55, "amp %.3f", s.amp);
+		}
+
+		// Channel layouts.
+		{
+			g_context = "resampler channels";
+			const double f = 1000.0;
+			const size_t n = 44100;
+			// mono: both channels equal
+			{
+				Resampler r;
+				CHECK(Succeeded(r.Init(44100, 1, 48000, 2, 1024)));
+				std::vector<float> in(n);
+				for (size_t i = 0; i < n; ++i)
+					in[i] = static_cast<float>(0.5 * std::sin(kTwoPi * f * static_cast<double>(i) / 44100.0));
+				const std::vector<float> out = RunResampler(r, in, 1, false, true);
+				const SineStats s = AnalyzeSine(out.data(), out.size() / 2, 128, 128, 48000.0);
+				CHECKF(std::fabs(s.amp - 0.5) < 0.01, "mono amp %.3f", s.amp);
+				bool same = true;
+				for (size_t i = 0; i < out.size() / 2; ++i)
+					same = same && out[2 * i] == out[2 * i + 1];
+				CHECK(same);
+			}
+			// 6 channels (Vorbis order FL FC FR BL BR LFE): drive one channel at a time
+			float cl[8], cr[8];
+			Resampler::DownmixCoefficients(6, cl, cr, 8);
+			CHECKF(std::fabs(cl[0] - cr[2]) < 1e-6f && cl[2] == 0.0f && cr[0] == 0.0f && cl[5] == 0.0f && cr[5] == 0.0f, "downmix matrix");
+			float sumL = 0.0f;
+			for (int c = 0; c < 6; ++c)
+				sumL += cl[c];
+			CHECKF(sumL <= 1.0001f, "downmix would clip: %.4f", sumL);
+			const struct { uint32_t ch; const char* name; } probes[] = {{0, "FL"}, {1, "FC"}, {2, "FR"}, {3, "BL"}, {4, "BR"}, {5, "LFE"}};
+			for (const auto& pr : probes)
+			{
+				Resampler r;
+				CHECK(Succeeded(r.Init(44100, 6, 48000, 2, 1024)));
+				std::vector<float> in(n * 6, 0.0f);
+				for (size_t i = 0; i < n; ++i)
+					in[i * 6 + pr.ch] = static_cast<float>(0.5 * std::sin(kTwoPi * f * static_cast<double>(i) / 44100.0));
+				const std::vector<float> out = RunResampler(r, in, 6, true, true);
+				double sl = 0.0, sr = 0.0;
+				const size_t frames = out.size() / 2;
+				for (size_t i = 200; i + 200 < frames; ++i)
+				{
+					sl += static_cast<double>(out[2 * i]) * out[2 * i];
+					sr += static_cast<double>(out[2 * i + 1]) * out[2 * i + 1];
+				}
+				const double cnt = static_cast<double>(frames - 400);
+				const double ampL = std::sqrt(2.0 * sl / cnt), ampR = std::sqrt(2.0 * sr / cnt);
+				const double wantL = 0.5 * cl[pr.ch], wantR = 0.5 * cr[pr.ch];
+				CHECKF(std::fabs(ampL - wantL) < 0.01 && std::fabs(ampR - wantR) < 0.01, "6ch %s: L %.4f (want %.4f) R %.4f (want %.4f)",
+					pr.name, ampL, wantL, ampR, wantR);
+			}
+			// 6 channels, all driven in phase: no clipping beyond full scale
+			{
+				Resampler r;
+				CHECK(Succeeded(r.Init(48000, 6, 48000, 2, 256)));
+				std::vector<float> in(6 * 1000, 1.0f);
+				const std::vector<float> out = RunResampler(r, in, 6, false, false);
+				float mx = 0.0f;
+				for (float v : out)
+					mx = std::max(mx, std::fabs(v));
+				CHECKF(mx <= 1.0001f && mx > 0.5f, "full scale 6ch sum %.4f", mx);
+			}
+		}
+
+		// API edges
+		{
+			g_context = "resampler api";
+			Resampler r;
+			uint32_t c = 0, p = 0;
+			float buf[8] = {};
+			CHECK(r.Process(buf, 1, buf, 1, &c, &p) == Status::InvalidState);
+			CHECK(r.Init(500, 2) == Status::InvalidArgument);
+			CHECK(r.Init(44100, 0) == Status::InvalidArgument);
+			CHECK(r.Init(44100, 2, 48000, 3) == Status::InvalidArgument);
+			CHECK(r.Init(44100, 2, 48000, 2, 0) == Status::InvalidArgument);
+			CHECK(!r.IsInitialized());
+			CHECK(Succeeded(r.Init(44100, 2, 48000, 1, 64)));
+			CHECK(r.Process(nullptr, 4, buf, 1, &c, &p) == Status::InvalidArgument);
+			r.SetRate(100.0);
+			CHECK(r.Rate() == Resampler::kMaxRate);
+			r.SetRate(0.0001);
+			CHECK(r.Rate() == Resampler::kMinRate);
+			r.SetRate(-1.0);
+			CHECK(r.Rate() == Resampler::kMinRate);
+			r.Shutdown();
+			CHECK(!r.IsInitialized());
+			CHECK(r.Pull(buf, 4) == 0);
+		}
+
+		// Reset drops the history: the first output after Reset() is the new first input.
+		{
+			g_context = "resampler reset";
+			Resampler r;
+			CHECK(Succeeded(r.Init(44100, 2, 48000, 2, 512)));
+			std::vector<float> loud(2 * 512, 1.0f), quiet(2 * 512, 0.0f);
+			float tmp[2 * 2048];
+			uint32_t c = 0, p = 0;
+			CHECK(Succeeded(r.Process(loud.data(), 512, tmp, 2048, &c, &p)));
+			r.Reset();
+			CHECK(Succeeded(r.Process(quiet.data(), 512, tmp, 2048, &c, &p)));
+			float mx = 0.0f;
+			for (uint32_t i = 0; i < p * 2; ++i)
+				mx = std::max(mx, std::fabs(tmp[i]));
+			CHECKF(p > 400 && mx == 0.0f, "stale output after Reset: %u frames, peak %f", p, mx);
+		}
+
+		// Steady state: no allocation in Push / Pull / Process / SetRate / Reset.
+		{
+			g_context = "resampler allocs";
+			Resampler r;
+			CHECK(Succeeded(r.Init(44100, 6, 48000, 2, 1024)));
+			std::vector<float> in(6 * 1024, 0.25f);
+			std::vector<float> out(2 * 2048);
+			uint32_t c = 0, p = 0;
+			const uint64_t n0 = g_newCount.load();
+			for (int i = 0; i < 200; ++i)
+			{
+				r.SetRate(0.5 + 0.0075 * i);
+				if (i == 100)
+					r.Reset();
+				CHECK(Succeeded(r.Process(in.data(), 1024, out.data(), 2048, &c, &p)));
+				r.Flush();
+			}
+			const uint64_t n1 = g_newCount.load();
+			CHECKF(n1 == n0, "%llu allocations in the resampler", (unsigned long long)(n1 - n0));
+		}
+		Log("  resampler tests done\n");
+	}
+
+	// ---------------------------------------------------------------------------------------------------------------
+	// Virtual time + simulated audio device
+	// ---------------------------------------------------------------------------------------------------------------
+	struct VirtualTime
+	{
+		std::atomic<int64_t> ns{1000000000};
+		static int64_t Now(void* user) { return static_cast<VirtualTime*>(user)->ns.load(std::memory_order_relaxed); }
+	};
+
+	void TestAudioClockUnit()
+	{
+		g_context = "audioclock unit";
+		VirtualTime vt;
+		AudioClock clk(48000);
+		clk.SetTimeSource(&VirtualTime::Now, &vt);
+		const int64_t base = vt.ns.load();
+		const auto tAt = [&](double sec) { return base + static_cast<int64_t>(sec * 1e9); };
+		const auto callbacks = [&](double from, double to) // 10 ms blocks of 480 frames at from, from + 10 ms, ...
+		{
+			for (double t = from; t < to - 1e-9; t += 0.01)
+			{
+				vt.ns = tAt(t);
+				clk.OnFramesConsumed(480);
+			}
+		};
+
+		// no latency: the clock follows the callbacks
+		clk.Start();
+		CHECK(clk.IsRunning());
+		callbacks(0.0, 1.0);
+		vt.ns = tAt(1.0);
+		const double t1 = clk.NowSeconds();
+		CHECKF(std::fabs(t1 - 1.0) < 0.02, "clock %.4f s, expected ~1.0", t1);
+
+		// latency of 960 frames (20 ms): media time lags by 20 ms (minus the block delivered at the last callback)
+		clk.SetOutputLatencyFrames(960);
+		clk.Seek(0.0);
+		callbacks(1.0, 2.0);
+		vt.ns = tAt(2.0);
+		const double t2 = clk.NowSeconds();
+		CHECKF(std::fabs(t2 - (1.0 - 0.02)) < 0.02, "clock %.4f s with 20 ms latency, expected ~0.98", t2);
+
+		// pause: frozen while callbacks continue; resume continues
+		clk.Pause();
+		CHECK(!clk.IsRunning());
+		const double tp = clk.NowSeconds();
+		callbacks(2.0, 3.0);
+		vt.ns = tAt(3.0);
+		CHECK(clk.NowSeconds() == tp);
+		clk.Resume();
+		CHECK(clk.IsRunning());
+		callbacks(3.0, 4.0);
+		vt.ns = tAt(4.0);
+		const double t3 = clk.NowSeconds();
+		CHECKF(std::fabs((t3 - tp) - 0.98) < 0.03, "resumed clock advanced %.4f s, expected ~0.98", t3 - tp);
+
+		// seek keeps running, rate 2 doubles the speed, rate 0.5 halves it
+		clk.Seek(10.0);
+		CHECK(clk.NowSeconds() == 10.0);
+		clk.SetRate(2.0);
+		CHECK(clk.Rate() == 2.0);
+		callbacks(4.0, 5.0);
+		vt.ns = tAt(5.0);
+		const double t4 = clk.NowSeconds();
+		CHECKF(std::fabs((t4 - 10.0) - 1.96) < 0.06, "rate 2: advanced %.4f s, expected ~1.96", t4 - 10.0);
+		clk.SetRate(0.5);
+		const double t5a = clk.NowSeconds();
+		callbacks(5.0, 7.0);
+		vt.ns = tAt(7.0);
+		const double t5 = clk.NowSeconds();
+		CHECKF(std::fabs((t5 - t5a) - 1.0) < 0.05, "rate 0.5: advanced %.4f s over 2 s, expected ~1.0", t5 - t5a);
+		clk.SetRate(1.0);
+		CHECK(clk.Rate() == 1.0);
+		clk.SetRate(-3.0); // rejected
+		CHECK(clk.Rate() == 1.0);
+
+		// callbacks stop (device lost / no data): the clock continues on the wall clock, monotonic
+		clk.Seek(20.0);
+		callbacks(7.0, 8.0);
+		double last = clk.NowSeconds();
+		double worstStep = 0.0;
+		for (double t = 8.0; t < 11.0; t += 1.0 / 60.0)
+		{
+			vt.ns = tAt(t);
+			const double now = clk.NowSeconds();
+			CHECK(now >= last);
+			worstStep = std::max(worstStep, now - last);
+			last = now;
+		}
+		vt.ns = tAt(11.0);
+		last = clk.NowSeconds();
+		CHECKF(std::fabs((last - 20.0) - 3.98) < 0.1, "stalled: advanced %.4f s over 4 s, expected ~3.98", last - 20.0);
+		CHECKF(worstStep < 0.03, "stalled clock step %.4f s", worstStep);
+		CHECK(clk.IsStalled());
+		// callbacks come back: no jump backwards, normal speed again
+		callbacks(11.0, 12.0);
+		vt.ns = tAt(12.0);
+		const double back = clk.NowSeconds();
+		CHECK(back >= last);
+		CHECKF(std::fabs((back - last) - 1.0) < 0.1, "after the stall the clock advanced %.4f s over 1 s", back - last);
+		CHECK(!clk.IsStalled());
+
+		// no device at all: wall clock from Start()
+		AudioClock noDevice;
+		noDevice.SetTimeSource(&VirtualTime::Now, &vt);
+		noDevice.Start();
+		const double n0 = noDevice.NowSeconds();
+		vt.ns = vt.ns.load() + 1000000000;
+		const double n1 = noDevice.NowSeconds();
+		CHECKF(std::fabs((n1 - n0) - 1.0) < 1e-3, "no device: advanced %.4f s", n1 - n0);
+		noDevice.Pause();
+		vt.ns = vt.ns.load() + 1000000000;
+		CHECK(std::fabs(noDevice.NowSeconds() - n1) < 1e-3);
+		noDevice.SetRate(2.0);
+		noDevice.Resume();
+		vt.ns = vt.ns.load() + 500000000;
+		CHECKF(std::fabs((noDevice.NowSeconds() - n1) - 1.0) < 1e-3, "no device, rate 2 advanced %.4f s", noDevice.NowSeconds() - n1);
+		Log("  audioclock unit ok\n");
+	}
+
+	// Simulated audio device and 60 Hz render loop on a virtual time line (deterministic, faster than real time).
+	// Audio callbacks run every `block` frames of the output rate, the consumer polls every 1/60 s. The device
+	// model: the audio of a block is heard `pipeFrames` frames after its callback ran.
+	struct AvSim
+	{
+		PlayerCore* p = nullptr;
+		AudioClock* clk = nullptr;
+		VirtualTime* vt = nullptr;
+		static constexpr uint32_t kBlock = 480;
+		static constexpr uint32_t kPipeFrames = 480;
+		static constexpr double kOutRate = 48000.0;
+		std::vector<float> buf;
+		int64_t t0 = 0;
+		uint64_t cbIndex = 0;
+		uint64_t pollIndex = 0;
+		uint32_t minBuffered = 1400;
+
+		uint64_t realFrames = 0;
+		uint64_t presented = 0;
+		bool timedOut = false;
+		bool nonFinite = false;
+		float peak = 0.0f;
+		uint64_t quietRun = 1u << 30;
+		uint64_t onsetFrame[64];
+		int onsetCount = 0;
+		double flashPts[64];
+		int64_t flashPresentedNs[64];
+		int flashCount = 0;
+		bool detectFlash = false;
+
+		// capture of the stereo output
+		float* cap = nullptr;
+		size_t capFrames = 0;
+		size_t capCount = 0;
+
+		void Init(PlayerCore& player, AudioClock& clock, VirtualTime& time)
+		{
+			p = &player;
+			clk = &clock;
+			vt = &time;
+			buf.assign(kBlock * 2, 0.0f);
+			clk->SetTimeSource(&VirtualTime::Now, vt);
+			clk->SetOutputLatencyFrames(kPipeFrames + kBlock);
+			t0 = vt->ns.load();
+		}
+
+		int64_t CallbackNs(uint64_t k) const { return t0 + static_cast<int64_t>(static_cast<double>(k) * kBlock * 1e9 / kOutRate + 0.5); }
+		int64_t PollNs(uint64_t j) const { return t0 + static_cast<int64_t>(static_cast<double>(j) * 1e9 / 60.0 + 0.5); }
+		// virtual time at which output frame n (counting from the first callback) is heard
+		int64_t HeardNs(uint64_t n) const { return t0 + static_cast<int64_t>(static_cast<double>(n + kPipeFrames) * 1e9 / kOutRate + 0.5); }
+
+		void AudioCallback()
+		{
+			const MediaInfo& info = p->GetInfo();
+			if (info.hasAudio && p->GetState() == PlayerState::Playing)
+			{
+				if (!WaitFor([&] { return p->AudioBufferedFrames() >= minBuffered || p->AudioDecoderAtEnd(); }, 15000))
+					timedOut = true;
+			}
+			const uint32_t got = p->ReadAudioResampled(buf.data(), kBlock);
+			realFrames += got;
+			const uint64_t base = cbIndex * kBlock;
+			for (uint32_t i = 0; i < kBlock; ++i)
+			{
+				const float l = buf[2 * i], r = buf[2 * i + 1];
+				if (!std::isfinite(l) || !std::isfinite(r))
+					nonFinite = true;
+				const float m = std::max(std::fabs(l), std::fabs(r));
+				peak = std::max(peak, m);
+				if (m > 0.1f)
+				{
+					if (quietRun >= 24000 && onsetCount < 64)
+						onsetFrame[onsetCount++] = base + i;
+					quietRun = 0;
+				}
+				else
+				{
+					++quietRun;
+				}
+				if (cap != nullptr && capCount < capFrames)
+				{
+					cap[2 * capCount] = l;
+					cap[2 * capCount + 1] = r;
+					++capCount;
+				}
+			}
+			clk->OnFramesConsumed(kBlock);
+			++cbIndex;
+		}
+
+		void VideoPoll(int64_t ns)
+		{
+			const MediaInfo& info = p->GetInfo();
+			if (info.hasVideo && p->GetState() == PlayerState::Playing)
+			{
+				if (!WaitFor([&] { return p->VideoBufferedFrame() || p->VideoDecoderAtEnd(); }, 15000))
+					timedOut = true;
+			}
+			if (p->Update())
+			{
+				++presented;
+				if (detectFlash && flashCount < 64)
+				{
+					FrameView fv;
+					if (p->GetFrame(fv) && fv.plane[0] != nullptr &&
+						fv.plane[0][static_cast<ptrdiff_t>(fv.height / 2) * fv.stride[0] + fv.width / 2] > 200)
+					{
+						flashPts[flashCount] = fv.pts;
+						flashPresentedNs[flashCount] = ns;
+						++flashCount;
+					}
+				}
+			}
+		}
+
+		// Runs the next event (audio callback or video poll, whichever is first in virtual time).
+		bool Step()
+		{
+			const int64_t ta = CallbackNs(cbIndex);
+			const int64_t tv = PollNs(pollIndex);
+			if (ta <= tv)
+			{
+				vt->ns = ta;
+				AudioCallback();
+			}
+			else
+			{
+				vt->ns = tv;
+				VideoPoll(tv);
+				++pollIndex;
+			}
+			return !timedOut;
+		}
+
+		bool RunToEnd(double maxVirtualSeconds)
+		{
+			const int64_t limit = t0 + static_cast<int64_t>(maxVirtualSeconds * 1e9);
+			while (vt->ns.load() < limit)
+			{
+				if (!Step())
+					return false;
+				if (p->GetState() == PlayerState::Ended)
+					return true;
+			}
+			return false;
+		}
+
+		bool RunUntilPresented(uint64_t target)
+		{
+			const int64_t limit = vt->ns.load() + 120000000000ll;
+			while (presented < target && vt->ns.load() < limit)
+				if (!Step())
+					return false;
+			return presented >= target;
+		}
+
+		bool RunUntilMediaTime(double t)
+		{
+			const int64_t limit = vt->ns.load() + 120000000000ll;
+			while (clk->NowSeconds() < t && vt->ns.load() < limit)
+				if (!Step())
+					return false;
+			return clk->NowSeconds() >= t;
+		}
+
+		bool RunUntilCaptured()
+		{
+			while (capCount < capFrames)
+				if (!Step())
+					return false;
+			return true;
+		}
+	};
+
+	PlayerConfig MakeResampledConfig(AudioClock& clk)
+	{
+		PlayerConfig cfg;
+		cfg.externalClock = &clk;
+		cfg.outputSampleRate = 48000;
+		cfg.enableStats = true;
+		return cfg;
+	}
+
+	// Pause / Resume / Seek / SetRate reach the AudioClock through PlayerCore.
+	void TestAudioClockWiring(const Clip& clip)
+	{
+		g_context = std::string("audioclock wiring ") + clip.file;
+		VirtualTime vt;
+		AudioClock clk(48000);
+		PlayerCore p(MakeResampledConfig(clk));
+		if (!LoadAndWait(p, ClipPath(clip), true))
+			return;
+		CHECK(p.GetInfo().outputAudioSampleRate == 48000 && p.GetInfo().outputAudioChannels == 2);
+		AvSim s;
+		s.Init(p, clk, vt);
+		CHECK(p.Update());
+		CHECK(!clk.IsRunning());
+		CHECK(Succeeded(p.Play()));
+		CHECK(clk.IsRunning());
+		CHECK(s.RunUntilPresented(30));
+		const double t1 = p.GetTime();
+		CHECK(t1 > 0.5);
+		CHECK(Succeeded(p.Pause()));
+		CHECK(!clk.IsRunning());
+		const uint64_t cb0 = s.cbIndex;
+		for (int i = 0; i < 100; ++i) // callbacks continue while paused, the clock must not move
+			CHECK(s.Step());
+		CHECK(s.cbIndex > cb0);
+		CHECK(p.GetTime() == t1);
+		CHECK(Succeeded(p.Resume()));
+		CHECK(clk.IsRunning());
+		CHECK(Succeeded(p.SetRate(1.5)));
+		CHECK(clk.Rate() == 1.5);
+		CHECK(Succeeded(p.SetRate(1.0)));
+		CHECK(Succeeded(p.Seek(2.0)));
+		CHECK(std::fabs(p.GetTime() - 2.0) < 1e-6);
+		CHECK(Succeeded(p.Stop()));
+		CHECK(!clk.IsRunning());
+		CHECK(p.GetTime() == 0.0);
+		p.Unload();
+		CHECK(!clk.IsRunning() && clk.NowSeconds() == 0.0);
+		Log("  %-34s ok\n", g_context.c_str());
+	}
+
+	// End to end: decoded audio through the resampler, total length and sanity.
+	void TestResampledPlayback(const Clip& clip)
+	{
+		g_context = std::string("resampled playback ") + clip.file;
+		VirtualTime vt;
+		AudioClock clk(48000);
+		PlayerCore p(MakeResampledConfig(clk));
+		if (!LoadAndWait(p, ClipPath(clip), false))
+			return;
+		const MediaInfo& info = p.GetInfo();
+		CHECK(info.hasAudio && info.audioSampleRate == clip.audioRate);
+		CHECK(info.outputAudioSampleRate == 48000 && info.outputAudioChannels == 2);
+		AvSim s;
+		s.Init(p, clk, vt);
+		CHECK(p.Update());
+		CHECK(Succeeded(p.Play()));
+		const bool ended = s.RunToEnd(clip.duration + 2.0);
+		CHECK(ended);
+		CHECK(!s.timedOut);
+		CHECK(!s.nonFinite);
+		CHECKF(s.peak > 0.05f && s.peak < 1.5f, "peak %f", s.peak);
+		const double expected = clip.duration * 48000.0;
+		const double ratio = static_cast<double>(s.realFrames) / expected;
+		CHECKF(std::fabs(ratio - 1.0) <= 0.005, "resampled output %llu frames, expected %.0f (%.3f%%)",
+			(unsigned long long)s.realFrames, expected, (ratio - 1.0) * 100.0);
+		CHECK(p.DecodeErrors() == 0);
+		Log("  %-34s ok: %llu frames at 48 kHz for %.3f s (%.3f%% of duration x 48000), peak %.2f\n", g_context.c_str(),
+			(unsigned long long)s.realFrames, clip.duration, ratio * 100.0, s.peak);
+	}
+
+	// A/V sync with the AudioClock: flash frame presented vs. the moment the beep is heard.
+	void TestAvSyncAudioClock()
+	{
+		const Clip& clip = *FindClip("av_sync_flash_beep.webm");
+		g_context = "av sync audioclock";
+		VirtualTime vt;
+		AudioClock clk(48000);
+		PlayerCore p(MakeResampledConfig(clk));
+		if (!LoadAndWait(p, ClipPath(clip), true))
+			return;
+		AvSim s;
+		s.Init(p, clk, vt);
+		s.detectFlash = true;
+		CHECK(p.Update()); // frame 0 (a flash) is shown while stopped: not part of the measurement
+		CHECK(Succeeded(p.Play()));
+		CHECK(s.RunToEnd(clip.duration + 2.0));
+		CHECK(!s.timedOut);
+		CHECK(!s.nonFinite);
+		CHECK(p.GetState() == PlayerState::Ended);
+		CHECKF(s.onsetCount >= 9, "beep onsets %d", s.onsetCount);
+		CHECKF(s.flashCount >= 8, "flash frames presented %d", s.flashCount);
+
+		double worst = 0.0;
+		int compared = 0;
+		for (int f = 0; f < s.flashCount; ++f)
+		{
+			const int sec = static_cast<int>(std::lround(s.flashPts[f]));
+			if (sec < 1)
+				continue;
+			int onset = -1;
+			for (int o = 0; o < s.onsetCount; ++o)
+				if (std::llround(static_cast<double>(s.onsetFrame[o]) / 48000.0) == sec)
+					onset = o;
+			CHECKF(onset >= 0, "no beep onset near %d s", sec);
+			if (onset < 0)
+				continue;
+			const double offsetMs = static_cast<double>(s.flashPresentedNs[f] - s.HeardNs(s.onsetFrame[onset])) * 1e-6;
+			worst = std::max(worst, std::fabs(offsetMs));
+			CHECKF(std::fabs(offsetMs) < 1000.0 / 30.0, "flash at %d s presented %.2f ms from its beep", sec, offsetMs);
+			++compared;
+		}
+		CHECKF(compared >= 8, "only %d flash/beep pairs compared", compared);
+		const StatsSnapshot st = p.GetStats();
+		CHECKF(st.framesDropped == 0, "dropped %llu frames", (unsigned long long)st.framesDropped);
+		const double ratio = static_cast<double>(s.realFrames) / (clip.duration * 48000.0);
+		CHECKF(std::fabs(ratio - 1.0) <= 0.005, "audio length ratio %.4f", ratio);
+		Log("  av sync (AudioClock): %d flash/beep pairs, worst |offset| %.2f ms (limit 33.33 ms), dropped %llu\n", compared, worst,
+			(unsigned long long)st.framesDropped);
+	}
+
+	void TestResampledAllocations(const Clip& clip)
+	{
+		g_context = std::string("allocs resampled ") + clip.file;
+		VirtualTime vt;
+		AudioClock clk(48000);
+		PlayerCore p(MakeResampledConfig(clk));
+		if (!LoadAndWait(p, ClipPath(clip), true))
+			return;
+		AvSim s;
+		s.Init(p, clk, vt);
+		CHECK(p.Update());
+		s.presented = 1;
+		CHECK(Succeeded(p.Play()));
+		CHECK(s.RunUntilPresented(40));
+		const uint64_t n0 = g_newCount.load();
+		const uint64_t d0 = g_deleteCount.load();
+		const uint64_t presented0 = s.presented;
+		const uint64_t audio0 = s.realFrames;
+		CHECK(s.RunUntilPresented(presented0 + 60));
+		const uint64_t n1 = g_newCount.load();
+		const uint64_t d1 = g_deleteCount.load();
+		CHECK(!s.timedOut);
+		CHECKF(n1 == n0, "%llu allocations in the steady state window", (unsigned long long)(n1 - n0));
+		CHECKF(d1 == d0, "%llu frees in the steady state window", (unsigned long long)(d1 - d0));
+		CHECK(s.realFrames > audio0 + 48000);
+		Log("  %-34s ok: %llu allocations / %llu frees over %llu frames, %llu audio frames at 48 kHz\n", g_context.c_str(),
+			(unsigned long long)(n1 - n0), (unsigned long long)(d1 - d0), (unsigned long long)(s.presented - presented0),
+			(unsigned long long)(s.realFrames - audio0));
+	}
+
+	// After a seek (or loop) the first output samples belong to the new position; nothing stale comes out.
+	void TestResampledSeek()
+	{
+		const Clip& clip = *FindClip("av_sync_flash_beep.webm");
+		g_context = "resampled seek";
+		VirtualTime vt;
+		AudioClock clk(48000);
+		PlayerCore p(MakeResampledConfig(clk));
+		if (!LoadAndWait(p, ClipPath(clip), true))
+			return;
+		AvSim s;
+		s.Init(p, clk, vt);
+		CHECK(p.Update());
+		CHECK(Succeeded(p.Play()));
+		std::vector<float> cap(2 * 48000);
+		s.cap = cap.data();
+		s.capFrames = 48000;
+
+		// 1. just before the beep at 1.0 s (its samples are buffered in the ring / resampler), seek into silence.
+		CHECK(s.RunUntilMediaTime(0.985));
+		CHECK(Succeeded(p.Seek(3.5)));
+		CHECK(std::fabs(p.GetTime() - 3.5) < 1e-6);
+		s.capCount = 0;
+		CHECK(s.RunUntilCaptured());
+		{
+			int64_t first = -1;
+			float peakEarly = 0.0f;
+			for (size_t i = 0; i < s.capFrames; ++i)
+			{
+				const float m = std::max(std::fabs(cap[2 * i]), std::fabs(cap[2 * i + 1]));
+				if (i < 23000)
+					peakEarly = std::max(peakEarly, m);
+				if (first < 0 && m > 0.1f)
+					first = static_cast<int64_t>(i);
+			}
+			// beep at 4.0 s = 0.5 s after the seek target
+			const double firstMs = first < 0 ? -1.0 : first * 1000.0 / 48000.0;
+			CHECKF(peakEarly < 0.01f, "stale audio after seek: peak %.4f before the beep", peakEarly);
+			CHECKF(first >= 0 && std::fabs(firstMs - 500.0) < 8.0, "beep %.2f ms after the seek, expected 500 ms", firstMs);
+			Log("  seek to 3.5 s: beep %.2f ms after the seek (expected 500), silence peak %.5f\n", firstMs, peakEarly);
+		}
+
+		// 2. seek into the middle of the beep at 4.0 .. 4.05 s: sound at once, ends 30 ms later.
+		CHECK(Succeeded(p.Seek(4.02)));
+		s.capCount = 0;
+		CHECK(s.RunUntilCaptured());
+		{
+			int64_t first = -1, last = -1;
+			for (size_t i = 0; i < 9600; ++i)
+			{
+				const float m = std::max(std::fabs(cap[2 * i]), std::fabs(cap[2 * i + 1]));
+				if (m > 0.1f)
+				{
+					if (first < 0)
+						first = static_cast<int64_t>(i);
+					last = static_cast<int64_t>(i);
+				}
+			}
+			const double firstMs = first < 0 ? -1.0 : first * 1000.0 / 48000.0;
+			const double lastMs = last < 0 ? -1.0 : last * 1000.0 / 48000.0;
+			CHECKF(first >= 0 && firstMs < 2.0, "first sound %.2f ms after the seek, expected immediately", firstMs);
+			CHECKF(last >= 0 && std::fabs(lastMs - 30.0) < 8.0, "beep ends %.2f ms after the seek, expected 30 ms", lastMs);
+			Log("  seek to 4.02 s: sound %.2f .. %.2f ms after the seek (expected 0 .. 30)\n", firstMs, lastMs);
+		}
+
+		// 3. loop: the stream restarts at 0 (beep at the start) without stale audio from the end.
+		CHECK(Succeeded(p.SetLoop(true)));
+		CHECK(Succeeded(p.Seek(clip.duration - 0.6)));
+		CHECK(s.RunUntilMediaTime(clip.duration - 0.1));
+		const uint32_t loops0 = p.GetLoopCount();
+		int guard = 0;
+		while (p.GetLoopCount() == loops0 && guard++ < 2000)
+			CHECK(s.Step());
+		CHECK(p.GetLoopCount() == loops0 + 1);
+		s.capCount = 0;
+		CHECK(s.RunUntilCaptured());
+		{
+			int64_t first = -1;
+			for (size_t i = 0; i < s.capFrames && first < 0; ++i)
+				if (std::max(std::fabs(cap[2 * i]), std::fabs(cap[2 * i + 1])) > 0.1f)
+					first = static_cast<int64_t>(i);
+			const double firstMs = first < 0 ? -1.0 : first * 1000.0 / 48000.0;
+			CHECKF(first >= 0 && firstMs < 12.0, "after the loop the first sound is %.2f ms in, expected the start of the beep", firstMs);
+			Log("  loop: first sound %.2f ms after the wrap\n", firstMs);
+		}
+		CHECK(!s.timedOut);
+		CHECK(!s.nonFinite);
+	}
+
+	// Real time: a real thread plays the role of the audio device (10 ms blocks), the clock must follow wall time,
+	// survive the device going away for a while and never go backwards.
+	void TestAudioClockRealtime()
+	{
+		g_context = "audioclock realtime";
+		const Clip& clip = *FindClip("vp8_vorbis.webm");
+		AudioClock clk(48000);
+		PlayerCore p(MakeResampledConfig(clk));
+		if (!LoadAndWait(p, ClipPath(clip), true))
+			return;
+		using Steady = std::chrono::steady_clock;
+		clk.SetOutputLatencyFrames(960);
+		std::atomic<bool> stop{false};
+		std::atomic<bool> deviceOn{true};
+		std::atomic<uint64_t> callbacks{0};
+		std::thread audio([&]
+		{
+			std::vector<float> block(480 * 2);
+			auto next = Steady::now();
+			while (!stop.load())
+			{
+				next += std::chrono::milliseconds(10);
+				std::this_thread::sleep_until(next);
+				if (!deviceOn.load())
+				{
+					next = Steady::now();
+					continue;
+				}
+				p.ReadAudioResampled(block.data(), 480);
+				clk.OnFramesConsumed(480);
+				callbacks.fetch_add(1);
+			}
+		});
+
+		CHECK(p.Update());
+		CHECK(Succeeded(p.Play()));
+		const auto start = Steady::now();
+		const auto wall = [&] { return std::chrono::duration<double>(Steady::now() - start).count(); };
+		double last = 0.0;
+		bool monotonic = true;
+		double maxJump = 0.0;
+		const auto poll = [&](double untilWall)
+		{
+			while (wall() < untilWall)
+			{
+				p.Update();
+				const double t = p.GetTime();
+				if (t < last)
+					monotonic = false;
+				maxJump = std::max(maxJump, t - last);
+				last = t;
+				std::this_thread::sleep_for(std::chrono::milliseconds(8));
+			}
+		};
+		poll(1.2);
+		const double tNormal = p.GetTime();
+		const double w1 = wall();
+		CHECKF(std::fabs(tNormal - (w1 - 0.02)) < 0.10, "real time: clock %.3f s at wall %.3f s", tNormal, w1);
+		// device goes away for 0.6 s: the clock keeps running
+		deviceOn = false;
+		const double tOff = p.GetTime();
+		const double wOff = wall();
+		poll(wOff + 0.6);
+		const double advanced = p.GetTime() - tOff;
+		const double wallAdvanced = wall() - wOff;
+		CHECKF(std::fabs(advanced - wallAdvanced) < 0.08, "device off: clock advanced %.3f s in %.3f s of wall time", advanced, wallAdvanced);
+		deviceOn = true;
+		poll(wall() + 1.0);
+		stop = true;
+		audio.join();
+		CHECK(monotonic);
+		CHECKF(maxJump < 0.12, "largest clock step between two polls %.3f s", maxJump);
+		CHECK(callbacks.load() > 100);
+		Log("  audioclock realtime ok: clock %.3f s at wall %.3f s, device off for %.2f s -> advanced %.3f s, max step %.1f ms\n",
+			tNormal, w1, wallAdvanced, advanced, maxJump * 1000.0);
+		p.Unload();
+	}
+
+	void TestAudio2()
+	{
+		TestResampler();
+		TestAudioClockUnit();
+		TestAudioClockWiring(*FindClip("vp8_vorbis.webm"));
+		TestResampledPlayback(*FindClip("vp8_vorbis.webm"));
+		TestResampledPlayback(*FindClip("av_sync_flash_beep.webm"));
+		TestAvSyncAudioClock();
+		TestResampledSeek();
+		TestResampledAllocations(*FindClip("vp8_vorbis.webm"));
+		TestResampledAllocations(*FindClip("av_sync_flash_beep.webm"));
+		TestAudioClockRealtime();
+	}
 }
 
 // =====================================================================================================================
@@ -1753,6 +2711,8 @@ int main(int argc, char** argv)
 		TestSteadyStateAllocations(*FindClip("av_sync_flash_beep.webm"));
 		TestSteadyStateAllocations(*FindClip("vp8_vorbis.webm"));
 	}
+	if (wanted("audio2"))
+		TestAudio2();
 	if (wanted("harden"))
 	{
 		TestMalformedIndex();
