@@ -27,6 +27,7 @@ namespace CEVEditor
 		void Refresh();
 
 	private slots:
+		void RefreshFfmpeg();
 		void OnApplyDescriptor();
 		void OnJobChanged(int id);
 		void OnJobLog(int id, const QString& line);
@@ -34,6 +35,7 @@ namespace CEVEditor
 	private:
 		void BuildUi();
 		void FillFiles();
+		void FillVariants();
 		void FillDescriptor();
 		void RefreshJobs();
 		void Log(const QString& line);
@@ -47,6 +49,12 @@ namespace CEVEditor
 		QLabel* m_pSource = nullptr;
 		QLabel* m_pOffline = nullptr;
 		QTableWidget* m_pFiles = nullptr;
+		QTableWidget* m_pVariants = nullptr;
+		QLabel* m_pFfmpegState = nullptr;
+		QLabel* m_pFfmpegDetail = nullptr;
+		QPushButton* m_pFfmpegDownload = nullptr;
+		QPushButton* m_pBtnVariants = nullptr;
+		QPushButton* m_pBtnRecompress = nullptr;
 		QDoubleSpinBox* m_pAvOffset = nullptr;
 		QComboBox* m_pRoute = nullptr;
 		QComboBox* m_pDefaultLanguage = nullptr;

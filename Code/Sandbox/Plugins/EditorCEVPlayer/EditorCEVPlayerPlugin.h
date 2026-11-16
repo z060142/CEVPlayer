@@ -15,6 +15,8 @@ namespace CEVEditor
 {
 	class CJobRunner;
 	class CAutoScript;
+	class CFfmpegService;
+	class CImportQueue;
 }
 
 class EDITOR_CEV_API CEditorCEVPlayerPlugin : public IPlugin
@@ -29,5 +31,7 @@ public:
 
 private:
 	std::unique_ptr<CEVEditor::CJobRunner> m_pJobs;
+	std::unique_ptr<CEVEditor::CFfmpegService> m_pFfmpeg;
+	std::unique_ptr<CEVEditor::CImportQueue> m_pQueue;
 	std::unique_ptr<CEVEditor::CAutoScript> m_pScript;
 };

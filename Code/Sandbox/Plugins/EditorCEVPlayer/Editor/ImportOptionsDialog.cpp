@@ -8,28 +8,41 @@
 #include <QDoubleSpinBox>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QHBoxLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPushButton>
+#include <QSpinBox>
 #include <QThread>
 #include <QVBoxLayout>
 
 #include <ThreadingUtils.h>
 
+#include "Editor/TranscodeDialog.h"
+#include "FFmpeg/FfmpegService.h"
+
 namespace CEVEditor
 {
-	CImportOptionsDialog::CImportOptionsDialog(const QString& sourceFile, const SImportOptions& initial, QWidget* pParent)
+	CImportOptionsDialog::CImportOptionsDialog(const QString& sourceFile, const SImportOptions& initial, ESourceKind kind, bool batch, QWidget* pParent)
 		: QDialog(pParent)
+		, m_kind(kind)
+		, m_batch(batch)
 	{
-		setWindowTitle(tr("Import video"));
-		setMinimumWidth(460);
+		setWindowTitle(batch ? tr("Import videos") : (kind == ESourceKind::PngSequence ? tr("Import PNG sequence") : tr("Import video")));
+		setMinimumWidth(480);
 		QVBoxLayout* const pMain = new QVBoxLayout(this);
-		pMain->addWidget(new QLabel(tr("Source: %1").arg(QFileInfo(sourceFile).fileName()), this));
+		pMain->addWidget(new QLabel(batch ? tr("Source: %1").arg(sourceFile) : tr("Source: %1").arg(QFileInfo(sourceFile).fileName()), this));
 
 		QFormLayout* const pForm = new QFormLayout();
 		m_pName = new QLineEdit(QString::fromUtf8(initial.assetName.c_str()), this);
 		m_pName->setToolTip(tr("Asset name: letters, digits, underscore and dash only. The files of the asset start with it."));
+		if (batch)
+		{
+			m_pName->setEnabled(false);
+			m_pName->setPlaceholderText(tr("(the name of each file)"));
+		}
 		pForm->addRow(tr("Asset name"), m_pName);
 
 		m_pLanguage = new QLineEdit(QString::fromUtf8(initial.language.c_str()), this);
@@ -47,6 +60,11 @@ namespace CEVEditor
 		m_pTrigger->setPlaceholderText(tr("Play_<asset name>"));
 		m_pTrigger->setToolTip(tr("Cue route: base of the ACE trigger names (Play_ / Pause_ / Resume_ are generated)."));
 		pForm->addRow(tr("Trigger name"), m_pTrigger);
+		if (batch)
+		{
+			m_pOverwrite = new QCheckBox(tr("Replace assets that already exist (otherwise those files are skipped)"), this);
+			pForm->addRow(m_pOverwrite);
+		}
 		pMain->addLayout(pForm);
 
 		QGroupBox* const pAudio = new QGroupBox(tr("Audio files (needs the offline processing library)"), this);
@@ -70,16 +88,108 @@ namespace CEVEditor
 		pAudioForm->addRow(tr("Ogg quality"), m_pOggQuality);
 		pMain->addWidget(pAudio);
 
-		QGroupBox* const pLater = new QGroupBox(tr("Compression, resolution and sub-videos (FFmpeg stage)"), this);
-		QVBoxLayout* const pLaterLayout = new QVBoxLayout(pLater);
-		pLaterLayout->addWidget(new QLabel(tr("Not available yet: WebM files are copied as they are."), pLater));
-		pLater->setEnabled(false);
-		pMain->addWidget(pLater);
+		// ---- FFmpeg stage
+		m_pFfmpegBox = new QGroupBox(tr("Compression, resolution and sub-videos (FFmpeg)"), this);
+		QVBoxLayout* const pFfLayout = new QVBoxLayout(m_pFfmpegBox);
+		QHBoxLayout* const pStatusRow = new QHBoxLayout();
+		m_pFfmpegStatus = new QLabel(m_pFfmpegBox);
+		m_pFfmpegStatus->setWordWrap(true);
+		pStatusRow->addWidget(m_pFfmpegStatus, 1);
+		m_pFfmpegSetup = new QPushButton(tr("Set up FFmpeg..."), m_pFfmpegBox);
+		pStatusRow->addWidget(m_pFfmpegSetup);
+		pFfLayout->addLayout(pStatusRow);
+		QFormLayout* const pFfForm = new QFormLayout();
+		if (kind == ESourceKind::Webm)
+		{
+			m_pRecompress = new QCheckBox(tr("Re-encode the WebM (compression / resolution). Off: the file is copied as it is."), m_pFfmpegBox);
+			m_pRecompress->setChecked(initial.recompress);
+			pFfLayout->addWidget(m_pRecompress);
+		}
+		else
+		{
+			pFfLayout->addWidget(new QLabel(kind == ESourceKind::PngSequence
+				? tr("The PNG files are encoded to <name>.webm (VP9; alpha is kept when the PNGs have it).")
+				: tr("The video is copied into the asset folder as <name>_source.<ext> and encoded to <name>.webm (VP9 + Opus; alpha is kept when the source has it)."), m_pFfmpegBox));
+		}
+		m_pCrf = new QSpinBox(m_pFfmpegBox);
+		m_pCrf->setRange(0, 63);
+		m_pCrf->setValue(initial.crf);
+		m_pCrf->setToolTip(tr("libvpx-vp9 constant quality: 0 = best / biggest, 63 = worst / smallest. 30-34 is a good range for games."));
+		pFfForm->addRow(tr("Quality (CRF)"), m_pCrf);
+		m_pHeight = new QSpinBox(m_pFfmpegBox);
+		m_pHeight->setRange(0, 8640);
+		m_pHeight->setSpecialValueText(tr("keep source size"));
+		m_pHeight->setSuffix(tr(" px"));
+		m_pHeight->setValue(initial.height);
+		m_pHeight->setToolTip(tr("Output height of the main video (the width follows, kept even)."));
+		pFfForm->addRow(tr("Output height"), m_pHeight);
+		if (kind == ESourceKind::PngSequence)
+		{
+			m_pFps = new QDoubleSpinBox(m_pFfmpegBox);
+			m_pFps->setRange(1.0, 240.0);
+			m_pFps->setDecimals(3);
+			m_pFps->setValue(initial.fps);
+			pFfForm->addRow(tr("Frame rate"), m_pFps);
+		}
+		pFfLayout->addLayout(pFfForm);
+		pFfLayout->addWidget(new QLabel(tr("Variants (smaller copies for low resolutions; heights not below the video are skipped):"), m_pFfmpegBox));
+		m_pVariants = new CVariantPicker(m_pFfmpegBox);
+		m_pVariants->SetHeights(initial.variants);
+		pFfLayout->addWidget(m_pVariants);
+		pMain->addWidget(m_pFfmpegBox);
 
 		QDialogButtonBox* const pButtons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 		connect(pButtons, &QDialogButtonBox::accepted, this, &QDialog::accept);
 		connect(pButtons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 		pMain->addWidget(pButtons);
+
+		connect(m_pFfmpegSetup, &QPushButton::clicked, this, [this]()
+		{
+			if (CFfmpegService* const pService = CFfmpegService::Get())
+				pService->EnsureUsableModal(this, tr("Set up the FFmpeg that imports with compression, other formats and variants use."));
+			UpdateFfmpegUi();
+		});
+		if (m_pRecompress != nullptr)
+			connect(m_pRecompress, &QCheckBox::toggled, this, &CImportOptionsDialog::UpdateFfmpegUi);
+		if (CFfmpegService* const pService = CFfmpegService::Get())
+		{
+			connect(pService, &CFfmpegService::Changed, this, &CImportOptionsDialog::UpdateFfmpegUi);
+			pService->EnsureDetected();
+		}
+		UpdateFfmpegUi();
+	}
+
+	void CImportOptionsDialog::UpdateFfmpegUi()
+	{
+		CFfmpegService* const pService = CFfmpegService::Get();
+		const SFfmpegStatus s = pService != nullptr ? pService->Status() : SFfmpegStatus();
+		const bool needed = m_kind != ESourceKind::Webm;
+		if (s.Ready())
+		{
+			m_pFfmpegStatus->setText(tr("FFmpeg: %1 (%2)").arg(QString::fromUtf8(s.version.c_str()), QString::fromUtf8(s.source.c_str())));
+			m_pFfmpegStatus->setStyleSheet("color: #70c070;");
+		}
+		else if (s.Pending())
+		{
+			m_pFfmpegStatus->setText(tr("FFmpeg: looking for it ..."));
+			m_pFfmpegStatus->setStyleSheet(QString());
+		}
+		else
+		{
+			m_pFfmpegStatus->setText(needed ? tr("FFmpeg is needed for this file and was not found. OK asks how to get it.") : tr("FFmpeg was not found: re-encoding and variants are not available."));
+			m_pFfmpegStatus->setStyleSheet("color: #e0a030;");
+		}
+		m_pFfmpegSetup->setVisible(!s.Ready() && !s.Pending());
+		// WebM files import without FFmpeg: its controls only work when there is one. Other sources always need it (OK sets it up).
+		const bool usable = needed || s.Ready();
+		const bool encodeControls = usable && (needed || (m_pRecompress != nullptr && m_pRecompress->isChecked()));
+		if (m_pRecompress != nullptr)
+			m_pRecompress->setEnabled(s.Ready());
+		m_pCrf->setEnabled(encodeControls);
+		m_pHeight->setEnabled(encodeControls);
+		if (m_pFps != nullptr)
+			m_pFps->setEnabled(usable);
+		m_pVariants->setEnabled(usable);
 	}
 
 	SImportOptions CImportOptionsDialog::Options() const
@@ -93,40 +203,63 @@ namespace CEVEditor
 		o.wav = m_pWav->isChecked();
 		o.ogg = m_pOgg->isChecked();
 		o.oggQuality = static_cast<float>(m_pOggQuality->value());
+		o.recompress = m_pRecompress != nullptr && m_pRecompress->isEnabled() && m_pRecompress->isChecked();
+		o.crf = m_pCrf->value();
+		o.height = m_pHeight->isEnabled() ? m_pHeight->value() : 0;
+		if (m_pVariants->isEnabled())
+			o.variants = m_pVariants->Heights();
+		if (m_pFps != nullptr)
+			o.fps = m_pFps->value();
+		o.overwrite = m_pOverwrite != nullptr && m_pOverwrite->isChecked();
 		return o;
 	}
 
-	bool CImportOptionsDialog::Ask(const QString& sourceFile, SImportOptions& options, const std::string& folderRel, const std::string& alreadyConfirmedName)
+	bool CImportOptionsDialog::Ask(const QString& sourceFile, SImportOptions& options, const std::string& folderRel, const std::string& alreadyConfirmedName, ESourceKind kind, bool batch)
 	{
-		auto run = [sourceFile, folderRel, alreadyConfirmedName](SImportOptions in) -> std::pair<bool, SImportOptions>
+		auto run = [sourceFile, folderRel, alreadyConfirmedName, kind, batch](SImportOptions in) -> std::pair<bool, SImportOptions>
 		{
 			for (;;)
 			{
-				CImportOptionsDialog dialog(sourceFile, in, QApplication::activeWindow());
+				CImportOptionsDialog dialog(sourceFile, in, kind, batch, QApplication::activeWindow());
 				if (dialog.exec() != QDialog::Accepted)
 					return { false, in };
 				SImportOptions chosen = dialog.Options();
-				// The name can be changed in the dialog after the engine checked the original one: look again, and never
-				// replace an existing asset without the user's explicit yes.
-				const SImportPlan plan = PlanImport(std::string(sourceFile.toUtf8().constData()), folderRel, chosen);
-				if (!plan.ok)
+				if (!batch)
 				{
-					QMessageBox::warning(QApplication::activeWindow(), tr("Import video"), QString::fromUtf8(plan.error.c_str()));
-					in = chosen;
-					continue;
-				}
-				chosen.overwrite = false;
-				if (plan.exists && plan.assetName != alreadyConfirmedName)
-				{
-					const QMessageBox::StandardButton answer = QMessageBox::warning(QApplication::activeWindow(), tr("Import video"),
-						QString::fromUtf8(plan.detail.c_str()) + tr("\n\nReplace it?"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-					if (answer != QMessageBox::Yes)
+					// The name can be changed in the dialog after the engine checked the original one: look again, and never
+					// replace an existing asset without the user's explicit yes.
+					const SImportPlan plan = PlanImport(std::string(sourceFile.toUtf8().constData()), folderRel, chosen);
+					if (!plan.ok)
 					{
-						in = chosen; // back to the dialog: pick another name
+						QMessageBox::warning(QApplication::activeWindow(), tr("Import video"), QString::fromUtf8(plan.error.c_str()));
+						in = chosen;
+						continue;
+					}
+					chosen.overwrite = false;
+					if (plan.exists && plan.assetName != alreadyConfirmedName)
+					{
+						const QMessageBox::StandardButton answer = QMessageBox::warning(QApplication::activeWindow(), tr("Import video"),
+							QString::fromUtf8(plan.detail.c_str()) + tr("\n\nReplace it?"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+						if (answer != QMessageBox::Yes)
+						{
+							in = chosen; // back to the dialog: pick another name
+							continue;
+						}
+					}
+					chosen.overwrite = plan.exists;
+				}
+				// compression, other formats, variants: FFmpeg has to be there (asks: download / choose ffmpeg.exe)
+				if (chosen.NeedsFfmpeg(kind))
+				{
+					CFfmpegService* const pService = CFfmpegService::Get();
+					const QString why = kind == ESourceKind::Webm ? tr("Re-encoding a WebM and generating variants need FFmpeg.")
+						: tr("Importing this kind of file needs FFmpeg (it converts it to WebM).");
+					if (pService == nullptr || !pService->EnsureUsableModal(QApplication::activeWindow(), why))
+					{
+						in = chosen; // back to the dialog: change the options (WebM without compression needs no FFmpeg)
 						continue;
 					}
 				}
-				chosen.overwrite = plan.exists;
 				return { true, chosen };
 			}
 		};

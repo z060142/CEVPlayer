@@ -28,6 +28,14 @@ add_sources("NoUberFile"
 		"Asset/VideoAssetType.h"
 		"Asset/VideoAssetImporter.cpp"
 		"Asset/VideoAssetImporter.h"
+		"Asset/ImportQueue.cpp"
+		"Asset/ImportQueue.h"
+	SOURCE_GROUP "FFmpeg"
+		"FFmpeg/FfmpegService.cpp"
+		"FFmpeg/FfmpegService.h"
+	SOURCE_GROUP "Settings"
+		"Settings/EditorSettings.cpp"
+		"Settings/EditorSettings.h"
 	SOURCE_GROUP "Audio"
 		"Audio/AceRegistrar.cpp"
 		"Audio/AceRegistrar.h"
@@ -44,6 +52,8 @@ add_sources("NoUberFile"
 	SOURCE_GROUP "Editor"
 		"Editor/ImportOptionsDialog.cpp"
 		"Editor/ImportOptionsDialog.h"
+		"Editor/TranscodeDialog.cpp"
+		"Editor/TranscodeDialog.h"
 		"Editor/PreviewSession.cpp"
 		"Editor/PreviewSession.h"
 		"Editor/VideoViewport.cpp"
@@ -76,3 +86,8 @@ target_link_libraries(${THIS_PROJECT} PRIVATE CEVPlayerCore)
 
 # CEVPlayerOffline (probe, extract / strip audio, WAV, Ogg): EXCLUDE_FROM_ALL in the engine tree, built because this plug-in links it.
 target_link_libraries(${THIS_PROJECT} PRIVATE CEVPlayerOffline)
+
+# CEVPlayerFFmpeg (locate / run / download the external ffmpeg, M5): static, EXCLUDE_FROM_ALL in the engine tree, built because this
+# plug-in links it. ffmpeg only ever runs as a child process: no libav* is linked, and the runtime plug-in does not link this.
+# (Core/offline/CMakeLists.txt creates the target next to CEVPlayerOffline.)
+target_link_libraries(${THIS_PROJECT} PRIVATE CEVPlayerFFmpeg)

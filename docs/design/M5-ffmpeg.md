@@ -132,3 +132,98 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 | ProRes 4444 / PNG 序列 alpha 保留 | 自測（PlayerCore 讀回 alpha 數值） |
 | 取消立即生效並移除半成品 | 自測 |
 | 最小版在 CI 建置並發佈到 Releases | 工作流程已寫好，**尚未在 CI 實跑** |
+
+
+---
+
+# 編輯器端實作紀錄（EditorCEVPlayer，M5 第二部分）
+
+## 10. 設計與實作
+
+### 10.1 程式結構（`Code/Sandbox/Plugins/EditorCEVPlayer/`）
+
+| 檔案 | 內容 |
+|---|---|
+| `Settings/EditorSettings.*` | 使用者層級設定檔 `%LOCALAPPDATA%\CEVPlayer\editor.json`（目前只有 `ffmpegPath`；`QSaveFile` 原子寫入，保留其他鍵）。環境變數 `CEV_EDITOR_SETTINGS=<檔>` 覆寫位置（測試不碰使用者的設定）。 |
+| `FFmpeg/FfmpegService.*` | `CFfmpegService`：偵測狀態快取（Unknown / Detecting / Ready / Absent，含路徑、版本、來源、缺少的功能、被拒絕的候選與原因）、`Locate` 在 job 執行緒執行（主畫面就緒時惰性啟動，結果快取；`Re-detect` 重跑）、下載 job、互動流程 `EnsureUsableModal`、`WaitForExe`（job 執行緒用，等偵測結束）。另有 `FfmpegTranscode` / `FfmpegMakeVariant` 包裝（把庫的 `Result` + 日誌尾端轉成編輯器的 `SOpResult`）。 |
+| `Asset/ImportQueue.*` | `CImportQueue`：所有需要 FFmpeg 的匯入、編輯器視窗的匯入、批次匯入的**單一佇列**，一次一個檔案（一次一個 ffmpeg），每個檔案一個 `CJobRunner` job，逐檔結果與批次摘要，`CancelAll`。 |
+| `Asset/VideoImport.*` | `ClassifySource`、`SImportOptions` 新欄位、`PlanImport`（來源種類、PNG 序列偵測、被取代的檔案）、`ImportVideoFile`（複製來源、轉檔、探測、變體、描述檔、`.cryasset`，失敗或取消時刪除本次新建的檔案）、`SubmitTranscodeOps`（變體 / 重新壓縮 / 重新匯入）。 |
+| `Editor/ImportOptionsDialog.*` | 匯入對話框新增 FFmpeg 群組（狀態、`Set up FFmpeg...`、WebM 的「重新編碼」勾選、CRF、輸出高度、變體清單、PNG 序列的幀率）；批次模式。 |
+| `Editor/TranscodeDialog.*` | `CVariantPicker`（2160/1440/1080/720/540/360 + 其他高度）與「Generate variants...」/「Re-compress / resize...」對話框。 |
+| `Editor/InfoPanel.*` | FFmpeg 區段（狀態、路徑、版本、缺少項目、被拒絕的候選、設定的路徑、下載是否可用；`Locate...`、`Download minimal build`、`Re-detect`）、Variants 表（存在 / MISSING / stale）、兩個新按鈕。 |
+| `Jobs/JobRunner.*` | 新增 `WaitIdle`（結束時等所有 job 的工作函式返回）。 |
+
+唯一對 Core/offline 的改動（**僅新增**）：`WebmTranscodeOptions::inputStartNumber`（預設 -1，行為不變）會在 `-i` 前加 `-start_number N`，供 PNG 序列使用（image2 只會自己試前 5 個編號，`frame_1000.png` 起算的序列不給 `-start_number` 就讀不到）。`FfmpegCommands.h/.cpp` 各幾行；該庫的自測沒有重跑。
+
+### 10.2 執行緒規則（沿用審查後的規則）
+
+- 資產管理器只在主執行緒碰：`PlanImport`（佇列輪到該檔案時）、job（只做檔案 I/O、ffmpeg、探測）、完成回呼在主執行緒 `FinishImport` / 套用結果。沒有任何主執行緒對 `PostOnMainThread` 的 `.get()`；資產管理器匯入器（引擎背景佇列）對需要 FFmpeg 的匯入只 `PostOnMainThread` 後**立即返回空陣列**（引擎佇列不被數分鐘的 ffmpeg 占住；資產由佇列自己合併）。
+- 所有 job 走 `CJobRunner`，帶 owner 標籤（資產 GUID；偵測 = `"ffmpeg"`，下載 = `"ffmpeg-download"`）；取消旗標傳進庫的 `Control`（先對 ffmpeg stdin 寫 `q`，500 ms 後終止 Job Object）。
+- 結束：`eNotify_OnQuit` 先呼叫佇列 `CancelAll(permanent)`，再 `CJobRunner::CancelAll`，再 **`WaitIdle(8 s)`**。冒煙測試發現 Sandbox 在該通知後可能直接結束行程而不卸載外掛，沒有等待時被取消的 job 來不及刪除半成品（留下 `.stage.webm.tmp` 與來源複本）；加入等待後乾淨。
+- 失敗 / 取消：`ImportVideoFile` 與 `SubmitTranscodeOps` 追蹤「本次從無到有建立的檔案」，失敗時刪除（既有檔案不刪）；庫自己負責 `.tmp` 與兩段式 log。取代既有資產時，轉檔先寫 `<名稱>.stage.webm`（庫再寫 `.stage.webm.tmp`），最後才改名覆蓋，所以預覽播放器不會在長時間轉檔中途重新打開要被取代的檔案。
+
+### 10.3 檔案配置與 Details
+
+- WebM 且不重編：同 M4（`<name>.webm` = 來源複本）。
+- mp4 / mov / mkv / avi：原檔複製為 `<name>_source.<副檔名>`（來源，不進 pak：`tools/list_unshipped_cev_files.py` 會列出「資產有、描述檔沒播」的檔案），轉出 `<name>.webm`（VP9 + Opus，來源有 alpha 則 yuva420p，由庫的 `AlphaMode::Auto` 決定）。
+- WebM + 重編：原檔複製為 `<name>_source.webm`，轉出 `<name>.webm`。
+- PNG 序列（資料夾；單一 `.png` 檔**不**註冊給匯入器，貼圖照舊）：不複製（只記錄資料夾），`ffmpeg -framerate N -start_number first`；最長的連續編號從最小編號起算，缺號會警告並只用連續的部分；路徑含 `%` 拒絕。
+- 變體：`<name>_<高度>p.webm`，來源 = 描述檔的主影片（`Strip audio` 後是 `_silent.webm`，所以變體也沒聲音，與主影片一致）；高度不低於影片者略過並記錄；寬高由探測實際檔案取得；描述檔 `<Variants rule="smallestNotBelowOutput">`，依高度遞增。覆蓋匯入（`overwrite`）時舊變體與舊來源複本（名稱不同時）移除。
+- 新 Details：`transcoded`（1 = `<name>.webm` 由來源複本 / PNG 序列轉出）、`sourceKind`（webm / video / png-sequence）、`importSettings` 增加 `recompress`、`crf`、`height`、`variants`、`fps`。
+- 音訊操作（分離 / WAV / Ogg / 靜音）一律以 `<name>.webm` 為來源（轉檔後那才有 Opus 音軌；`sourcePath` 可能是 mp4）。
+
+### 10.4 操作
+
+- **Generate variants...**：選高度（影片高度以上的灰掉）後跑 job，完成後（主執行緒）更新描述檔 / Files / Details；已存在的變體不動，重做會覆蓋。
+- **Re-compress / resize...**：來源 = 儲存的來源複本；沒有（舊的 WebM 資產、PNG 序列）時**目前的影片先複製為 `<name>_source.webm`** 並成為來源（再次重編不會一層層劣化）。輸出先寫 stage 檔，完成後在主執行緒 `ReleaseAssetFiles`（關預覽播放器、取消資產的其他 job）再改名取代，GUID 不變；若描述檔播的是 `_silent.webm`，一併重新去除音軌。Details 的尺寸 / 編碼 / alpha 與 `importSettings` 更新。對話框列出的變體 = 完成後應有的集合（未勾選者連檔案一起移除）。
+- **Reimport source**（轉檔過的資產）：改走同一個 job（先把原檔複製過來，再以儲存的設定重編並重做現有變體）；沒轉檔的資產維持 M4 行為。
+- 資訊欄 Variants 表：存在 / MISSING；**stale** = 變體檔比 `<name>.webm` 舊（超過 2 秒）。
+
+### 10.5 FFmpeg 缺少時的流程
+
+- 偵測：設定路徑、下載副本、PATH（`Locate` 順序不變）。
+- 互動（匯入對話框按 OK、`Generate variants...`、`Re-compress...`）：`EnsureUsableModal`。下載可用時提供「Download minimal build」與「Choose ffmpeg.exe...」（含授權 / 來源 / 雜湊驗證說明，下載有進度與取消）；`FfmpegDownloadDisabledReason()` 非空（目前釘住 `unreleased`）時視窗顯示原因，**只**提供手動選擇。選到的檔案再過一次能力檢查，不足就顯示缺少項目 / 被拒絕的原因。SHA-256 不符：庫拒絕並不解壓，訊息含實際與預期雜湊（視窗與 log 都會顯示）。
+- 非互動（console）：Absent 時拒絕並印出原因與設定方式；偵測仍進行中則 job 等待結果（`WaitForExe`）。
+
+## 11. Console 指令
+
+| 指令 | 說明 |
+|---|---|
+| `cev_editor_ffmpeg_status [redetect]` | 一行（加被拒絕候選行）：`ffmpeg status: ready, path ..., version ..., source ...; missing recommended: ...; missing for import: ...; configured path: ...` 或 `absent (...)`，以及下載是否啟用。 |
+| `cev_editor_ffmpeg_path <路徑 或 ->` | 設定（`-` 清除）持久的 ffmpeg 路徑（檔案或資料夾）並重新偵測；結果以 status 行記錄。 |
+| `cev_editor_import <來源> <資料夾> [選項]` | 來源可為 webm / mp4 / mov / mkv / avi 或 PNG 資料夾。選項（`=` 在腳本裡會被當成 cvar 設定，一律可用 `:`）：`name:` `lang:` `wav` `ogg` `split` `strip` `cue` `mixed` `overwrite`，FFmpeg 階段 `crf:N` `height:PX` `variants:540,360` `fps:N` `recompress`（`crf` / `height` 隱含 `recompress`）。純 WebM 複製同步執行；其餘進佇列，結果記為 `import ok: <來源> -> <asset>` / `import failed: ...`。 |
+| `cev_editor_import_batch <資料夾或清單檔> <資產資料夾> [選項] [sequences]` | 資料夾 = 其中所有影片檔（不遞迴；`sequences`：子資料夾視為 PNG 序列）；清單檔 = 每行一個路徑，`#` 註解。一個佇列，一次一個，結尾 `batch '...' finished: N file(s): ok a, failed b, cancelled c` 加逐檔結果。 |
+| `cev_editor_import_cancel` | 取消執行中的並丟棄排隊的。 |
+| `cev_editor_variants <asset> <高度> [crf:N]` | 產生變體。 |
+| `cev_editor_recompress <asset> [crf:N] [height:PX] [variants:a,b 或 none] [refresh]` | 重新壓縮。 |
+| `cev_editor_ffmpeg_install_test <zip> <sha256> [版本]` | 測試用：下載流程用本機 zip（`LocalFileFetcher`），雜湊驗證 / staging / 安裝與真實下載相同。 |
+
+測試用環境變數：`CEV_EDITOR_SETTINGS`（設定檔位置）、`CEV_EDITOR_FFMPEG_NO_PATH=1`（偵測時不搜尋 PATH）。
+
+## 12. 驗證
+
+建置（Profile）：vanilla `D:/coding11/Cryengine_5.7.1` 與社群樹 `D:/coding11/CryENGINE-5-7-community`，目標 `EditorCEVPlayer` + `CEVPlayer`，皆 **0 個錯誤、0 個警告**（`D:/coding11/_buildlogs/A-m5*.log`、`B-m5*.log`）。
+
+冒煙測試（vanilla Sandbox，`CEV_EDITOR_SCRIPT`，腳本與輸出在 `D:/coding11/_testproject/smoke/m5_*.txt|out`，log 在 `smoke_logs/` 下各次 `Game.log`；全部 `RESULT: PASS (sandbox, ..., clean quit, no crash artifacts)`）：
+
+| 項目 | 結果與證據 |
+|---|---|
+| (a) 系統 ffmpeg 偵測 | `ffmpeg status: ready, path C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe, version 8.0.1-full_build-www.gyan.dev, source system PATH; missing recommended: none; missing for import: none`（啟動後約 2 秒，job 執行緒） |
+| (b) mp4 轉 webm，`crf:34 variants:540,360 wav` | `import ok: .../m5_h264.mp4 -> Videos/m5test/m5_h264.cevvideo.cryasset`（約 12 秒）；磁碟：`m5_h264.webm`（4.3 MB）、`_source.mp4`、`_540p.webm`、`_360p.webm`、`_english.wav`；描述檔 `<Variants rule="smallestNotBelowOutput">` 含 `m5_h264_360p.webm 640x360`、`m5_h264_540p.webm 960x540`；`cev_editor_open` 後 `opened video asset 'm5_h264'`、`preview draws texture id 503 (1920x1080, alpha 0)`；之後 `cev_editor_recompress ... crf:40 height:720` 得 `FFmpeg operation for 'm5_h264' finished: 2 variant(s), video re-encoded`。 |
+| (c) ProRes 4444 `.mov` alpha | `import ok`（1 秒）；預覽 `preview draws texture id 600 (640x360, alpha 1)`；ffprobe `alpha_mode=1`。alpha WebM 重編（`crf:40 variants:180`）與僅變體（`variants:180,90`）後主檔與變體皆 `ALPHA_MODE=1`。PNG 序列（`frame_1000..1011.png`，`fps:12`）：`alpha 1`、1 秒、240x320。 |
+| (d) 批次 3 檔 | `batch '.../batch' finished: 3 file(s): ok 3, failed 0, cancelled 0`（b1.mp4、b2.mkv、b3.avi 依序，各約 1 秒）。 |
+| 覆蓋匯入 | 不帶 `overwrite`：`import failed: ...: skipped, The video asset 'm5_h264' already exists ...`，檔案不動；帶 `overwrite`：GUID `73aa11ba-...` 不變，舊 540/360 變體與檔案移除、新 `_720p` 產生，原有 wav 保留。 |
+| (e) 取消 | `cev_editor_import_cancel` 得 `import cancelled: ...m5_long.mp4`，`m5cancel/` 空（`.stage.webm.tmp`、`_source.mp4` 都被刪）；第二次匯入進行中關閉 Sandbox：乾淨結束、`m5cancel2/` 空、無殘留 ffmpeg 行程。（第一版沒有 `WaitIdle` 時，結束當下殘留 `.stage.webm.tmp` 與 77 MB 來源複本：已修。） |
+| (f) 假 ffmpeg | 路徑設成 whoami.exe 改名、`CEV_EDITOR_FFMPEG_NO_PATH=1`：`ffmpeg status: absent (insufficient or not found): no usable ffmpeg: ...bogus_ffmpeg.exe (the process exited with code 1)` 加 `rejected: configured path ...`；`cev_editor_import` mp4、帶 `crf:` 的 webm、`variants`、`recompress` 皆 `refused: FFmpeg is not available (...). Locate ffmpeg.exe in the FFmpeg section ...`；批次三檔各 `import failed: ... FFmpeg is not available`，摘要 `ok 0, failed 3`；純 WebM 匯入仍成功。 |
+| 下載安裝路徑（本機 zip） | 雜湊錯誤：`ffmpeg download / install FAILED: SHA-256 mismatch: the download is acd623..., expected 0000...; refusing to install`，狀態仍 absent；正確雜湊（zip 內是完整版 ffmpeg.exe）：`ffmpeg download / install ok: installed ...\ffmpeg\localtest\ffmpeg.exe`，狀態 `ready, ... source downloaded copy`，接著用它匯入 mp4 成功。測後已刪除該安裝資料夾。 |
+| (g) GameLauncher | `smoke_test.sh ... --exec "cev_variant N;cev_play Videos/m5test/m5_h264.cevvideo"`：`cev_variant 1` 得 `player 1: variant 1 <Videos/m5test/m5_h264_720p.webm> 1280x720 chosen` 與 `player 1 ready: <..._720p.webm> 1280x720 5.03s audio`；`cev_variant 0` 得 `ready: <Videos/m5test/m5_h264.webm> 1920x1080`；`-1`（自動）選了變體 1（720p）。皆 PASS。 |
+
+## 13. 未驗證與限制
+
+- 真實下載（WinHTTP + GitHub Release）：釘住版本仍是 `unreleased`，UI 只驗到「停用 + 原因 + 只能手動選擇」的邏輯與本機 zip 的雜湊 / 安裝路徑；對話框（`EnsureUsableModal`、`Set up FFmpeg...`、進度對話框、下載按鈕）**沒有人工點過**，見 `manual-acceptance-M5.md`。
+- 匯入對話框、編輯器視窗拖放（單檔 / 多檔 / PNG 資料夾）、`Generate variants...` / `Re-compress...` 對話框、資訊欄 FFmpeg 區段與 Variants 表只經編譯與 console 路徑（同一組後端）驗證，沒有 UI 自動化。
+- 對話框的變體清單不事先探測來源高度（對話框時來源高度未知）：高度不低於影片者由 job 略過並記錄，不是灰掉（已存在資產的對話框則用已知高度灰掉）。
+- 失敗或取消後，匯入時新建的**空資料夾**會留下（檔案都已刪除）。
+- 社群樹只建置，沒有執行（其 Sandbox / GameLauncher 本身有已知問題，見 `docs/research/03-smoke-test.md` §5）。
+- 最小版 FFmpeg 未實測（測試用的是完整版 8.0.1）。
+- `Reimport source`（轉檔過的資產）的按鈕本身沒有單獨跑；`cev_editor_recompress ... refresh` 走同一個 job，只有 `refresh` 之外的路徑被實跑。

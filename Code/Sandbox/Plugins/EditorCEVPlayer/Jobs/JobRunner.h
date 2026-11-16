@@ -57,6 +57,10 @@ namespace CEVEditor
 		//! Cancels the jobs of `owner` and waits (at most `timeoutMs`) until their work functions have returned.
 		//! Returns false when one of them is still running afterwards.
 		bool CancelAndWait(const std::string& owner, int timeoutMs);
+		//! Waits (at most `timeoutMs`) until every job's work function has returned (no file is open, no child process runs).
+		//! Used at quit after CancelAll: the process may end right after the quit notification, so the cancelled jobs must have
+		//! removed their partial files by then. Main thread.
+		bool WaitIdle(int timeoutMs) const;
 
 		std::vector<SJobInfo> Jobs() const;
 		int RunningCount() const;

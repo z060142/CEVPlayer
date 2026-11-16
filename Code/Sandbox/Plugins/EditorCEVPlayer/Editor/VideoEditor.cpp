@@ -20,7 +20,10 @@
 #include <Notifications/NotificationCenter.h>
 #include <PathUtils.h>
 
+#include "Asset/ImportQueue.h"
 #include "Editor/ImportOptionsDialog.h"
+#include "Editor/TranscodeDialog.h"
+#include "FFmpeg/FfmpegService.h"
 #include "Editor/InfoPanel.h"
 #include "Editor/PreviewPanel.h"
 #include "Jobs/JobRunner.h"
@@ -34,7 +37,6 @@ namespace CEVEditor
 	{
 		CVideoEditor* g_pCurrent = nullptr;
 		std::vector<CVideoEditor*> g_instances;     // every live window (the pane is not unique)
-		std::set<std::string> g_importsRunning;     // metadata paths of the imports that are on a job right now
 
 		void Notify(bool warning, const QString& title, const QString& text)
 		{
@@ -46,9 +48,11 @@ namespace CEVEditor
 				GetIEditor()->GetNotificationCenter()->ShowInfo(title, text);
 		}
 
-		bool IsWebm(const QString& path)
+		//! A file the importer takes (webm / mp4 / mov / mkv / avi) or a folder (PNG sequence). A single .png is NOT one: textures.
+		bool IsImportable(const QString& path)
 		{
-			return path.endsWith(QStringLiteral(".webm"), Qt::CaseInsensitive);
+			ESourceKind kind = ESourceKind::Webm;
+			return ClassifySource(std::string(path.toUtf8().constData()), kind);
 		}
 
 		// size + modification time of a file as text: what makes the preview reload when a file was replaced
@@ -217,7 +221,9 @@ namespace CEVEditor
 		const std::string owner = AssetOwnerKey(m_state.guid); // renames / deletes of the asset wait for these jobs (they hold files open)
 		const std::string videoAbs = AssetsAbsolute(m_state.videoRel);
 		const std::string copyAbs = m_state.sourceCopyRel.empty() ? std::string() : AssetsAbsolute(m_state.sourceCopyRel);
-		const std::string original = m_state.details.Get(DetailKey::kSourceOriginal);
+		const bool sequence = m_state.details.Get(DetailKey::kSourceKind) == "png-sequence";
+		const std::string original = sequence ? std::string() : m_state.details.Get(DetailKey::kSourceOriginal); // a folder: no hash to compare
+		const std::string sequenceFolder = m_state.details.Get(DetailKey::kSourceOriginal);
 		const std::string sha = m_state.details.Get(DetailKey::kSourceSha256);
 
 		// stream information of the main video (reads the container index: off the main thread)
@@ -244,8 +250,21 @@ namespace CEVEditor
 
 		// source copy / original file against the hash recorded at import time (hashes whole files)
 		auto status = std::make_shared<SSourceStatus>();
-		pRunner->Submit(tr("Check source file"), [copyAbs, original, sha, status](const SOpContext& ctx)
+		pRunner->Submit(tr("Check source file"), [copyAbs, original, sha, status, sequence, sequenceFolder](const SOpContext& ctx)
 		{
+			if (sequence && copyAbs.empty())
+			{
+				// PNG sequence: not copied into the project, only the folder is recorded
+				std::error_code ec;
+				status->checked = true;
+				status->originalPath = sequenceFolder;
+				status->originalExists = std::filesystem::is_directory(std::filesystem::u8path(sequenceFolder), ec);
+				status->text = status->originalExists ? "Source: PNG sequence in " + sequenceFolder + " (not copied into the project)."
+					: "Source: PNG sequence " + sequenceFolder + " (not copied into the project; the folder is not there any more).";
+				SOpResult r;
+				r.status = EOpStatus::Ok;
+				return r;
+			}
 			*status = CheckSourceStatus(copyAbs, original, sha, ctx.cancel);
 			SOpResult r;
 			r.status = EOpStatus::Ok;
@@ -423,6 +442,24 @@ namespace CEVEditor
 			error = "no asset opened";
 			return false;
 		}
+		if (IsTranscodedAsset(*pAsset))
+		{
+			// the video was made by FFmpeg: copy the original over the source copy and encode again with the stored settings
+			const SImportOptions settings = SImportOptions::FromSettingsString(m_state.details.Get(DetailKey::kImportSettings));
+			STranscodeOps ops;
+			ops.recompress = true;
+			ops.refreshSource = true;
+			ops.crf = settings.crf;
+			ops.height = settings.height;
+			ops.changeVariants = true;
+			ops.variants = VariantHeights(m_state.descriptor);
+			ops.removeOtherVariants = false;
+			QPointer<CVideoEditor> self(this);
+			if (SubmitTranscodeOps(*pAsset, ops, error, [self](bool) { if (self) self->RefreshAssetState(); }) == 0)
+				return false;
+			error.clear();
+			return true; // runs on a job: the window refreshes when it is done
+		}
 		// the copy is replaced: nobody may hold it open (preview player, background checks, audio jobs)
 		if (!ReleaseAssetFiles(m_state.metadataRel, m_state.guid, 15000, error))
 			return false;
@@ -451,6 +488,45 @@ namespace CEVEditor
 			Notify(true, tr("Video asset"), tr("Cannot start the operation: %1").arg(QString::fromUtf8(error.c_str())));
 	}
 
+	void CVideoEditor::RunTranscodeOps(const STranscodeOps& ops)
+	{
+		CAsset* const pAsset = GetAssetBeingEdited();
+		if (pAsset == nullptr)
+			return;
+		QPointer<CVideoEditor> self(this);
+		std::string error;
+		if (SubmitTranscodeOps(*pAsset, ops, error, [self](bool) { if (self) self->RefreshAssetState(); }) == 0)
+			Notify(true, tr("Video asset"), tr("Cannot start the operation: %1").arg(QString::fromUtf8(error.c_str())));
+	}
+
+	void CVideoEditor::GenerateVariantsDialog()
+	{
+		if (!m_stateValid)
+			return;
+		CFfmpegService* const pService = CFfmpegService::Get();
+		if (pService == nullptr || !pService->EnsureUsableModal(this, tr("Generating variants needs FFmpeg.")))
+			return;
+		const int height = m_state.mediaKnown ? m_state.media.height : m_state.details.GetInt(DetailKey::kHeight);
+		const SImportOptions settings = SImportOptions::FromSettingsString(m_state.details.Get(DetailKey::kImportSettings));
+		STranscodeOps ops;
+		if (CTranscodeDialog::Ask(CTranscodeDialog::EMode::Variants, QString::fromUtf8(m_state.assetName.c_str()), height, std::vector<int>(), settings.crf, 0, ops, this))
+			RunTranscodeOps(ops);
+	}
+
+	void CVideoEditor::RecompressDialog()
+	{
+		if (!m_stateValid)
+			return;
+		CFfmpegService* const pService = CFfmpegService::Get();
+		if (pService == nullptr || !pService->EnsureUsableModal(this, tr("Re-compressing needs FFmpeg.")))
+			return;
+		const int height = m_state.mediaKnown ? m_state.media.height : m_state.details.GetInt(DetailKey::kHeight);
+		const SImportOptions settings = SImportOptions::FromSettingsString(m_state.details.Get(DetailKey::kImportSettings));
+		STranscodeOps ops;
+		if (CTranscodeDialog::Ask(CTranscodeDialog::EMode::Recompress, QString::fromUtf8(m_state.assetName.c_str()), height, VariantHeights(m_state.descriptor), settings.crf, settings.height, ops, this))
+			RunTranscodeOps(ops);
+	}
+
 	void CVideoEditor::UpgradeToCue()
 	{
 		CAsset* const pAsset = GetAssetBeingEdited();
@@ -464,70 +540,53 @@ namespace CEVEditor
 		RefreshAssetState();
 	}
 
-	void CVideoEditor::ImportFiles(const QStringList& files)
+	void CVideoEditor::ImportFiles(const QStringList& allFiles)
 	{
-		CJobRunner* const pRunner = CJobRunner::Get();
-		if (pRunner == nullptr)
+		CImportQueue* const pQueue = CImportQueue::Get();
+		if (pQueue == nullptr || CJobRunner::Get() == nullptr)
 			return;
-		for (const QString& file : files)
+		QStringList files;
+		bool anyNonWebm = false;
+		for (const QString& file : allFiles)
 		{
-			if (!IsWebm(file))
+			ESourceKind kind = ESourceKind::Webm;
+			if (!ClassifySource(std::string(file.toUtf8().constData()), kind))
 				continue;
-			// (re-read each time: the asset browser of this window may have been used while a dialog was open)
-			const std::string folder = m_stateValid ? m_state.folderRel : std::string("Videos/");
-			SImportOptions options;
-			options.assetName = SanitizeAssetName(QFileInfo(file).completeBaseName().toUtf8().constData());
-			if (!CImportOptionsDialog::Ask(file, options, folder)) // asks again when the name is taken
-				continue;
-			const std::string source = file.toUtf8().constData();
-			// main thread: asset manager lookups and the release of files that are about to be replaced
-			const SImportPlan plan = PlanImport(source, folder, options);
-			if (!plan.ok)
-			{
-				Notify(true, tr("Video asset"), tr("Import failed: %1").arg(QString::fromUtf8(plan.error.c_str())));
-				continue;
-			}
-			if (plan.exists && !options.overwrite)
-			{
-				Notify(true, tr("Video asset"), tr("Import refused: %1").arg(QString::fromUtf8(plan.detail.c_str())));
-				continue;
-			}
-			if (g_importsRunning.count(plan.metadataRel) != 0)
-			{
-				Notify(true, tr("Video asset"), tr("An import of %1 is already running.").arg(QString::fromUtf8(plan.assetName.c_str())));
-				continue;
-			}
-			std::string prepareError;
-			if (plan.exists && !PrepareOverwrite(plan, prepareError))
-			{
-				Notify(true, tr("Video asset"), tr("Import failed: %1").arg(QString::fromUtf8(prepareError.c_str())));
-				continue;
-			}
-			g_importsRunning.insert(plan.metadataRel);
-			auto result = std::make_shared<SImportResult>();
-			const std::string metadataRel = plan.metadataRel;
-			pRunner->Submit(tr("Import %1").arg(QFileInfo(file).fileName()), [source, plan, options, result](const SOpContext& ctx)
-			{
-				*result = ImportVideoFile(source, plan, options, ctx.cancel);
-				SOpResult r;
-				r.status = result->ok ? EOpStatus::Ok : (ctx.Cancelled() ? EOpStatus::Cancelled : EOpStatus::Failed);
-				r.message = result->error;
-				return r;
-			}, [result, options, metadataRel](const SOpResult& r)
-			{
-				g_importsRunning.erase(metadataRel);
-				if (r.Ok())
-				{
-					FinishImport(*result, options);
-				}
-				else
-				{
-					delete result->pAsset; // never merged
-					result->pAsset = nullptr;
-					Notify(true, QObject::tr("Video asset"), QObject::tr("Import failed: %1").arg(QString::fromUtf8(r.message.c_str())));
-				}
-			}, plan.guid.IsNull() ? std::string() : AssetOwnerKey(plan.guid));
+			anyNonWebm = anyNonWebm || kind != ESourceKind::Webm;
+			files << file;
 		}
+		if (files.isEmpty())
+			return;
+		// (re-read each time: the asset browser of this window may have been used while a dialog was open)
+		const std::string folder = m_stateValid ? m_state.folderRel : std::string("Videos/");
+
+		if (files.size() > 1)
+		{
+			// several files: one dialog for all, one queue (one ffmpeg at a time), one summary
+			SImportOptions options;
+			const ESourceKind kind = anyNonWebm ? ESourceKind::Video : ESourceKind::Webm;
+			if (!CImportOptionsDialog::Ask(tr("%1 files").arg(files.size()), options, folder, std::string(), kind, true))
+				return;
+			options.assetName.clear();
+			const int batch = pQueue->BeginBatch(tr("Import %1 files").arg(files.size()));
+			for (const QString& file : files)
+				pQueue->Enqueue(batch, std::string(file.toUtf8().constData()), folder, options);
+			pQueue->EndBatch(batch);
+			return;
+		}
+
+		const QString file = files.front();
+		ESourceKind kind = ESourceKind::Webm;
+		ClassifySource(std::string(file.toUtf8().constData()), kind);
+		SImportOptions options;
+		options.assetName = SanitizeAssetName(QFileInfo(file).completeBaseName().toUtf8().constData());
+		if (kind == ESourceKind::PngSequence)
+			options.assetName = SanitizeAssetName(QFileInfo(file).fileName().toUtf8().constData());
+		if (!CImportOptionsDialog::Ask(file, options, folder, std::string(), kind, false)) // asks again when the name is taken
+			return;
+		const int batch = pQueue->BeginBatch(tr("Import %1").arg(QFileInfo(file).fileName()));
+		pQueue->Enqueue(batch, std::string(file.toUtf8().constData()), folder, options);
+		pQueue->EndBatch(batch);
 	}
 
 	void CVideoEditor::dragEnterEvent(QDragEnterEvent* pEvent)
@@ -536,7 +595,7 @@ namespace CEVEditor
 		if (pData->HasFilePaths())
 		{
 			const QStringList paths = pData->GetFilePaths();
-			if (std::any_of(paths.begin(), paths.end(), IsWebm))
+			if (std::any_of(paths.begin(), paths.end(), IsImportable))
 			{
 				CDragDropData::ShowDragText(this, tr("Import"));
 				pEvent->acceptProposedAction();
@@ -552,7 +611,7 @@ namespace CEVEditor
 		if (pData->HasFilePaths())
 		{
 			const QStringList paths = pData->GetFilePaths();
-			if (std::any_of(paths.begin(), paths.end(), IsWebm))
+			if (std::any_of(paths.begin(), paths.end(), IsImportable))
 			{
 				pEvent->acceptProposedAction();
 				// The options dialog is modal: not inside the drop handler (the drag source, e.g. Explorer, waits for it).

@@ -237,6 +237,8 @@ namespace cev
 					std::snprintf(fr, sizeof(fr), "%g", o.inputFrameRate);
 					Push(common, "-framerate", fr);
 				}
+				if (o.inputStartNumber >= 0)
+					Push(common, "-start_number", std::to_string(o.inputStartNumber));
 				if (!o.inputVideoDecoder.empty())
 					Push(common, "-c:v", o.inputVideoDecoder);
 				Push(common, "-i", src);
@@ -448,6 +450,11 @@ namespace cev
 						char fr[32];
 						std::snprintf(fr, sizeof(fr), "%g", options.inputFrameRate);
 						inputArgs = {"-framerate", fr};
+					}
+					if (options.inputStartNumber >= 0)
+					{
+						inputArgs.push_back("-start_number");
+						inputArgs.push_back(std::to_string(options.inputStartNumber));
 					}
 					SourceProbe probe;
 					Result r = ProbeSource(exe, src, probe, 30000, inputArgs);

@@ -10,6 +10,7 @@
 #include <PathUtils.h>
 #include <ThreadingUtils.h>
 
+#include "Asset/ImportQueue.h"
 #include "Asset/VideoImport.h"
 #include "Editor/ImportOptionsDialog.h"
 
@@ -30,13 +31,39 @@ namespace CEVEditor
 		const std::string source = ctx.GetInputFilePath().c_str();
 		const std::string folder = ctx.GetOutputDirectoryPath().c_str();
 
+		ESourceKind kind = ESourceKind::Webm;
+		if (!ClassifySource(source, kind))
+		{
+			CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_ERROR, "[CEVEditor] import of '%s' failed: this file type cannot be imported (%s)", source.c_str(), ImportExtensionsText().c_str());
+			return {};
+		}
 		SImportOptions options;
 		options.assetName = ctx.GetAssetName().c_str();
 		// the engine already asked about overwriting for the original name (GetAssetNames / CanWrite); a name changed in
 		// the dialog is checked by Ask (it prompts and may send the user back to the dialog)
 		const std::string confirmedName = SanitizeAssetName(options.assetName);
-		if (!CImportOptionsDialog::Ask(QString::fromUtf8(source.c_str()), options, folder, confirmedName))
+		if (!CImportOptionsDialog::Ask(QString::fromUtf8(source.c_str()), options, folder, confirmedName, kind, false))
 			return {}; // cancelled
+
+		if (options.NeedsFfmpeg(kind))
+		{
+			// Minutes of ffmpeg do not belong on the engine's single import queue: the import queue (own jobs, one ffmpeg at a
+			// time) does it and merges the asset itself, so this returns no asset. Fire and forget: nothing waits for the main thread.
+			ThreadingUtils::PostOnMainThread([source, folder, options, confirmedName]() mutable
+			{
+				CImportQueue* const pQueue = CImportQueue::Get();
+				if (pQueue == nullptr)
+					return;
+				const SImportPlan plan = PlanImport(source, folder, options);
+				if (plan.ok && plan.exists && plan.assetName == confirmedName)
+					options.overwrite = true; // the engine's own confirmation covers the original name
+				const int batch = pQueue->BeginBatch(QObject::tr("Import %1").arg(QString::fromUtf8(source.c_str())));
+				pQueue->Enqueue(batch, source, folder, options);
+				pQueue->EndBatch(batch);
+			});
+			CryLogAlways("[CEVEditor] import of '%s' queued (FFmpeg)", source.c_str());
+			return {};
+		}
 
 		// the plan (asset manager lookups) and the preparation of an overwrite run on the main thread: this function
 		// runs on the engine's background queue. Waiting here is fine, the main thread does not wait for us.

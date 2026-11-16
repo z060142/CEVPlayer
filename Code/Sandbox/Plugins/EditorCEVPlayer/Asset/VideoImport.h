@@ -1,9 +1,12 @@
 // Import of a video file into a video asset and the follow-up operations on an existing asset. Shared by the importer
 // (drag and drop, background thread), the console command cev_editor_import (main thread) and the editor window.
 //
-// Layout (docs/design/M4-asset-and-editor.md): the source video is COPIED into the asset's folder as <name>.webm (that
-// is also the video the descriptor starts with), <name>.cevvideo and <name>.cevvideo.cryasset are written next to it.
-// Details of the .cryasset keep the original path, the relative path of the copy, its SHA-256 and the import settings.
+// Layout (docs/design/M4-asset-and-editor.md, M5-ffmpeg.md): a WebM source is COPIED into the asset's folder as <name>.webm
+// (that is also the video the descriptor starts with). Any other source (mp4 / mov / mkv / avi) is copied as
+// <name>_source.<ext> and transcoded by FFmpeg to <name>.webm; a PNG sequence is transcoded from its own folder (not copied).
+// A WebM that is re-encoded at import is copied as <name>_source.webm. <name>_<height>p.webm are the variants listed in the
+// descriptor's <Variants>. <name>.cevvideo and <name>.cevvideo.cryasset are written next to them.
+// Details of the .cryasset keep the original path, the relative path of the source copy, its SHA-256 and the import settings.
 #pragma once
 
 #include <atomic>
@@ -28,6 +31,22 @@ namespace CEVEditor
 		StripEmbedded, //!< external audio only: the descriptor plays a picture-only copy of the video
 	};
 
+	//! What a source path is (decides copy / transcode).
+	enum class ESourceKind
+	{
+		Webm,         //!< .webm: copied (no FFmpeg) unless the options re-encode it
+		Video,        //!< .mp4 / .mov / .mkv / .avi: always transcoded by FFmpeg
+		PngSequence,  //!< a folder of numbered PNG files: transcoded by FFmpeg
+	};
+	//! Classifies by extension / directory. False when the path is not an importable source (kind unchanged).
+	bool ClassifySource(const std::string& absPath, ESourceKind& kind);
+	//! "webm, mp4, mov, mkv, avi"
+	std::string ImportExtensionsText();
+	//! The heights the variant lists offer: 2160, 1440, 1080, 720, 540, 360.
+	std::vector<int> StandardVariantHeights();
+	//! "540,360" / "540 360" -> {540, 360} (ascending order is not required). False + error on a bad item.
+	bool ParseHeightList(const std::string& text, std::vector<int>& out, std::string& error);
+
 	struct SImportOptions
 	{
 		std::string assetName;               //!< "" = sanitised stem of the file name
@@ -39,8 +58,16 @@ namespace CEVEditor
 		bool ogg = false;                    //!< export an Ogg Vorbis (needs the offline library)
 		float oggQuality = 0.4f;
 		bool overwrite = false;              //!< the caller / the user agreed to replace an existing asset of that name (not stored)
+		// FFmpeg stage (M5)
+		bool recompress = false;             //!< WebM sources: re-encode with crf / height (other sources are always encoded)
+		int crf = 32;                        //!< libvpx-vp9 constant quality 0 (best) .. 63
+		int height = 0;                      //!< 0 = keep the source height, else the output height (width follows)
+		std::vector<int> variants;           //!< heights of the variants (<name>_<h>p.webm); heights not below the output are skipped
+		double fps = 30.0;                   //!< PNG sequence frame rate
 
 		bool NeedsAudioOps() const { return split != ESplitAudio::None || wav || ogg; }
+		bool NeedsTranscode(ESourceKind kind) const { return kind != ESourceKind::Webm || recompress; }
+		bool NeedsFfmpeg(ESourceKind kind) const { return NeedsTranscode(kind) || !variants.empty(); }
 		std::string ToSettingsString() const;
 		static SImportOptions FromSettingsString(const std::string& text);
 	};
@@ -75,6 +102,14 @@ namespace CEVEditor
 		std::string keptSdlFiles;            //!< Details sdlFiles / aceLibrary of the existing asset (kept)
 		std::string keptAceLibrary;
 		std::string detail;                  //!< human readable what exists, for the confirmation
+		// M5
+		ESourceKind kind = ESourceKind::Webm;
+		std::string sourceCopyRel;           //!< where the source is copied to (relative to Assets), "" for a PNG sequence
+		std::vector<std::string> dropFiles;  //!< files of the replaced asset that the new import makes obsolete (old source copy, old variants)
+		std::string pngPattern;              //!< PNG sequence: ffmpeg input pattern (absolute, "<dir>/<prefix>%04d.png")
+		int pngStart = 0;                    //!< first frame number
+		int pngCount = 0;                    //!< frames found (the contiguous run from pngStart)
+		std::string note;                    //!< a warning to show / log (PNG sequence gap, ...)
 	};
 
 	//! Main thread: validates the source / folder / name and inspects the target. Nothing is written, nothing released.
@@ -86,7 +121,9 @@ namespace CEVEditor
 	//! The quick part of an import: probe, copy, hash, write .cevvideo and .cryasset. Any thread; does not touch the
 	//! asset manager or Qt (use PlanImport before and FinishImport after, on the main thread). The plan must be ok and,
 	//! when plan.exists, the caller must have the consent (options.overwrite) and have run PrepareOverwrite.
-	SImportResult ImportVideoFile(const std::string& absSrc, const SImportPlan& plan, const SImportOptions& options, const std::atomic<bool>* cancel = nullptr);
+	//! With the FFmpeg stage (non-WebM source, re-encode, variants) this runs for minutes: only on a job thread (CImportQueue),
+	//! `pCtx` carries cancel / progress / log. A failed or cancelled run removes the files it created.
+	SImportResult ImportVideoFile(const std::string& absSrc, const SImportPlan& plan, const SImportOptions& options, const std::atomic<bool>* cancel = nullptr, const SOpContext* pCtx = nullptr);
 	//! Main thread, no UI: PlanImport + refuse when something exists and options.overwrite is false (the error says so,
 	//! nothing is touched) + PrepareOverwrite + ImportVideoFile. For the console command.
 	SImportResult ImportVideoFileNow(const std::string& absSrc, const std::string& folderRel, const SImportOptions& options);
@@ -108,8 +145,11 @@ namespace CEVEditor
 	void StartPostImportOps(const std::string& metadataRel, const std::string& assetName, const SImportOptions& options);
 
 	//! Main thread: copy the original file over the copy again (hash, probe and Details are renewed). The preview
-	//! player must not have the file open.
+	//! player must not have the file open. Assets whose video was made by FFmpeg (IsTranscodedAsset) are reimported by
+	//! SubmitTranscodeOps (refreshSource) instead: this returns false for them.
 	bool ReimportVideo(CAsset& asset, std::string& error);
+	//! The main video of the asset was transcoded from a separate source copy / PNG sequence (Details transcoded = 1).
+	bool IsTranscodedAsset(const CAsset& asset);
 
 	//! Source status of an asset, computed by hashing (call on a worker thread: reads whole files).
 	struct SSourceStatus
@@ -139,6 +179,22 @@ namespace CEVEditor
 	//! Main thread: runs the requested operations on a job (IOfflineOps) and applies the results to the asset when the
 	//! job is done. Returns the job id (0 = not started, `error` says why).
 	int SubmitAudioOps(CAsset& asset, const SAudioOps& ops, std::string& error, std::function<void(bool ok)> onFinished = std::function<void(bool)>());
+
+	//! FFmpeg operations on an existing asset (main thread to start, a job does the work, the result is applied on the main thread).
+	struct STranscodeOps
+	{
+		bool recompress = false;          //!< re-encode the main video (crf / height) from the source copy (fallback: the current webm becomes the source copy)
+		bool refreshSource = false;       //!< recompress: copy the original file over the source copy first (Reimport of a transcoded asset)
+		int crf = 32;
+		int height = 0;                   //!< 0 = keep the height of the source
+		bool changeVariants = false;      //!< generate the variants in `variants`
+		std::vector<int> variants;        //!< heights to (re)generate; heights not below the video are skipped
+		bool removeOtherVariants = false; //!< variants of the asset that are not in `variants` are removed (files too)
+	};
+	//! Job id, 0 + error when it cannot start (no FFmpeg, no asset files, ...).
+	int SubmitTranscodeOps(CAsset& asset, const STranscodeOps& ops, std::string& error, std::function<void(bool ok)> onFinished = std::function<void(bool)>());
+	//! The heights of the variants in the descriptor of the asset (ascending).
+	std::vector<int> VariantHeights(const SDescriptor& desc);
 
 	//! Main thread: registers the WAV / Ogg files of the asset with SDL_mixer / ACE (Audio/AceRegistrar) and switches the
 	//! descriptor to route "cue" with the generated triggers. Fails when the asset has no WAV / Ogg.

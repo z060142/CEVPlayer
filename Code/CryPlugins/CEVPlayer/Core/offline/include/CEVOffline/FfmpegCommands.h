@@ -66,6 +66,7 @@ namespace cev
 				bool twoPass = false;
 				int cpuUsed = 2;                 // libvpx -cpu-used (0 slowest .. 8 fastest); 4..8 is realtime-ish
 				double inputFrameRate = 0.0;     // PNG sequence: -framerate N before -i (0: ffmpeg default of 25)
+				int inputStartNumber = -1;       // PNG sequence: -start_number N before -i (>= 0; -1: ffmpeg looks at the first 5 numbers)
 				std::string inputVideoDecoder;   // forced input decoder, e.g. "libvpx-vp9" (needed to decode WebM alpha)
 				// Output colour: RGB / unknown sources are converted with this matrix by the scale filter and the stream is
 				// tagged accordingly ("bt709"; empty = leave everything to ffmpeg's defaults).

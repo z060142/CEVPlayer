@@ -2,11 +2,14 @@
 #include "Editor/InfoPanel.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDesktopServices>
+#include <QFileDialog>
+#include <QMessageBox>
 #include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -23,6 +26,7 @@
 
 #include "Asset/VideoImport.h"
 #include "Editor/VideoEditor.h"
+#include "FFmpeg/FfmpegService.h"
 #include "Jobs/JobRunner.h"
 #include "Offline/IOfflineOps.h"
 
@@ -66,7 +70,13 @@ namespace CEVEditor
 		}
 		if (m_pEditor)
 			connect(m_pEditor.data(), &CVideoEditor::StateChanged, this, &CVideoInfoPanel::Refresh);
+		if (CFfmpegService* const pService = CFfmpegService::Get())
+		{
+			connect(pService, &CFfmpegService::Changed, this, &CVideoInfoPanel::RefreshFfmpeg);
+			pService->EnsureDetected(); // lazy: the first panel (or the main frame) starts the detection, the result is cached
+		}
 		Refresh();
+		RefreshFfmpeg();
 		RefreshJobs();
 	}
 
@@ -106,6 +116,66 @@ namespace CEVEditor
 		m_pFiles->setMinimumHeight(110);
 		pFilesLayout->addWidget(m_pFiles);
 		pMain->addWidget(pFilesBox);
+
+		// ---- variants
+		QGroupBox* const pVariantsBox = new QGroupBox(tr("Variants (descriptor <Variants>)"), pContent);
+		QVBoxLayout* const pVariantsLayout = new QVBoxLayout(pVariantsBox);
+		m_pVariants = new QTableWidget(0, 4, pVariantsBox);
+		m_pVariants->setHorizontalHeaderLabels({ tr("File"), tr("Size"), tr("Status"), tr("Disk") });
+		m_pVariants->horizontalHeader()->setStretchLastSection(true);
+		m_pVariants->setEditTriggers(QAbstractItemView::NoEditTriggers);
+		m_pVariants->setSelectionMode(QAbstractItemView::NoSelection);
+		m_pVariants->setMinimumHeight(70);
+		m_pVariants->setToolTip(tr("The runtime plays the smallest variant that is not below the output size (rule smallestNotBelowOutput). A variant is stale when it is older than the main video: generate it again."));
+		pVariantsLayout->addWidget(m_pVariants);
+		pMain->addWidget(pVariantsBox);
+
+		// ---- FFmpeg
+		QGroupBox* const pFfmpegBox = new QGroupBox(tr("FFmpeg"), pContent);
+		QVBoxLayout* const pFfmpegLayout = new QVBoxLayout(pFfmpegBox);
+		m_pFfmpegState = new QLabel(pFfmpegBox);
+		m_pFfmpegState->setWordWrap(true);
+		pFfmpegLayout->addWidget(m_pFfmpegState);
+		m_pFfmpegDetail = new QLabel(pFfmpegBox);
+		m_pFfmpegDetail->setWordWrap(true);
+		m_pFfmpegDetail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+		pFfmpegLayout->addWidget(m_pFfmpegDetail);
+		QHBoxLayout* const pFfmpegButtons = new QHBoxLayout();
+		QPushButton* const pLocate = new QPushButton(tr("Locate..."), pFfmpegBox);
+		pLocate->setToolTip(tr("Choose ffmpeg.exe (stored in %LOCALAPPDATA%/CEVPlayer/editor.json). It needs libvpx-vp9, libopus and the webm muxer."));
+		m_pFfmpegDownload = new QPushButton(tr("Download minimal build"), pFfmpegBox);
+		QPushButton* const pRedetect = new QPushButton(tr("Re-detect"), pFfmpegBox);
+		pFfmpegButtons->addWidget(pLocate);
+		pFfmpegButtons->addWidget(m_pFfmpegDownload);
+		pFfmpegButtons->addWidget(pRedetect);
+		pFfmpegButtons->addStretch(1);
+		pFfmpegLayout->addLayout(pFfmpegButtons);
+		connect(pLocate, &QPushButton::clicked, this, [this]()
+		{
+			CFfmpegService* const pService = CFfmpegService::Get();
+			if (pService == nullptr)
+				return;
+			const QString file = QFileDialog::getOpenFileName(this, tr("Choose ffmpeg.exe"), QString::fromUtf8(pService->ConfiguredPath().c_str()), tr("ffmpeg (ffmpeg.exe);;All files (*)"));
+			if (!file.isEmpty())
+				pService->SetPath(std::string(file.toUtf8().constData()));
+		});
+		connect(m_pFfmpegDownload, &QPushButton::clicked, this, [this]()
+		{
+			CFfmpegService* const pService = CFfmpegService::Get();
+			if (pService == nullptr)
+				return;
+			std::string error;
+			if (pService->StartDownload(error) == 0)
+				QMessageBox::warning(this, tr("FFmpeg"), QString::fromUtf8(error.c_str()));
+			else
+				Log(tr("Downloading the minimal FFmpeg build (progress in the job list) ..."));
+		});
+		connect(pRedetect, &QPushButton::clicked, this, [this]()
+		{
+			if (CFfmpegService* const pService = CFfmpegService::Get())
+				pService->StartDetect(true);
+		});
+		pMain->addWidget(pFfmpegBox);
 
 		// ---- descriptor
 		QGroupBox* const pDescBox = new QGroupBox(tr("Descriptor (.cevvideo)"), pContent);
@@ -232,16 +302,33 @@ namespace CEVEditor
 			if (!m_pEditor) return;
 			std::string error;
 			if (m_pEditor->ReimportSource(error))
-				Log(tr("Reimported the source."));
+				Log(m_pEditor->State().details.Get(DetailKey::kTranscoded) == "1" ? tr("Reimport started: the source is copied again and encoded on a job.") : tr("Reimported the source."));
 			else
 				Log(tr("Reimport failed: %1").arg(Q(error)));
 		});
-		addButton(tr("Open folder"), tr("Opens the folder of the asset."), 3, 0, [this]()
+		addButton(tr("Generate variants..."), tr("FFmpeg: smaller copies of the video (<name>_<height>p.webm) listed in the descriptor <Variants>."), 3, 0, [this]()
+		{
+			if (m_pEditor)
+				m_pEditor->GenerateVariantsDialog();
+		});
+		addButton(tr("Re-compress / resize..."), tr("FFmpeg: encodes the video again from the stored source copy with another quality / height; the asset keeps its GUID."), 3, 1, [this]()
+		{
+			if (m_pEditor)
+				m_pEditor->RecompressDialog();
+		});
+		addButton(tr("Open folder"), tr("Opens the folder of the asset."), 4, 0, [this]()
 		{
 			if (m_pEditor && m_pEditor->HasAsset())
 				QDesktopServices::openUrl(QUrl::fromLocalFile(Q(AssetsAbsolute(m_pEditor->State().folderRel))));
 		});
 		pOpsLayout->addWidget(m_pOpButtons);
+		for (QPushButton* const b : m_pOpButtons->findChildren<QPushButton*>())
+		{
+			if (b->text() == tr("Generate variants..."))
+				m_pBtnVariants = b;
+			else if (b->text() == tr("Re-compress / resize..."))
+				m_pBtnRecompress = b;
+		}
 
 		m_pAce = new QLabel(pOpsBox);
 		m_pAce->setWordWrap(true);
@@ -309,11 +396,12 @@ namespace CEVEditor
 		if (!has)
 		{
 			m_filledRevision = -1;
-			m_pTitle->setText(tr("No video asset opened. Double click one in the asset browser, or drop a .webm file here to import it."));
+			m_pTitle->setText(tr("No video asset opened. Double click one in the asset browser, or drop a video file (webm, mp4, mov, mkv, avi) or a folder of PNG files here to import it."));
 			m_pInfo->clear();
 			m_pSource->clear();
 			m_pAce->clear();
 			m_pFiles->setRowCount(0);
+			m_pVariants->setRowCount(0);
 			m_pLanguages->setRowCount(0);
 			m_pMarkers->setRowCount(0);
 			return;
@@ -372,6 +460,7 @@ namespace CEVEditor
 		}
 
 		FillFiles();
+		FillVariants();
 		// The tables hold what the user is typing: refill them only when the descriptor in the state was replaced
 		// (asset opened / reloaded / merged), not on every state change (e.g. when a background check finishes).
 		if (m_filledRevision != m_pEditor->DescriptorRevision())
@@ -399,8 +488,12 @@ namespace CEVEditor
 				role = tr("source copy - original file, not shipped");
 			else if (HasExtension(rel, "wav") || HasExtension(rel, "ogg"))
 				role = tr("sound file (the engine also lists it as a Sound asset)");
+			else if (std::any_of(st.descriptor.variants.begin(), st.descriptor.variants.end(), [&](const SDescriptor::SVariant& v) { return _stricmp((st.folderRel + v.file).c_str(), rel.c_str()) == 0; }))
+				role = tr("variant (shipped)");
+			else if (HasExtension(rel, "mp4") || HasExtension(rel, "mov") || HasExtension(rel, "mkv") || HasExtension(rel, "avi"))
+				role = tr("source copy - original file, not shipped");
 			else if (HasExtension(rel, "webm"))
-				role = tr("WebM (audio track / variant)");
+				role = tr("WebM (audio track)");
 			rows.push_back({ rel, role });
 		}
 		for (const std::string& rel : SplitList(st.details.Get(DetailKey::kSdlFiles), ';'))
@@ -423,6 +516,98 @@ namespace CEVEditor
 			m_pFiles->setItem(i, 2, status);
 		}
 		m_pFiles->resizeColumnsToContents();
+	}
+
+	void CVideoInfoPanel::FillVariants()
+	{
+		const CVideoEditor::SState& st = m_pEditor->State();
+		const SDescriptor& d = st.descriptor;
+		m_pVariants->setRowCount(static_cast<int>(d.variants.size()));
+		// the encode master: <name>.webm (a variant older than it was made from an older picture)
+		std::error_code ec;
+		fs::path masterPath = fs::u8path(AssetsAbsolute(st.folderRel + st.assetName + ".webm"));
+		if (!fs::is_regular_file(masterPath, ec))
+			masterPath = fs::u8path(AssetsAbsolute(st.videoRel));
+		const bool masterKnown = fs::is_regular_file(masterPath, ec);
+		const fs::file_time_type masterTime = masterKnown ? fs::last_write_time(masterPath, ec) : fs::file_time_type();
+		for (int i = 0; i < static_cast<int>(d.variants.size()); ++i)
+		{
+			const SDescriptor::SVariant& v = d.variants[static_cast<size_t>(i)];
+			const fs::path path = fs::u8path(AssetsAbsolute(st.folderRel + v.file));
+			const bool exists = fs::is_regular_file(path, ec);
+			bool stale = false;
+			if (exists && masterKnown)
+			{
+				const fs::file_time_type t = fs::last_write_time(path, ec);
+				stale = !ec && t < masterTime - std::chrono::seconds(2);
+			}
+			QTableWidgetItem* const status = new QTableWidgetItem(!exists ? tr("MISSING") : stale ? tr("stale: older than the main video") : tr("up to date"));
+			if (!exists)
+				status->setForeground(QColor(230, 90, 90));
+			else if (stale)
+				status->setForeground(QColor(224, 160, 48));
+			m_pVariants->setItem(i, 0, new QTableWidgetItem(Q(v.file)));
+			m_pVariants->setItem(i, 1, new QTableWidgetItem(QString("%1 x %2").arg(v.width).arg(v.height)));
+			m_pVariants->setItem(i, 2, status);
+			m_pVariants->setItem(i, 3, new QTableWidgetItem(exists ? SizeText(static_cast<unsigned long long>(fs::file_size(path, ec))) : QString()));
+		}
+		m_pVariants->resizeColumnsToContents();
+	}
+
+	void CVideoInfoPanel::RefreshFfmpeg()
+	{
+		CFfmpegService* const pService = CFfmpegService::Get();
+		if (pService == nullptr)
+		{
+			m_pFfmpegState->setText(tr("FFmpeg service not available."));
+			return;
+		}
+		const SFfmpegStatus s = pService->Status();
+		QString state;
+		QString detail;
+		switch (s.state)
+		{
+		case SFfmpegStatus::EState::Unknown:
+		case SFfmpegStatus::EState::Detecting:
+			state = tr("Looking for FFmpeg ...");
+			m_pFfmpegState->setStyleSheet(QString());
+			break;
+		case SFfmpegStatus::EState::Ready:
+			state = tr("FFmpeg ready: %1 (%2)").arg(Q(s.version), Q(s.source));
+			m_pFfmpegState->setStyleSheet("color: #70c070;");
+			detail = tr("Path: %1").arg(Q(s.exe));
+			{
+				auto joined = [](const std::vector<std::string>& v) { QString t; for (const std::string& i : v) t += (t.isEmpty() ? QString() : QString(", ")) + Q(i); return t; };
+				detail += tr("\nMissing (recommended): %1").arg(s.missingRecommended.empty() ? tr("nothing") : joined(s.missingRecommended));
+				detail += tr("\nMissing for import: %1").arg(s.missingImport.empty() ? tr("nothing") : joined(s.missingImport));
+			}
+			if (s.gpl || s.nonfree)
+				detail += tr("\nThis build is GPL / nonfree licensed (it is only run as a separate program).");
+			break;
+		case SFfmpegStatus::EState::Absent:
+			state = tr("FFmpeg not available: %1").arg(Q(s.message));
+			m_pFfmpegState->setStyleSheet("color: #e0a030;");
+			detail = tr("Only the operations that need FFmpeg are disabled (import of mp4 / mov / mkv / avi / PNG sequences, re-encode, variants); WebM import, audio split, WAV and Ogg work without it.");
+			break;
+		}
+		for (const std::string& r : s.rejected)
+			detail += "\n" + tr("Not usable: %1").arg(Q(r));
+		detail += tr("\nConfigured path: %1").arg(s.configuredPath.empty() ? tr("(none)") : Q(s.configuredPath));
+		const std::string disabled = CFfmpegService::DownloadDisabledReason();
+		detail += disabled.empty() ? tr("\nDownload: our minimal build is available.") : tr("\nDownload: %1").arg(Q(disabled));
+		m_pFfmpegState->setText(state);
+		m_pFfmpegDetail->setText(detail);
+		m_pFfmpegDownload->setEnabled(disabled.empty() && !pService->DownloadRunning());
+		m_pFfmpegDownload->setToolTip(disabled.empty() ? tr("Downloads the pinned minimal LGPL build; the SHA-256 is verified before it is installed.") : Q(disabled));
+		const bool has = m_pEditor && m_pEditor->HasAsset();
+		for (QPushButton* const b : { m_pBtnVariants, m_pBtnRecompress })
+		{
+			if (b == nullptr)
+				continue;
+			b->setEnabled(has && !s.Pending());
+			if (has && !s.Pending() && !s.Ready())
+				b->setToolTip(tr("FFmpeg is not available: clicking asks for it. ") + Q(s.message));
+		}
 	}
 
 	void CVideoInfoPanel::FillDescriptor()

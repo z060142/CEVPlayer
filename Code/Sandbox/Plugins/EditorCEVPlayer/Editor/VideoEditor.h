@@ -65,11 +65,17 @@ namespace CEVEditor
 		//! Replaces the file of the source copy again from the recorded original (preview player is released first).
 		bool ReimportSource(std::string& error);
 		void RunAudioOps(const SAudioOps& ops);
+		//! FFmpeg operations (variants / re-encode) on a job; the window refreshes when it is done.
+		void RunTranscodeOps(const STranscodeOps& ops);
+		//! The dialogs of the operation buttons (they ask for FFmpeg first when none is usable).
+		void GenerateVariantsDialog();
+		void RecompressDialog();
 		void UpgradeToCue();
 		void RefreshAssetState();                              //!< re-reads Details, descriptor and the file list (unsaved edits are merged)
 		static CVideoEditor* Current();                        //!< the last window that opened an asset (console command, tests)
 
-		//! Opens the dropped / selected .webm files: options dialog, import on a job, merge on the main thread.
+		//! Opens the dropped / selected files (webm mp4 mov mkv avi, folders of PNG files): options dialog, then the import queue
+		//! (one file at a time on a job, merge on the main thread). Several files: one dialog, one batch.
 		void ImportFiles(const QStringList& files);
 
 		//! Destroys the preview player of this window when it shows the asset (files are about to be replaced / renamed /

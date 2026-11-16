@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -21,6 +23,7 @@
 
 #include "Asset/Sha256.h"
 #include "Audio/AceRegistrar.h"
+#include "FFmpeg/FfmpegService.h"
 #include "Jobs/JobRunner.h"
 #include "Offline/MediaInfo.h"
 
@@ -120,9 +123,16 @@ namespace CEVEditor
 		const char* splitName = split == ESplitAudio::None ? "none" : split == ESplitAudio::KeepEmbedded ? "keep" : "strip";
 		char quality[32];
 		std::snprintf(quality, sizeof(quality), "%.2f", oggQuality);
+		char fpsText[32];
+		std::snprintf(fpsText, sizeof(fpsText), "%.3f", fps);
+		std::string variantText;
+		for (int h : variants)
+			variantText += (variantText.empty() ? "" : ",") + std::to_string(h);
 		return JoinSettings({
 			{ "language", language }, { "route", route }, { "trigger", trigger }, { "split", splitName },
-			{ "wav", wav ? "1" : "0" }, { "ogg", ogg ? "1" : "0" }, { "oggQuality", quality } });
+			{ "wav", wav ? "1" : "0" }, { "ogg", ogg ? "1" : "0" }, { "oggQuality", quality },
+			{ "recompress", recompress ? "1" : "0" }, { "crf", std::to_string(crf) }, { "height", std::to_string(height) },
+			{ "variants", variantText }, { "fps", fpsText } });
 	}
 
 	SImportOptions SImportOptions::FromSettingsString(const std::string& text)
@@ -137,6 +147,11 @@ namespace CEVEditor
 			else if (kv.first == "wav") o.wav = kv.second == "1";
 			else if (kv.first == "ogg") o.ogg = kv.second == "1";
 			else if (kv.first == "oggQuality") o.oggQuality = static_cast<float>(std::atof(kv.second.c_str()));
+			else if (kv.first == "recompress") o.recompress = kv.second == "1";
+			else if (kv.first == "crf") o.crf = std::atoi(kv.second.c_str());
+			else if (kv.first == "height") o.height = std::atoi(kv.second.c_str());
+			else if (kv.first == "fps") o.fps = std::atof(kv.second.c_str());
+			else if (kv.first == "variants") { std::string ignored; ParseHeightList(kv.second, o.variants, ignored); }
 		}
 		return o;
 	}
@@ -199,19 +214,185 @@ namespace CEVEditor
 		return std::string(guid.ToString().c_str());
 	}
 
+	// ---------------------------------------------------------------------------------------------------------------
+	bool ClassifySource(const std::string& absPath, ESourceKind& kind)
+	{
+		std::error_code ec;
+		const fs::path path = fs::u8path(absPath);
+		if (fs::is_directory(path, ec))
+		{
+			kind = ESourceKind::PngSequence;
+			return true;
+		}
+		if (HasExt(absPath, "webm"))
+		{
+			kind = ESourceKind::Webm;
+			return true;
+		}
+		for (const char* ext : { "mp4", "mov", "mkv", "avi" })
+		{
+			if (HasExt(absPath, ext))
+			{
+				kind = ESourceKind::Video;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	std::string ImportExtensionsText()
+	{
+		return "webm, mp4, mov, mkv, avi";
+	}
+
+	std::vector<int> StandardVariantHeights()
+	{
+		return { 2160, 1440, 1080, 720, 540, 360 };
+	}
+
+	bool ParseHeightList(const std::string& text, std::vector<int>& out, std::string& error)
+	{
+		out.clear();
+		std::string item;
+		auto flush = [&]() -> bool
+		{
+			if (item.empty())
+				return true;
+			char* end = nullptr;
+			const long v = std::strtol(item.c_str(), &end, 10);
+			if (end == item.c_str() || *end != '\0' || v < 16 || v > 8640)
+			{
+				error = "bad height '" + item + "' (a number of pixels, 16 .. 8640)";
+				return false;
+			}
+			if (std::find(out.begin(), out.end(), static_cast<int>(v)) == out.end())
+				out.push_back(static_cast<int>(v));
+			item.clear();
+			return true;
+		};
+		for (char c : text)
+		{
+			if (c == ',' || c == ';' || c == ' ')
+			{
+				if (!flush())
+					return false;
+			}
+			else
+			{
+				item += c;
+			}
+		}
+		return flush();
+	}
+
+	namespace
+	{
+		// The numbered PNG files of a folder -> an ffmpeg image2 pattern. The biggest group of files with the same prefix and the
+		// same number of digits wins; only the contiguous run from the lowest number is used (ffmpeg stops at the first gap).
+		bool DetectPngSequence(const fs::path& dir, SImportPlan& plan, std::string& error)
+		{
+			struct SGroup { std::map<long, int> numbers; std::string prefix; int digits = 0; };
+			std::map<std::pair<std::string, int>, SGroup> groups;
+			std::error_code ec;
+			for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+			{
+				if (!it->is_regular_file(ec) || !HasExt(it->path().u8string(), "png"))
+					continue;
+				const std::string stem = it->path().stem().u8string();
+				size_t digitsStart = stem.size();
+				while (digitsStart > 0 && std::isdigit(static_cast<unsigned char>(stem[digitsStart - 1])) != 0)
+					--digitsStart;
+				const int digits = static_cast<int>(stem.size() - digitsStart);
+				if (digits == 0 || digits > 9)
+					continue;
+				SGroup& g = groups[{ stem.substr(0, digitsStart), digits }];
+				g.prefix = stem.substr(0, digitsStart);
+				g.digits = digits;
+				g.numbers[std::atol(stem.c_str() + digitsStart)] = 1;
+			}
+			const SGroup* best = nullptr;
+			for (const auto& kv : groups)
+			{
+				if (best == nullptr || kv.second.numbers.size() > best->numbers.size())
+					best = &kv.second;
+			}
+			if (best == nullptr || best->numbers.size() < 2)
+			{
+				error = "the folder has no numbered PNG sequence (at least two files like name0001.png, name0002.png): " + dir.u8string();
+				return false;
+			}
+			if (best->prefix.find('%') != std::string::npos || dir.u8string().find('%') != std::string::npos)
+			{
+				error = "a '%' in the folder or file name cannot be used for an image sequence: rename it";
+				return false;
+			}
+			const long first = best->numbers.begin()->first;
+			long expected = first;
+			int run = 0;
+			for (const auto& kv : best->numbers)
+			{
+				if (kv.first != expected)
+					break;
+				++run;
+				++expected;
+			}
+			char digitsText[16];
+			std::snprintf(digitsText, sizeof(digitsText), "%%0%dd", best->digits);
+			std::string base = dir.u8string();
+			for (char& c : base)
+			{
+				if (c == '\\')
+					c = '/';
+			}
+			if (!base.empty() && base.back() != '/')
+				base += '/';
+			plan.pngPattern = base + best->prefix + digitsText + ".png";
+			plan.pngStart = static_cast<int>(first);
+			plan.pngCount = run;
+			if (run < static_cast<int>(best->numbers.size()))
+				plan.note = "the PNG sequence has a gap after frame " + std::to_string(first + run - 1) + ": only " + std::to_string(run) + " of " + std::to_string(best->numbers.size()) + " files are used";
+			return true;
+		}
+
+		bool IsVariantFileOf(const std::string& rel, const std::string& folder, const std::string& name)
+		{
+			// <folder><name>_<digits>p.webm
+			if (FolderOf(rel) != folder)
+				return false;
+			const std::string file = FileNameOf(rel);
+			if (_strnicmp(file.c_str(), name.c_str(), name.size()) != 0 || file.size() <= name.size() + 1 || file[name.size()] != '_')
+				return false;
+			const std::string rest = file.substr(name.size() + 1);
+			size_t i = 0;
+			while (i < rest.size() && std::isdigit(static_cast<unsigned char>(rest[i])) != 0)
+				++i;
+			return i > 0 && _stricmp(rest.c_str() + i, "p.webm") == 0;
+		}
+	}
+
 	SImportPlan PlanImport(const std::string& absSrc, const std::string& folderRel, const SImportOptions& options)
 	{
 		SImportPlan p;
 		const fs::path src = fs::u8path(absSrc);
 		std::error_code ec;
-		if (!fs::is_regular_file(src, ec))
+		if (!fs::exists(src, ec))
 		{
-			p.error = "source file not found: " + absSrc;
+			p.error = "source not found: " + absSrc;
 			return p;
 		}
-		if (!HasExt(absSrc, "webm"))
+		if (!ClassifySource(absSrc, p.kind))
 		{
-			p.error = "only .webm files can be imported (other formats come with the FFmpeg stage): " + absSrc;
+			p.error = "this file type cannot be imported (" + ImportExtensionsText() + ", or a folder of PNG files): " + absSrc;
+			return p;
+		}
+		if (p.kind == ESourceKind::PngSequence)
+		{
+			if (!DetectPngSequence(src, p, p.error))
+				return p;
+		}
+		else if (!fs::is_regular_file(src, ec))
+		{
+			p.error = "source file not found: " + absSrc;
 			return p;
 		}
 		p.folder = NormalizeFolder(folderRel);
@@ -220,7 +401,8 @@ namespace CEVEditor
 			p.error = "invalid destination folder: " + folderRel;
 			return p;
 		}
-		p.assetName = options.assetName.empty() ? SanitizeAssetName(src.stem().u8string()) : SanitizeAssetName(options.assetName);
+		const std::string stem = p.kind == ESourceKind::PngSequence ? src.filename().u8string() : src.stem().u8string();
+		p.assetName = options.assetName.empty() ? SanitizeAssetName(stem) : SanitizeAssetName(options.assetName);
 		p.metadataRel = p.folder + p.assetName + ".cevvideo.cryasset";
 		{
 			string reason;
@@ -229,6 +411,26 @@ namespace CEVEditor
 				p.error = std::string("invalid asset path ") + p.metadataRel + ": " + reason.c_str();
 				return p;
 			}
+		}
+		if (options.NeedsTranscode(p.kind) || p.kind != ESourceKind::Webm)
+		{
+			if (options.crf < 0 || options.crf > 63)
+			{
+				p.error = "crf must be between 0 and 63";
+				return p;
+			}
+			if (options.height < 0 || options.height > 8640 || (options.height != 0 && options.height < 16))
+			{
+				p.error = "the output height must be 0 (keep) or 16 .. 8640";
+				return p;
+			}
+		}
+		if (p.kind == ESourceKind::Webm)
+			p.sourceCopyRel = p.folder + p.assetName + (options.recompress ? "_source.webm" : ".webm");
+		else if (p.kind == ESourceKind::Video)
+		{
+			const std::string ext = Lower(src.extension().u8string()); // ".mp4"
+			p.sourceCopyRel = p.folder + p.assetName + "_source" + ext;
 		}
 
 		// what is already there? (asset manager: main thread only)
@@ -241,8 +443,18 @@ namespace CEVEditor
 			const CDetails old(*pExisting);
 			p.keptSdlFiles = old.Get(DetailKey::kSdlFiles);
 			p.keptAceLibrary = old.Get(DetailKey::kAceLibrary);
+			// the new import makes the old source copy (when it has another name) and the old variants obsolete
+			const std::string oldSource = old.Get(DetailKey::kSourcePath);
+			if (!oldSource.empty() && _stricmp(oldSource.c_str(), p.sourceCopyRel.c_str()) != 0 && _stricmp(oldSource.c_str(), (p.folder + p.assetName + ".webm").c_str()) != 0)
+				p.dropFiles.push_back(oldSource);
+			for (const std::string& f : p.keptFiles)
+			{
+				if (IsVariantFileOf(f, p.folder, p.assetName))
+					p.dropFiles.push_back(f);
+			}
 			p.detail = "The video asset '" + p.assetName + "' already exists in " + (p.folder.empty() ? std::string("the Assets root") : p.folder) +
-				" (" + std::to_string(p.keptFiles.size()) + " files). Importing replaces its descriptor and its source copy.";
+				" (" + std::to_string(p.keptFiles.size()) + " files). Importing replaces its descriptor, its video and its source copy" +
+				(p.dropFiles.empty() ? std::string(".") : std::string(" and removes its variants."));
 		}
 		else
 		{
@@ -285,6 +497,12 @@ namespace CEVEditor
 	SImportResult ImportVideoFileNow(const std::string& absSrc, const std::string& folderRel, const SImportOptions& options)
 	{
 		SImportResult r;
+		ESourceKind kind = ESourceKind::Webm;
+		if (ClassifySource(absSrc, kind) && options.NeedsFfmpeg(kind))
+		{
+			r.error = "this import needs FFmpeg and runs for minutes: use the import queue (CImportQueue)";
+			return r;
+		}
 		const SImportPlan plan = PlanImport(absSrc, folderRel, options);
 		if (!plan.ok)
 		{
@@ -306,7 +524,7 @@ namespace CEVEditor
 		return ImportVideoFile(absSrc, plan, options);
 	}
 
-	SImportResult ImportVideoFile(const std::string& absSrc, const SImportPlan& plan, const SImportOptions& options, const std::atomic<bool>* cancel)
+	SImportResult ImportVideoFile(const std::string& absSrc, const SImportPlan& plan, const SImportOptions& options, const std::atomic<bool>* cancel, const SOpContext* pCtx)
 	{
 		SImportResult r;
 		r.assetName = plan.assetName;
@@ -321,17 +539,33 @@ namespace CEVEditor
 			r.error = "refused: " + plan.detail;
 			return r;
 		}
+		SOpContext ctx;
+		if (pCtx != nullptr)
+			ctx = *pCtx;
+		else
+			ctx.cancel = cancel;
+		cancel = ctx.cancel;
+		auto cancelled = [cancel]() { return cancel != nullptr && cancel->load(); };
+
 		const fs::path src = fs::u8path(absSrc);
 		std::error_code ec;
 		const std::string& folder = plan.folder;
 		const std::string& name = plan.assetName;
+		const bool transcode = options.NeedsTranscode(plan.kind);
 
-		SMediaInfo info;
-		std::string probeError;
-		if (!ProbeMediaFile(absSrc, info, probeError, cancel))
+		// FFmpeg first: nothing is written when it is missing
+		std::string exe;
+		if (options.NeedsFfmpeg(plan.kind))
 		{
-			r.error = (cancel != nullptr && cancel->load()) ? std::string("cancelled") : "cannot read the video: " + probeError;
-			return r;
+			CFfmpegService* const pService = CFfmpegService::Get();
+			std::string why;
+			if (pService == nullptr)
+				why = "the FFmpeg service is not available";
+			else if (!pService->WaitForExe(cancel, exe, why))
+			{
+				r.error = why;
+				return r;
+			}
 		}
 
 		const fs::path dstDir = fs::u8path(AssetsAbsolute(folder));
@@ -343,24 +577,124 @@ namespace CEVEditor
 		}
 		const std::string videoName = name + ".webm";
 		const std::string descriptorName = name + ".cevvideo";
-		if (cancel != nullptr && cancel->load())
+		const fs::path videoPath = dstDir / fs::u8path(videoName);
+		const fs::path stagePath = dstDir / fs::u8path(name + ".stage.webm");
+
+		// files this run creates from nothing: gone again when the run fails or is cancelled (existing files are never deleted)
+		std::vector<fs::path> created;
+		auto track = [&created](const fs::path& p)
 		{
-			r.error = "cancelled";
+			std::error_code e;
+			if (!fs::exists(p, e))
+				created.push_back(p);
+		};
+		auto fail = [&](const std::string& message) -> SImportResult&
+		{
+			std::error_code e;
+			fs::remove(stagePath, e);
+			for (const fs::path& p : created)
+				fs::remove(p, e);
+			r.error = cancelled() ? std::string("cancelled") : message;
 			return r;
+		};
+		if (cancelled())
+			return fail("cancelled");
+
+		// ---- 1. the source copy (and, for a plain WebM, that is the video) ----
+		std::string sourceSha;
+		fs::path copyPath;
+		if (plan.kind != ESourceKind::PngSequence)
+		{
+			copyPath = fs::u8path(AssetsAbsolute(plan.sourceCopyRel));
+			track(copyPath);
+			if (!CopyFileReplace(src, copyPath, r.error))
+				return fail(r.error);
+			if (!Sha256File(copyPath.u8string(), sourceSha, cancel))
+				return fail("cannot hash the copied video");
 		}
-		const bool copyIsNew = !fs::exists(dstDir / fs::u8path(videoName), ec);
-		if (!CopyFileReplace(src, dstDir / fs::u8path(videoName), r.error))
-			return r;
-		std::string sha;
-		if (!Sha256File((dstDir / fs::u8path(videoName)).u8string(), sha, cancel))
+		ctx.Progress(0.05f);
+
+		// ---- 2. the encode ----
+		const int variantCount = static_cast<int>(options.variants.size());
+		const float encodeEnd = transcode ? (variantCount > 0 ? 0.05f + 0.95f / static_cast<float>(1 + variantCount) : 1.f) : 0.05f;
+		SEncodeOptions enc;
+		enc.crf = options.crf;
+		enc.height = options.height;
+		if (transcode)
 		{
-			// do not leave a copy without an asset behind
-			if (copyIsNew && !plan.exists)
-				fs::remove(dstDir / fs::u8path(videoName), ec);
-			r.error = (cancel != nullptr && cancel->load()) ? std::string("cancelled") : std::string("cannot hash the copied video");
-			return r;
+			ctx.Log(std::string("encoding ") + (plan.kind == ESourceKind::PngSequence ? plan.pngPattern : copyPath.u8string()) + " -> " + videoName + " (VP9 / Opus, crf " + std::to_string(options.crf) +
+				(options.height > 0 ? ", height " + std::to_string(options.height) : std::string(", source size")) + ")");
+			if (plan.kind == ESourceKind::PngSequence)
+			{
+				enc.inputFps = options.fps > 0.0 ? options.fps : 30.0;
+				enc.inputStartNumber = plan.pngStart;
+			}
+			const SOpResult encoded = FfmpegTranscode(exe, plan.kind == ESourceKind::PngSequence ? plan.pngPattern : copyPath.u8string(), stagePath.u8string(), enc, SubContext(ctx, 0.05f, encodeEnd));
+			if (!encoded.Ok())
+				return fail(encoded.status == EOpStatus::Cancelled ? std::string("cancelled") : "FFmpeg failed: " + encoded.message);
+			track(videoPath);
+			fs::rename(stagePath, videoPath, ec);
+			if (ec)
+				return fail("cannot move the encoded video to " + videoPath.u8string() + ": " + ec.message() + " (is it open in a player?)");
 		}
 
+		// ---- 3. what the video is ----
+		SMediaInfo info;
+		std::string probeError;
+		if (!ProbeMediaFile(videoPath.u8string(), info, probeError, cancel))
+			return fail("cannot read the video: " + probeError);
+
+		// ---- 4. the variants ----
+		std::vector<SDescriptor::SVariant> madeVariants;
+		if (variantCount > 0)
+		{
+			std::vector<int> heights = options.variants;
+			std::sort(heights.begin(), heights.end(), std::greater<int>());
+			heights.erase(std::unique(heights.begin(), heights.end()), heights.end());
+			std::vector<int> usable;
+			for (int h : heights)
+			{
+				if (h < info.height)
+					usable.push_back(h);
+				else
+					ctx.Log("variant " + std::to_string(h) + "p skipped: not below the video height (" + std::to_string(info.height) + ")");
+			}
+			const float span = transcode ? 0.95f / static_cast<float>(1 + variantCount) : 1.f / static_cast<float>(std::max(1, variantCount));
+			float at = transcode ? encodeEnd : 0.05f;
+			SEncodeOptions venc = enc;
+			venc.height = 0;
+			venc.inputFps = 0.0;
+			venc.inputStartNumber = -1;
+			for (int h : usable)
+			{
+				if (cancelled())
+					return fail("cancelled");
+				const std::string file = name + "_" + std::to_string(h) + "p.webm";
+				const fs::path varPath = dstDir / fs::u8path(file);
+				ctx.Log("variant " + std::to_string(h) + "p -> " + file);
+				track(varPath);
+				const SOpResult made = FfmpegMakeVariant(exe, videoPath.u8string(), varPath.u8string(), h, venc, SubContext(ctx, at, at + span));
+				at += span;
+				if (!made.Ok())
+					return fail(made.status == EOpStatus::Cancelled ? std::string("cancelled") : "variant " + std::to_string(h) + "p failed: " + made.message);
+				SDescriptor::SVariant v;
+				v.file = file;
+				v.height = h;
+				v.width = info.height > 0 ? (static_cast<int>(std::llround(static_cast<double>(info.width) * h / info.height)) + 1) / 2 * 2 : 0;
+				SMediaInfo vinfo;
+				std::string vError;
+				if (ProbeMediaFile(varPath.u8string(), vinfo, vError, cancel) && vinfo.valid)
+				{
+					v.width = vinfo.width;
+					v.height = vinfo.height;
+				}
+				madeVariants.push_back(v);
+			}
+		}
+		if (cancelled())
+			return fail("cancelled");
+
+		// ---- 5. descriptor, details, .cryasset ----
 		SDescriptor desc;
 		desc.route = options.route == "mixed" ? "mixed" : "embedded"; // "cue" is applied once a WAV / Ogg exists
 		desc.video = videoName;
@@ -372,18 +706,23 @@ namespace CEVEditor
 			desc.languages.push_back(lang);
 			desc.defaultLanguage = lang.name;
 		}
+		std::sort(madeVariants.begin(), madeVariants.end(), [](const SDescriptor::SVariant& a, const SDescriptor::SVariant& b) { return a.height < b.height; });
+		desc.variants = madeVariants;
+		if (!desc.variants.empty())
+			desc.variantRule = "smallestNotBelowOutput";
+		track(dstDir / fs::u8path(descriptorName));
 		std::string error;
 		if (!SaveDescriptor((dstDir / fs::u8path(descriptorName)).u8string(), desc, error))
-		{
-			r.error = error;
-			return r;
-		}
+			return fail(error);
 
 		CDetails details;
-		details.Set(DetailKey::kSourcePath, folder + videoName);
+		details.Set(DetailKey::kSourcePath, plan.sourceCopyRel);
 		details.Set(DetailKey::kSourceOriginal, absSrc);
-		details.Set(DetailKey::kSourceSha256, sha);
-		details.Set(DetailKey::kSourceSize, std::to_string(static_cast<unsigned long long>(fs::file_size(src, ec))));
+		details.Set(DetailKey::kSourceSha256, sourceSha);
+		const std::uintmax_t sourceSize = plan.kind == ESourceKind::PngSequence ? 0 : fs::file_size(src, ec);
+		details.Set(DetailKey::kSourceSize, std::to_string(static_cast<unsigned long long>(ec ? 0 : sourceSize)));
+		details.Set(DetailKey::kSourceKind, plan.kind == ESourceKind::Webm ? "webm" : plan.kind == ESourceKind::Video ? "video" : "png-sequence");
+		details.Set(DetailKey::kTranscoded, transcode ? "1" : "0");
 		details.Set(DetailKey::kImportSettings, options.ToSettingsString());
 		details.Set(DetailKey::kImportState, "ready");
 		FillMediaDetails(details, info);
@@ -396,9 +735,15 @@ namespace CEVEditor
 		// Overwriting: the new CAsset carries the GUID of the existing one; MergeAssets (main thread, FinishImport) then
 		// updates the existing asset in place. The asset manager's own objects are never touched from this thread.
 		std::vector<std::string> files = { folder + descriptorName, folder + videoName };
+		if (!plan.sourceCopyRel.empty() && std::find(files.begin(), files.end(), plan.sourceCopyRel) == files.end())
+			files.push_back(plan.sourceCopyRel);
+		for (const SDescriptor::SVariant& v : madeVariants)
+			files.push_back(folder + v.file);
 		for (const std::string& kept : plan.keptFiles)
 		{
-			if (std::find(files.begin(), files.end(), kept) == files.end())
+			const bool dropped = std::any_of(plan.dropFiles.begin(), plan.dropFiles.end(), [&kept](const std::string& d) { return _stricmp(d.c_str(), kept.c_str()) == 0; });
+			const bool already = std::any_of(files.begin(), files.end(), [&kept](const std::string& f) { return _stricmp(f.c_str(), kept.c_str()) == 0; });
+			if (!dropped && !already)
 				files.push_back(kept);
 		}
 		if (!plan.keptSdlFiles.empty())
@@ -407,21 +752,28 @@ namespace CEVEditor
 			details.Set(DetailKey::kAceLibrary, plan.keptAceLibrary);
 
 		std::unique_ptr<CAsset> pAsset(new CAsset(kTypeName, plan.guid.IsNull() ? CryGUID::Create() : plan.guid, name.c_str()));
-		CAssetImportContext ctx;
-		CEditableAsset edit = ctx.CreateEditableAsset(*pAsset);
+		CAssetImportContext importCtx;
+		CEditableAsset edit = importCtx.CreateEditableAsset(*pAsset);
 		edit.SetMetadataFile(r.metadataRel.c_str());
 		std::vector<string> fileList;
 		for (const std::string& f : files)
 			fileList.emplace_back(f.c_str());
 		edit.SetFiles(fileList);
 		edit.SetDetails(details.ToPairs());
+		track(fs::u8path(AssetsAbsolute(r.metadataRel)));
 		if (!edit.WriteToFile())
+			return fail("cannot write " + r.metadataRel + " (read-only file or folder?)");
+
+		// the replaced asset's files that this import made obsolete (old source copy, old variants that were not made again)
+		for (const std::string& dropped : plan.dropFiles)
 		{
-			r.error = "cannot write " + r.metadataRel + " (read-only file or folder?)";
-			return r;
+			const bool reused = std::any_of(files.begin(), files.end(), [&dropped](const std::string& f) { return _stricmp(f.c_str(), dropped.c_str()) == 0; });
+			if (!reused)
+				fs::remove(fs::u8path(AssetsAbsolute(dropped)), ec);
 		}
 		r.pAsset = pAsset.release();
 		r.ok = true;
+		ctx.Progress(1.f);
 		return r;
 	}
 
@@ -463,6 +815,11 @@ namespace CEVEditor
 	bool ReimportVideo(CAsset& asset, std::string& error)
 	{
 		CDetails details(asset);
+		if (details.Get(DetailKey::kTranscoded) == "1")
+		{
+			error = "this asset's video was made by FFmpeg: reimport runs as an FFmpeg operation";
+			return false;
+		}
 		const std::string original = details.Get(DetailKey::kSourceOriginal);
 		const std::string copyRel = details.Get(DetailKey::kSourcePath);
 		if (original.empty() || copyRel.empty())
@@ -615,9 +972,14 @@ namespace CEVEditor
 		const std::string folder = FolderOf(asset.GetMetadataFile().c_str());
 		const std::string name = asset.GetName().c_str();
 		const std::string metadataRel = asset.GetMetadataFile().c_str();
-		std::string copyRel = details.Get(DetailKey::kSourcePath);
-		if (copyRel.empty())
-			copyRel = folder + name + ".webm";
+		// the audio comes from <name>.webm: the copy of a WebM source, or what FFmpeg made of a transcoded source (the source
+		// copy may be an mp4 / mov). Older assets without that file fall back to the recorded source copy.
+		std::string copyRel = folder + name + ".webm";
+		{
+			std::error_code existsEc;
+			if (!fs::exists(fs::u8path(AssetsAbsolute(copyRel)), existsEc) && !details.Get(DetailKey::kSourcePath).empty())
+				copyRel = details.Get(DetailKey::kSourcePath);
+		}
 		const std::string srcAbs = AssetsAbsolute(copyRel);
 		const std::string lang = ops.language.empty() ? "english" : ops.language;
 
@@ -743,6 +1105,471 @@ namespace CEVEditor
 		};
 
 		return pRunner->Submit(QObject::tr("Audio operations: %1").arg(QString::fromUtf8(name.c_str())), work, onDone, AssetOwnerKey(guid));
+	}
+
+	// ---------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------
+	std::vector<int> VariantHeights(const SDescriptor& desc)
+	{
+		std::vector<int> out;
+		for (const SDescriptor::SVariant& v : desc.variants)
+			out.push_back(v.height);
+		std::sort(out.begin(), out.end());
+		return out;
+	}
+
+	namespace
+	{
+		// What a transcode job made; the completion (main thread) applies it to the asset.
+		struct STranscodeJobResult
+		{
+			bool recompressed = false;
+			std::string newSourceRel;                    // set when the source copy was created / refreshed
+			std::string newSourceSha;
+			std::string newSourceSize;
+			SMediaInfo media;                            // of the new main video (recompress)
+			bool mediaKnown = false;
+			std::vector<SDescriptor::SVariant> variants; // made by this job
+			fs::path stage;                              // <name>.stage.webm, renamed over the main video by the completion
+			fs::path stripStage;                         // <name>_silent.stage.webm
+			std::vector<fs::path> created;               // new files (removed again when the completion cannot apply them)
+		};
+
+		void RemoveQuiet(const fs::path& p)
+		{
+			if (p.empty())
+				return;
+			std::error_code ec;
+			fs::remove(p, ec);
+		}
+
+		void ApplyVariants(SDescriptor& desc, const std::vector<SDescriptor::SVariant>& made, const std::vector<std::string>& removedFiles)
+		{
+			for (const std::string& f : removedFiles)
+			{
+				desc.variants.erase(std::remove_if(desc.variants.begin(), desc.variants.end(), [&f](const SDescriptor::SVariant& v) { return _stricmp(v.file.c_str(), f.c_str()) == 0; }), desc.variants.end());
+			}
+			for (const SDescriptor::SVariant& v : made)
+			{
+				auto it = std::find_if(desc.variants.begin(), desc.variants.end(), [&v](const SDescriptor::SVariant& o) { return _stricmp(o.file.c_str(), v.file.c_str()) == 0; });
+				if (it != desc.variants.end())
+					*it = v;
+				else
+					desc.variants.push_back(v);
+			}
+			std::stable_sort(desc.variants.begin(), desc.variants.end(), [](const SDescriptor::SVariant& a, const SDescriptor::SVariant& b) { return a.height < b.height; });
+			desc.variantRule = desc.variants.empty() ? std::string() : std::string("smallestNotBelowOutput");
+		}
+	}
+
+	bool IsTranscodedAsset(const CAsset& asset)
+	{
+		return CDetails(asset).Get(DetailKey::kTranscoded) == "1";
+	}
+
+	int SubmitTranscodeOps(CAsset& asset, const STranscodeOps& ops, std::string& error, std::function<void(bool ok)> onFinished)
+	{
+		CJobRunner* const pRunner = CJobRunner::Get();
+		CFfmpegService* const pService = CFfmpegService::Get();
+		if (pRunner == nullptr || pService == nullptr)
+		{
+			error = "the job runner is not available";
+			return 0;
+		}
+		if (!ops.recompress && !ops.changeVariants)
+		{
+			error = "no operation requested";
+			return 0;
+		}
+		{
+			const SFfmpegStatus status = pService->Status();
+			if (!status.Pending() && !status.Ready())
+			{
+				error = pService->UnavailableMessage();
+				return 0;
+			}
+			if (status.state == SFfmpegStatus::EState::Unknown)
+				pService->EnsureDetected();
+		}
+		const CDetails details(asset);
+		const std::string folder = FolderOf(asset.GetMetadataFile().c_str());
+		const std::string name = asset.GetName().c_str();
+		const std::string metadataRel = asset.GetMetadataFile().c_str();
+		const CryGUID guid = asset.GetGUID();
+		SDescriptor desc;
+		if (!LoadDescriptor(AssetsAbsolute(DescriptorRel(asset)), desc, error))
+			return 0;
+		const std::string masterRel = folder + name + ".webm";
+		const std::string mainRel = folder + desc.video;
+		const bool stripped = _stricmp(FileNameOf(desc.video).c_str(), (name + "_silent.webm").c_str()) == 0;
+		std::error_code ec;
+		if (!fs::is_regular_file(fs::u8path(AssetsAbsolute(mainRel)), ec))
+		{
+			error = "the video file of the asset is missing: " + mainRel;
+			return 0;
+		}
+		std::string sourceRel = details.Get(DetailKey::kSourcePath);
+		if (ops.recompress)
+		{
+			if (!fs::is_regular_file(fs::u8path(AssetsAbsolute(masterRel)), ec) && sourceRel.empty())
+			{
+				error = "the asset has neither a source copy nor " + masterRel;
+				return 0;
+			}
+			if (ops.refreshSource)
+			{
+				const std::string original = details.Get(DetailKey::kSourceOriginal);
+				if (sourceRel.empty() || !fs::is_regular_file(fs::u8path(original), ec))
+				{
+					error = "the original source file is not available: " + (original.empty() ? std::string("(none recorded)") : original);
+					return 0;
+				}
+			}
+		}
+		const std::string original = details.Get(DetailKey::kSourceOriginal);
+		const std::vector<SDescriptor::SVariant> oldVariants = desc.variants;
+		const STranscodeOps o = ops;
+
+		auto result = std::make_shared<STranscodeJobResult>();
+		auto work = [=](const SOpContext& ctx) -> SOpResult
+		{
+			SOpResult out;
+			out.status = EOpStatus::Failed;
+			std::string exe;
+			std::string why;
+			if (!CFfmpegService::Get() || !CFfmpegService::Get()->WaitForExe(ctx.cancel, exe, why))
+			{
+				out.status = ctx.Cancelled() ? EOpStatus::Cancelled : EOpStatus::Failed;
+				out.message = why;
+				return out;
+			}
+			auto discard = [&]()
+			{
+				for (const fs::path& p : result->created)
+					RemoveQuiet(p);
+				result->created.clear();
+				RemoveQuiet(result->stage);
+				RemoveQuiet(result->stripStage);
+				result->stage.clear();
+				result->stripStage.clear();
+				result->variants.clear();
+				result->newSourceRel.clear();
+			};
+			auto failWith = [&](const SOpResult& r, const std::string& prefix) -> SOpResult
+			{
+				discard();
+				SOpResult f;
+				f.status = r.status == EOpStatus::Cancelled || ctx.Cancelled() ? EOpStatus::Cancelled : EOpStatus::Failed;
+				f.message = f.status == EOpStatus::Cancelled ? std::string("cancelled") : prefix + r.message;
+				return f;
+			};
+			auto track = [&](const fs::path& p)
+			{
+				std::error_code e;
+				if (!fs::exists(p, e))
+					result->created.push_back(p);
+			};
+
+			const int variantTotal = o.changeVariants ? static_cast<int>(o.variants.size()) : 0;
+			const int steps = (o.recompress ? 1 : 0) + variantTotal;
+			float at = 0.f;
+			const float span = steps > 0 ? 1.f / static_cast<float>(steps) : 1.f;
+			std::string variantSource = AssetsAbsolute(mainRel);
+			int videoHeight = 0;
+			SEncodeOptions enc;
+			enc.crf = o.crf;
+			enc.height = o.height;
+
+			if (o.recompress)
+			{
+				std::string srcRel = sourceRel;
+				std::string srcAbs;
+				std::error_code e;
+				const bool separateSource = !srcRel.empty() && _stricmp(srcRel.c_str(), masterRel.c_str()) != 0;
+				if (separateSource)
+				{
+					srcAbs = AssetsAbsolute(srcRel);
+					if (o.refreshSource)
+					{
+						std::string copyError;
+						ctx.Log("copying the original file over the source copy");
+						if (!CopyFileReplace(fs::u8path(original), fs::u8path(srcAbs), copyError))
+						{
+							SOpResult f;
+							f.message = copyError;
+							return failWith(f, "");
+						}
+					}
+				}
+				else
+				{
+					// no separate source copy (a plain WebM import, or a PNG sequence): the current video becomes the source copy,
+					// so that later re-encodes start from it again instead of from an already re-encoded file
+					srcRel = folder + name + "_source.webm";
+					srcAbs = AssetsAbsolute(srcRel);
+					ctx.Log("the current video becomes the source copy: " + srcRel);
+					track(fs::u8path(srcAbs));
+					std::string copyError;
+					if (!CopyFileReplace(fs::u8path(AssetsAbsolute(masterRel)), fs::u8path(srcAbs), copyError))
+					{
+						SOpResult f;
+						f.message = copyError;
+						return failWith(f, "");
+					}
+					result->newSourceRel = srcRel;
+				}
+				if (o.refreshSource || result->newSourceRel.size() > 0)
+				{
+					std::string sha;
+					if (!Sha256File(srcAbs, sha, ctx.cancel))
+					{
+						SOpResult f;
+						f.message = "cannot hash the source copy";
+						return failWith(f, "");
+					}
+					result->newSourceRel = srcRel;
+					result->newSourceSha = sha;
+					result->newSourceSize = std::to_string(static_cast<unsigned long long>(fs::file_size(fs::u8path(srcAbs), e)));
+				}
+				result->stage = fs::u8path(AssetsAbsolute(folder + name + ".stage.webm"));
+				ctx.Log("re-encoding " + srcRel + " (VP9 / Opus, crf " + std::to_string(o.crf) + (o.height > 0 ? ", height " + std::to_string(o.height) : std::string(", source size")) + ")");
+				const SOpResult encoded = FfmpegTranscode(exe, srcAbs, result->stage.u8string(), enc, SubContext(ctx, at, at + span));
+				at += span;
+				if (!encoded.Ok())
+					return failWith(encoded, "FFmpeg failed: ");
+				std::string probeError;
+				result->mediaKnown = ProbeMediaFile(result->stage.u8string(), result->media, probeError, ctx.cancel);
+				if (!result->mediaKnown)
+				{
+					SOpResult f;
+					f.message = "cannot read the re-encoded video: " + probeError;
+					return failWith(f, "");
+				}
+				videoHeight = result->media.height;
+				variantSource = result->stage.u8string();
+				result->recompressed = true;
+				if (stripped)
+				{
+					result->stripStage = fs::u8path(AssetsAbsolute(folder + name + "_silent.stage.webm"));
+					ctx.Log("strip audio of the new video (the descriptor plays the picture-only copy)");
+					const SOpResult strippedResult = GetOfflineOps().StripAudio(result->stage.u8string(), result->stripStage.u8string(), SubContext(ctx, at, at));
+					if (!strippedResult.Ok())
+						return failWith(strippedResult, "strip audio failed: ");
+					variantSource = result->stripStage.u8string();
+				}
+			}
+			else
+			{
+				SMediaInfo mainInfo;
+				std::string probeError;
+				if (!ProbeMediaFile(variantSource, mainInfo, probeError, ctx.cancel))
+				{
+					SOpResult f;
+					f.message = "cannot read the video: " + probeError;
+					return failWith(f, "");
+				}
+				videoHeight = mainInfo.height;
+			}
+
+			if (o.changeVariants)
+			{
+				std::vector<int> heights = o.variants;
+				std::sort(heights.begin(), heights.end(), std::greater<int>());
+				heights.erase(std::unique(heights.begin(), heights.end()), heights.end());
+				SEncodeOptions venc;
+				venc.crf = o.crf;
+				for (int h : heights)
+				{
+					if (ctx.Cancelled())
+						return failWith(SOpResult(), "");
+					if (h >= videoHeight)
+					{
+						ctx.Log("variant " + std::to_string(h) + "p skipped: not below the video height (" + std::to_string(videoHeight) + ")");
+						at += span;
+						continue;
+					}
+					const std::string file = name + "_" + std::to_string(h) + "p.webm";
+					const fs::path varPath = fs::u8path(AssetsAbsolute(folder + file));
+					ctx.Log("variant " + std::to_string(h) + "p -> " + file);
+					track(varPath);
+					const SOpResult made = FfmpegMakeVariant(exe, variantSource, varPath.u8string(), h, venc, SubContext(ctx, at, at + span));
+					at += span;
+					if (!made.Ok())
+						return failWith(made, "variant " + std::to_string(h) + "p failed: ");
+					SDescriptor::SVariant v;
+					v.file = file;
+					v.height = h;
+					SMediaInfo vinfo;
+					std::string vError;
+					if (ProbeMediaFile(varPath.u8string(), vinfo, vError, ctx.cancel) && vinfo.valid)
+					{
+						v.width = vinfo.width;
+						v.height = vinfo.height;
+					}
+					result->variants.push_back(v);
+				}
+			}
+			out.status = EOpStatus::Ok;
+			return out;
+		};
+
+		auto onDone = [=](const SOpResult& jobResult)
+		{
+			auto finish = [&](bool ok, const std::string& text)
+			{
+				if (ok)
+				{
+					CryLogAlways("[CEVEditor] FFmpeg operation for '%s' finished: %s", name.c_str(), text.c_str());
+					Notify(false, QObject::tr("Video asset"), QObject::tr("FFmpeg operation for %1 finished.").arg(QString::fromUtf8(name.c_str())));
+				}
+				else if (text == "cancelled")
+				{
+					CryLogAlways("[CEVEditor] FFmpeg operation for '%s' cancelled", name.c_str());
+				}
+				else
+				{
+					CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_WARNING, "[CEVEditor] FFmpeg operation for '%s' did not complete: %s", name.c_str(), text.c_str());
+					Notify(true, QObject::tr("Video asset"), QObject::tr("FFmpeg operation for %1 did not complete: %2").arg(QString::fromUtf8(name.c_str()), QString::fromUtf8(text.c_str())));
+				}
+				if (onFinished)
+					onFinished(ok);
+			};
+			auto discard = [&]()
+			{
+				for (const fs::path& p : result->created)
+					RemoveQuiet(p);
+				RemoveQuiet(result->stage);
+				RemoveQuiet(result->stripStage);
+			};
+			CAsset* pAsset = CAssetManager::GetInstance()->FindAssetById(guid);
+			if (pAsset == nullptr)
+				pAsset = FindAssetByMetadata(metadataRel);
+			if (pAsset == nullptr)
+			{
+				discard();
+				CryLogAlways("[CEVEditor] FFmpeg operation for '%s': the asset is gone, the produced files were removed", name.c_str());
+				if (onFinished)
+					onFinished(false);
+				return;
+			}
+			if (!jobResult.Ok())
+			{
+				discard();
+				finish(false, jobResult.message);
+				return;
+			}
+
+			std::string applyError;
+			std::vector<std::string> files = AssetFileList(*pAsset);
+			CDetails newDetails(*pAsset);
+			SDescriptor newDesc;
+			std::string descError;
+			if (!LoadDescriptor(AssetsAbsolute(DescriptorRel(*pAsset)), newDesc, descError))
+			{
+				discard();
+				finish(false, "cannot read the descriptor: " + descError);
+				return;
+			}
+			std::vector<std::string> removedVariantFiles;
+
+			if (result->recompressed)
+			{
+				// replace the video: nobody may hold it open (the preview player of the editor window, other jobs of the asset)
+				if (!ReleaseAssetFiles(metadataRel, guid, 15000, applyError))
+				{
+					discard();
+					finish(false, applyError);
+					return;
+				}
+				std::error_code e;
+				const fs::path master = fs::u8path(AssetsAbsolute(masterRel));
+				fs::rename(result->stage, master, e);
+				if (e)
+				{
+					discard();
+					finish(false, "cannot replace " + masterRel + ": " + e.message() + " (is it open in a player?)");
+					return;
+				}
+				result->stage.clear();
+				if (!result->stripStage.empty())
+				{
+					const fs::path silent = fs::u8path(AssetsAbsolute(folder + name + "_silent.webm"));
+					fs::rename(result->stripStage, silent, e);
+					if (e)
+						CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_WARNING, "[CEVEditor] cannot replace %s: %s", silent.u8string().c_str(), e.message().c_str());
+					result->stripStage.clear();
+				}
+				if (o.removeOtherVariants)
+				{
+					for (const SDescriptor::SVariant& old : oldVariants)
+					{
+						const bool remade = std::any_of(result->variants.begin(), result->variants.end(), [&old](const SDescriptor::SVariant& v) { return _stricmp(v.file.c_str(), old.file.c_str()) == 0; });
+						if (!remade)
+							removedVariantFiles.push_back(old.file);
+					}
+				}
+				else
+				{
+					// variants that stay are older than the new video now: the panel marks them as stale
+				}
+				FillMediaDetails(newDetails, result->media);
+				if (!result->newSourceRel.empty())
+				{
+					newDetails.Set(DetailKey::kSourcePath, result->newSourceRel);
+					newDetails.Set(DetailKey::kSourceSha256, result->newSourceSha);
+					newDetails.Set(DetailKey::kSourceSize, result->newSourceSize);
+					if (std::find_if(files.begin(), files.end(), [&](const std::string& f) { return _stricmp(f.c_str(), result->newSourceRel.c_str()) == 0; }) == files.end())
+						files.push_back(result->newSourceRel);
+				}
+				newDetails.Set(DetailKey::kTranscoded, "1");
+				SImportOptions settings = SImportOptions::FromSettingsString(newDetails.Get(DetailKey::kImportSettings));
+				settings.recompress = true;
+				settings.crf = o.crf;
+				settings.height = o.height;
+				newDetails.Set(DetailKey::kImportSettings, settings.ToSettingsString());
+			}
+			else if (o.removeOtherVariants)
+			{
+				for (const SDescriptor::SVariant& old : oldVariants)
+				{
+					const bool remade = std::any_of(result->variants.begin(), result->variants.end(), [&old](const SDescriptor::SVariant& v) { return _stricmp(v.file.c_str(), old.file.c_str()) == 0; });
+					if (!remade)
+						removedVariantFiles.push_back(old.file);
+				}
+			}
+
+			if (o.changeVariants)
+			{
+				ApplyVariants(newDesc, result->variants, removedVariantFiles);
+				std::string saveError;
+				if (!SaveDescriptor(AssetsAbsolute(DescriptorRel(*pAsset)), newDesc, saveError))
+					CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_WARNING, "[CEVEditor] cannot update the descriptor of '%s': %s", name.c_str(), saveError.c_str());
+				for (const SDescriptor::SVariant& v : result->variants)
+				{
+					if (std::find_if(files.begin(), files.end(), [&](const std::string& f) { return _stricmp(f.c_str(), (folder + v.file).c_str()) == 0; }) == files.end())
+						files.push_back(folder + v.file);
+				}
+				for (const std::string& removed : removedVariantFiles)
+				{
+					const std::string rel = folder + removed;
+					files.erase(std::remove_if(files.begin(), files.end(), [&rel](const std::string& f) { return _stricmp(f.c_str(), rel.c_str()) == 0; }), files.end());
+					std::error_code e;
+					fs::remove(fs::u8path(AssetsAbsolute(rel)), e);
+				}
+				SImportOptions settings = SImportOptions::FromSettingsString(newDetails.Get(DetailKey::kImportSettings));
+				settings.variants = VariantHeights(newDesc);
+				newDetails.Set(DetailKey::kImportSettings, settings.ToSettingsString());
+			}
+			newDetails.Set(DetailKey::kImportState, "ready");
+			if (!WriteAssetFilesAndDetails(*pAsset, &files, &newDetails))
+			{
+				finish(false, "cannot write the .cryasset");
+				return;
+			}
+			finish(true, std::to_string(result->variants.size()) + " variant(s)" + (result->recompressed ? ", video re-encoded" : ""));
+		};
+
+		return pRunner->Submit(QObject::tr("FFmpeg: %1").arg(QString::fromUtf8(name.c_str())), work, onDone, AssetOwnerKey(guid));
 	}
 
 	// ---------------------------------------------------------------------------------------------------------------

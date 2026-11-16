@@ -3,7 +3,9 @@
 //
 // Files of one video asset (all flat in one folder, every name starts with the asset name, see docs/research/04 §2.3):
 //   <name>.cevvideo               runtime descriptor (Files[0])
-//   <name>.webm                   the video as imported = copy of the source (not shipped when the descriptor points elsewhere)
+//   <name>.webm                   the video: copy of a WebM source, or what FFmpeg made of the source (not shipped when the descriptor points elsewhere)
+//   <name>_source.<ext>           source copy of an FFmpeg import / re-encode (never shipped; no copy for a PNG sequence)
+//   <name>_<height>p.webm         variants listed in the descriptor <Variants>
 //   <name>_silent.webm            picture only copy (after "strip audio")
 //   <name>_<language>.webm|.wav|.ogg   external audio tracks (split / exported)
 // The SDL_mixer copies live in audio/sdlmixer/assets/cev/<name>/ and the ACE library in audio/sdlmixer/ace/cev_<name>.xml
@@ -39,6 +41,8 @@ namespace CEVEditor
 		constexpr const char* kLanguages      = "languages";          // comma separated names
 		constexpr const char* kSdlFiles       = "sdlFiles";           // ';' separated paths relative to Assets
 		constexpr const char* kAceLibrary     = "aceLibrary";         // path relative to Assets
+		constexpr const char* kTranscoded     = "transcoded";         // 1: <name>.webm was made by FFmpeg from the source copy / PNG sequence
+		constexpr const char* kSourceKind     = "sourceKind";         // webm | video | png-sequence
 	}
 
 	//! Name -> value pairs of a Details block with typed access.

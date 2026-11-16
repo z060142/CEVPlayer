@@ -198,6 +198,25 @@ namespace CEVEditor
 		return true;
 	}
 
+	bool CJobRunner::WaitIdle(int timeoutMs) const
+	{
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		for (;;)
+		{
+			bool busy = false;
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				for (const auto& job : m_jobs)
+					busy = busy || !job->threadDone;
+			}
+			if (!busy)
+				return true;
+			if (std::chrono::steady_clock::now() >= deadline)
+				return false;
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+	}
+
 	void CJobRunner::Cancel(int id)
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
