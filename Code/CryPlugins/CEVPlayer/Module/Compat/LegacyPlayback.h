@@ -39,16 +39,22 @@ namespace CEVPlayer
 		void OnActionSkip2DVideo(EInputState activationMode, float value);
 
 		// ---- textures ----
-		void PlayVideo(IVideoPlayerEventListener* pListener, const char* videoName, const char* textureName, bool preload = false, bool looped = false, const char* stopTexture = nullptr);
+		//! Returns true when this call started a video (false: rejected, e.g. the texture name is in use).
+		bool PlayVideo(IVideoPlayerEventListener* pListener, const char* videoName, const char* textureName, bool preload = false, bool looped = false, const char* stopTexture = nullptr);
 		void PauseVideo(const char* textureName);
 		void ResumeVideo(const char* textureName);
 		void StopVideo(const char* textureName);
 		int GetTextureIDByTextureName(const char* textureName) const;
+		//! True when the texture video of that name was started with `pListener`.
+		bool IsTextureVideoOwner(const char* textureName, const IVideoPlayerEventListener* pListener) const;
 
 		// ---- both ----
 		//! Removes the listener everywhere (main window video, queued videos, texture videos). Call it from the
 		//! destructor of every listener: events are delivered later than the call that caused them.
 		void RemoveVideoListener(IVideoPlayerEventListener* pListener);
+		//! Drops every listener (main window, queued, texture videos) but keeps the videos playing: the owners
+		//! (flow graphs, entities) are going away.
+		void DetachListeners();
 		void ClearTextureVideos();
 		void PauseAllTextureVideos(bool pause);
 		//! Destroys every player this layer owns (shutdown).
@@ -74,6 +80,7 @@ namespace CEVPlayer
 			bool skippable = false;
 			bool canBePaused = false;
 			bool stopSent = false;
+			bool autoPaused = false; // paused by PauseAllTextureVideos(true), the only ones PauseAllTextureVideos(false) resumes
 		};
 		struct SQueued
 		{
@@ -86,6 +93,8 @@ namespace CEVPlayer
 
 		SEntry* FindEntry(const IVideoPlayer* pPlayer);
 		SEntry* FindTexture(const char* textureName);
+		const SEntry* FindTexture(const char* textureName) const;
+		bool StartMain(const SQueued& request);
 		std::unique_ptr<SEntry> StartVideo(IVideoPlayerEventListener* pListener, const char* videoName, const char* textureName, bool looped);
 		void Fire(SEntry& entry, EVideoPlayerEvents event);
 		void FinishEntry(IVideoPlayer& player, bool sendStop);

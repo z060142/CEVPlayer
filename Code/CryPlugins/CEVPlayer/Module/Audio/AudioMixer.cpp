@@ -47,9 +47,11 @@ namespace CEVPlayer
 		if (m_deviceFailed)
 			return false;
 
-		if (SDL_WasInit(SDL_INIT_AUDIO) == 0)
+		// Subsystem init is reference counted by SDL: always take our own reference (even when the engine already
+		// initialised audio, it may quit its reference while we still play) and give it back in Shutdown() / on
+		// every failure path, so the calls stay balanced.
+		if (!m_subsystemInit)
 		{
-			// Subsystem init is reference counted by SDL: this does not disturb the engine's own audio.
 			if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0)
 			{
 				LogError("SDL audio init failed (%s), video audio disabled", SDL_GetError());

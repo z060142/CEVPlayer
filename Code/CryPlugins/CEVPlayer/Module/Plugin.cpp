@@ -18,6 +18,18 @@
 
 namespace CEVPlayer
 {
+	namespace
+	{
+		//! The public API is main thread only: other threads get a warning and nothing else happens.
+		bool CheckMainThread(const char* what)
+		{
+			if (IsMainThread())
+				return true;
+			LogWarning("<CVideoPlugin> %s must be called on the main thread, call ignored", what);
+			return false;
+		}
+	}
+
 	void CVideoPlugin::RegisterComponents(Schematyc::IEnvRegistrar& registrar)
 	{
 		Schematyc::CEnvRegistrationScope scope = registrar.Scope(IEntity::GetEntityScopeGUID());
@@ -54,6 +66,7 @@ namespace CEVPlayer
 		mEnv->pManager = nullptr;
 		m_pLegacy.reset();
 		m_pManager.reset();
+		cev::DecodePool::ShutdownShared(); // idempotent: no worker thread may outlive this module
 	}
 
 	bool CVideoPlugin::Initialize(SSystemGlobalEnvironment& env, const SSystemInitParams& initParams)
@@ -109,6 +122,10 @@ namespace CEVPlayer
 			m_pLegacy->Shutdown();
 		if (m_pManager)
 			m_pManager->Shutdown();
+		// Every player is gone now (the manager released them and its pool reference): join the shared decode
+		// workers before the module can be unloaded.
+		cev::DecodePool::ShutdownShared();
+		LogDebug("bridge shut down, decode pool released");
 	}
 
 	void CVideoPlugin::RegisterLegacyInput()
@@ -156,6 +173,8 @@ namespace CEVPlayer
 		case ESYSTEM_EVENT_GAME_POST_INIT:
 		{
 			RegisterLegacyInput();
+			if (m_pManager)
+				m_pManager->RegisterLevelListener();
 			break;
 		}
 		case ESYSTEM_EVENT_REGISTER_SCHEMATYC_ENV:
@@ -176,7 +195,12 @@ namespace CEVPlayer
 		}
 		case ESYSTEM_EVENT_LEVEL_UNLOAD:
 			if (m_pLegacy)
+			{
+				// Flow graphs / entities of the level die: nobody may be called back for the videos that go on
+				// (main window videos), and texture videos end with the level.
+				m_pLegacy->DetachListeners();
 				m_pLegacy->ClearTextureVideos();
+			}
 			break;
 		case ESYSTEM_EVENT_GAME_PAUSED:
 			if (m_pLegacy)
@@ -190,6 +214,7 @@ namespace CEVPlayer
 		{
 			if (wparam == 0 && m_pLegacy) // Clear when exit from game mode
 			{
+				m_pLegacy->DetachListeners(); // the game mode's flow graphs are destroyed now
 				m_pLegacy->ClearTextureVideos();
 			}
 			break;
@@ -202,7 +227,7 @@ namespace CEVPlayer
 	// ---------------------------------------------------------------------------------------------- legacy API
 	void CVideoPlugin::PlayVideoToMainWindow(const char* videoName, bool preload, bool looped, int audioTrack, bool isSkippable, bool canBePaused, IVideoPlayerEventListener* pVideoPlayerListener)
 	{
-		if (gEnv->pSystem->IsQuitting())
+		if (!CheckMainThread("PlayVideoToMainWindow") || gEnv->pSystem->IsQuitting())
 			return;
 
 		if (m_pLegacy)
@@ -217,7 +242,7 @@ namespace CEVPlayer
 
 	void CVideoPlugin::PlayVideoToTexture(const char* videoName, const char* textureName, bool preload, bool looped, IVideoPlayerEventListener* pListener)
 	{
-		if (gEnv->pSystem->IsQuitting())
+		if (!CheckMainThread("PlayVideoToTexture") || gEnv->pSystem->IsQuitting())
 			return;
 
 		if (m_pLegacy)
@@ -232,7 +257,7 @@ namespace CEVPlayer
 
 	void CVideoPlugin::PauseVideo(EVideoType videoType, const char* textureName)
 	{
-		if (!m_pLegacy)
+		if (!m_pLegacy || !CheckMainThread("PauseVideo"))
 			return;
 		switch (videoType)
 		{
@@ -249,7 +274,7 @@ namespace CEVPlayer
 
 	void CVideoPlugin::ResumeVideo(EVideoType videoType, const char* textureName)
 	{
-		if (!m_pLegacy)
+		if (!m_pLegacy || !CheckMainThread("ResumeVideo"))
 			return;
 		switch (videoType)
 		{
@@ -266,7 +291,7 @@ namespace CEVPlayer
 
 	void CVideoPlugin::StopVideo(EVideoType videoType, const char* textureName)
 	{
-		if (!m_pLegacy)
+		if (!m_pLegacy || !CheckMainThread("StopVideo"))
 			return;
 		switch (videoType)
 		{
@@ -284,13 +309,25 @@ namespace CEVPlayer
 	// ---------------------------------------------------------------------------------------------- player API
 	IVideoPlayer* CVideoPlugin::CreatePlayer(const char* textureName)
 	{
-		return m_pManager ? m_pManager->CreatePlayer(textureName) : nullptr;
+		if (!CheckMainThread("CreatePlayer"))
+			return nullptr;
+		return m_pManager ? m_pManager->CreatePlayer(textureName) : nullptr; // nullptr after shutdown
 	}
 
 	void CVideoPlugin::DestroyPlayer(IVideoPlayer* pPlayer)
 	{
+		if (!CheckMainThread("DestroyPlayer"))
+			return;
 		if (m_pManager)
-			m_pManager->DestroyPlayer(pPlayer);
+			m_pManager->DestroyPlayer(pPlayer); // only compares the pointer with the live players: safe after shutdown
+	}
+
+	void CVideoPlugin::RemoveVideoListener(IVideoPlayerEventListener* pListener)
+	{
+		if (!CheckMainThread("RemoveVideoListener"))
+			return;
+		if (m_pLegacy)
+			m_pLegacy->RemoveVideoListener(pListener);
 	}
 
 	uint32_t CVideoPlugin::GetPlayerCount() const

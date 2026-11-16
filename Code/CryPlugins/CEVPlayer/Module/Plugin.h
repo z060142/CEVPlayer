@@ -56,6 +56,7 @@ namespace CEVPlayer
 		virtual IVideoPlayer* CreatePlayer(const char* textureName = nullptr) override;
 		virtual void DestroyPlayer(IVideoPlayer* pPlayer) override;
 		virtual uint32_t GetPlayerCount() const override;
+		virtual void RemoveVideoListener(IVideoPlayerEventListener* pListener) override;
 		// ~IVideoPlugin
 	protected:
 		void        RegisterComponents(Schematyc::IEnvRegistrar& registrar);

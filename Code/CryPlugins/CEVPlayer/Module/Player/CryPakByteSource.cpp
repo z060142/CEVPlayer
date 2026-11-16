@@ -15,10 +15,11 @@ namespace CEVPlayer
 
 	void CCryPakByteSource::EnsureLoaded() const
 	{
-		if (m_loaded)
-			return;
-		m_loaded = true;
+		std::call_once(m_loadOnce, [this] { Load(); });
+	}
 
+	void CCryPakByteSource::Load() const
+	{
 		ICryPak* const pPak = gEnv != nullptr ? gEnv->pCryPak : nullptr;
 		if (pPak == nullptr)
 		{

@@ -108,12 +108,24 @@ namespace CEVPlayer
 
 	void CTextureVideoPlayerComponent::OnShutDown()
 	{
-		// Events are delivered later than the call that caused them: detach before the entity goes away.
+		// Events are delivered later than the call that caused them: detach before the entity goes away. Only a
+		// video this component started is stopped (the texture name may belong to somebody else by now).
 		if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 		{
+			const bool owns = OwnsVideo();
 			mEnv->pLegacy->RemoveVideoListener(this);
+			if (owns)
+			{
+				mEnv->pLegacy->StopVideo(m_playedTexture.c_str());
+			}
 		}
-		Stop();
+		m_playedTexture.clear();
+	}
+
+	bool CTextureVideoPlayerComponent::OwnsVideo() const
+	{
+		return mEnv != nullptr && mEnv->pLegacy != nullptr && !m_playedTexture.empty()
+			&& mEnv->pLegacy->IsTextureVideoOwner(m_playedTexture.c_str(), this);
 	}
 
 	Cry::Entity::EventFlags CTextureVideoPlayerComponent::GetEventMask() const
@@ -170,31 +182,34 @@ namespace CEVPlayer
 
 		if (mEnv != nullptr && mEnv->pLegacy != nullptr)
 		{
-			mEnv->pLegacy->PlayVideo(this, videoFile.c_str(), outputTexture.c_str(), preload, looped);
+			if (mEnv->pLegacy->PlayVideo(this, videoFile.c_str(), outputTexture.c_str(), preload, looped))
+			{
+				m_playedTexture = outputTexture.c_str(); // the name the video really plays to, not the property
+			}
 		}
 	}
 
 	void CTextureVideoPlayerComponent::Pause()
 	{
-		if (mEnv != nullptr && mEnv->pLegacy != nullptr)
+		if (OwnsVideo())
 		{
-			mEnv->pLegacy->PauseVideo(m_OutputFileName.c_str());
+			mEnv->pLegacy->PauseVideo(m_playedTexture.c_str());
 		}
 	}
 
 	void CTextureVideoPlayerComponent::Resume()
 	{
-		if (mEnv != nullptr && mEnv->pLegacy != nullptr)
+		if (OwnsVideo())
 		{
-			mEnv->pLegacy->ResumeVideo(m_OutputFileName.c_str());
+			mEnv->pLegacy->ResumeVideo(m_playedTexture.c_str());
 		}
 	}
 
 	void CTextureVideoPlayerComponent::Stop()
 	{
-		if (mEnv != nullptr && mEnv->pLegacy != nullptr)
+		if (OwnsVideo())
 		{
-			mEnv->pLegacy->StopVideo(m_OutputFileName.c_str());
+			mEnv->pLegacy->StopVideo(m_playedTexture.c_str());
 		}
 	}
 

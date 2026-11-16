@@ -13,8 +13,34 @@
 
 namespace CEVPlayer
 {
+	namespace
+	{
+		//! Where the events of a node go to: the graph and node that activated it last. Events are delivered later than
+		//! the call that caused them (and a video may outlive its level), so the graph pointer is only used while the flow
+		//! system still knows the graph under the id it had then.
+		class CGraphRef
+		{
+		public:
+			void Set(const IFlowNode::SActivationInfo* pActInfo)
+			{
+				m_actInfo = *pActInfo;
+				m_graphId = pActInfo->pGraph != nullptr ? pActInfo->pGraph->GetGraphId() : InvalidFlowGraphId;
+			}
+			bool IsValid() const
+			{
+				return m_graphId != InvalidFlowGraphId && m_actInfo.pGraph != nullptr && gEnv != nullptr && gEnv->pFlowSystem != nullptr
+					&& gEnv->pFlowSystem->GetGraphById(m_graphId) == m_actInfo.pGraph;
+			}
+			IFlowNode::SActivationInfo* Info() { return &m_actInfo; }
+
+		private:
+			IFlowNode::SActivationInfo m_actInfo;
+			TFlowGraphId m_graphId = InvalidFlowGraphId;
+		};
+	}
+
 	class CFlowNode_2DVideoPlayer
-		: public CFlowBaseNode<eNCT_Singleton>
+		: public CFlowBaseNode<eNCT_Instanced>
 		, public IVideoPlayerEventListener
 	{
 	private:
@@ -90,7 +116,7 @@ namespace CEVPlayer
 		{
 			if (event == eFE_Activate)
 			{
-				m_pActInfo = *pActInfo;
+				m_graph.Set(pActInfo);
 
 				if (IsPortActive(pActInfo, eIP_Play))
 				{
@@ -153,6 +179,11 @@ namespace CEVPlayer
 		{
 			s->Add(*this);
 		}
+
+		virtual IFlowNodePtr Clone(SActivationInfo* pActInfo) override final
+		{
+			return new CFlowNode_2DVideoPlayer(pActInfo);
+		}
 	public:
 		void OnVideoPlayerEvent(const char* videoFileName, EVideoPlayerEvents event) override
 		{
@@ -160,27 +191,31 @@ namespace CEVPlayer
 			{
 				return;
 			}
+			if (!m_graph.IsValid())
+			{
+				return; // the graph this node belongs to is gone (level unloaded, game mode left)
+			}
 
 			switch (event)
 			{
 			case EVideoPlayerEvents::OnPlay:
-				ActivateOutput(&m_pActInfo, eOP_StartPlay, true);
+				ActivateOutput(m_graph.Info(), eOP_StartPlay, true);
 				break;
 			case EVideoPlayerEvents::OnPause:
-				ActivateOutput(&m_pActInfo, eOP_Paused, true);
+				ActivateOutput(m_graph.Info(), eOP_Paused, true);
 				break;
 			case EVideoPlayerEvents::OnResume:
-				ActivateOutput(&m_pActInfo, eOP_Resumed, true);
+				ActivateOutput(m_graph.Info(), eOP_Resumed, true);
 				break;
 			case EVideoPlayerEvents::OnStop:
-				ActivateOutput(&m_pActInfo, eOP_Stopped, true);
+				ActivateOutput(m_graph.Info(), eOP_Stopped, true);
 				break;
 			default:
 				break;
 			}
 		}
 	private:
-		SActivationInfo m_pActInfo;
+		CGraphRef m_graph;
 	};
 
 	class CFlowNode_TextureVideoPlayer
@@ -259,7 +294,7 @@ namespace CEVPlayer
 		{
 			if (event == eFE_Activate)
 			{
-				m_pActInfo = *pActInfo;
+				m_graph.Set(pActInfo);
 
 				if (IsPortActive(pActInfo, eIP_Play))
 				{
@@ -342,37 +377,41 @@ namespace CEVPlayer
 			{
 				return;
 			}
+			if (!m_graph.IsValid())
+			{
+				return; // the graph this node belongs to is gone: its input port data must not be read either
+			}
 
 			switch (event)
 			{
 			case EVideoPlayerEvents::OnPlay:
 			{
-				ActivateOutput(&m_pActInfo, eOP_StartPlay, true);
+				ActivateOutput(m_graph.Info(), eOP_StartPlay, true);
 
-				string textureName = GetPortString(&m_pActInfo, eIP_OutTextureName);
-				int textureID = mEnv->pLegacy->GetTextureIDByTextureName(textureName.c_str());
+				string textureName = GetPortString(m_graph.Info(), eIP_OutTextureName);
+				int textureID = mEnv != nullptr && mEnv->pLegacy != nullptr ? mEnv->pLegacy->GetTextureIDByTextureName(textureName.c_str()) : 0;
 
 				if (textureID != 0)
 				{
-					ActivateOutput(&m_pActInfo, eOP_OnTextureCreated, textureID);
+					ActivateOutput(m_graph.Info(), eOP_OnTextureCreated, textureID);
 				}
 				break;
 			}
 			case EVideoPlayerEvents::OnPause:
-				ActivateOutput(&m_pActInfo, eOP_Paused, true);
+				ActivateOutput(m_graph.Info(), eOP_Paused, true);
 				break;
 			case EVideoPlayerEvents::OnResume:
-				ActivateOutput(&m_pActInfo, eOP_Resumed, true);
+				ActivateOutput(m_graph.Info(), eOP_Resumed, true);
 				break;
 			case EVideoPlayerEvents::OnStop:
-				ActivateOutput(&m_pActInfo, eOP_Stopped, true);
+				ActivateOutput(m_graph.Info(), eOP_Stopped, true);
 				break;
 			default:
 				break;
 			}
 		}
 	private:
-		SActivationInfo m_pActInfo;
+		CGraphRef m_graph;
 	};
 
 	// This flow node created with community support. Personaly thanks @nicalmacha
@@ -530,7 +569,7 @@ namespace CEVPlayer
 			}
 			case eFE_Activate:
 			{
-				m_pActInfo = *pActInfo;
+				m_graph.Set(pActInfo);
 
 				if (IsPortActive(pActInfo, eIP_Play))
 				{
@@ -600,7 +639,7 @@ namespace CEVPlayer
 			}
 			case eFE_Update:
 			{
-				m_pTex = gEnv->pRenderer->EF_GetTextureByName(GetPortString(pActInfo, eIP_OutTextureName));
+				m_pTex = gEnv->pRenderer->EF_GetTextureByName(NormalizeTextureName(GetPortString(pActInfo, eIP_OutTextureName).c_str()).c_str());
 				if (m_pTex)
 				{
 					m_nID = m_pTex->GetTextureID();
@@ -633,27 +672,34 @@ namespace CEVPlayer
 			{
 				return;
 			}
+			if (!m_graph.IsValid())
+			{
+				return;
+			}
 
 			switch (event)
 			{
 			case EVideoPlayerEvents::OnPlay:
-				ActivateOutput(&m_pActInfo, eOP_StartPlay, true);
+				// The texture is created asynchronously: the first eFE_Update may have found none and switched the
+				// regular update off. It exists now, so look for it again.
+				m_graph.Info()->pGraph->SetRegularlyUpdated(m_graph.Info()->myID, true);
+				ActivateOutput(m_graph.Info(), eOP_StartPlay, true);
 				break;
 			case EVideoPlayerEvents::OnPause:
-				ActivateOutput(&m_pActInfo, eOP_Paused, true);
+				ActivateOutput(m_graph.Info(), eOP_Paused, true);
 				break;
 			case EVideoPlayerEvents::OnResume:
-				ActivateOutput(&m_pActInfo, eOP_Resumed, true);
+				ActivateOutput(m_graph.Info(), eOP_Resumed, true);
 				break;
 			case EVideoPlayerEvents::OnStop:
-				ActivateOutput(&m_pActInfo, eOP_Stopped, true);
+				ActivateOutput(m_graph.Info(), eOP_Stopped, true);
 				break;
 			default:
 				break;
 			}
 		}
 	private:
-		SActivationInfo m_pActInfo;
+		CGraphRef m_graph;
 	};
 
 	REGISTER_FLOW_NODE("CEVPlayer:2DVideoPlayer", CFlowNode_2DVideoPlayer);

@@ -88,36 +88,75 @@ namespace CEVPlayer
 			return s_stage;
 		}
 
-		int CreateTexture(const char* name, int width, int height)
+		int MaxTextureSize()
 		{
-			if (!Available() || width <= 0 || height <= 0)
-				return 0;
-			const int id = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(nullptr, width, height, eTF_R8G8B8A8, eTF_R8G8B8A8, 0, false, FILTER_BILINEAR, 0, name, FT_NOMIPS));
-			LogDebug("texture <%s> id <%d> %dx%d created", name, id, width, height);
-			return id;
+			return Available() ? gEnv->pRenderer->GetMaxTextureSize() : 0;
 		}
 
-		bool UpdateTexture(int textureId, const uint8_t* rgba, int width, int height)
+		ITexture* CreateTexture(const char* name, int width, int height, const char** pFailure)
 		{
-			if (!Available() || textureId <= 0 || rgba == nullptr)
+			*pFailure = "renderer not available";
+			if (!Available() || name == nullptr || name[0] == '\0' || width <= 0 || height <= 0)
+				return nullptr;
+
+			const int maxSize = gEnv->pRenderer->GetMaxTextureSize();
+			if (maxSize > 0 && (width > maxSize || height > maxSize))
+			{
+				*pFailure = "video is larger than the renderer's maximum texture size";
+				return nullptr;
+			}
+
+			// A same-named texture is reused by the renderer. Only plain RGBA8 2D textures are acceptable (the
+			// engine recreates the device texture at our size); never take over a render target / other type.
+			if (ITexture* const pExisting = gEnv->pRenderer->EF_GetTextureByName(name))
+			{
+				if (pExisting->GetTextureType() != eTT_2D || (pExisting->GetFlags() & (FT_USAGE_RENDERTARGET | FT_USAGE_DEPTHSTENCIL | FT_USAGE_UNORDERED_ACCESS)) != 0
+					|| (pExisting->IsTextureLoaded() && pExisting->GetTextureDstFormat() != eTF_R8G8B8A8))
+				{
+					*pFailure = "a texture with this name exists and is not a plain RGBA8 2D texture";
+					return nullptr;
+				}
+			}
+
+			const int id = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(nullptr, width, height, eTF_R8G8B8A8, eTF_R8G8B8A8, 0, false, FILTER_BILINEAR, 0, name, FT_NOMIPS));
+			ITexture* const pTexture = id > 0 ? gEnv->pRenderer->EF_GetTextureByID(id) : nullptr;
+			if (pTexture == nullptr)
+			{
+				*pFailure = "the renderer could not create the texture";
+				return nullptr;
+			}
+			// The creation reference is ours. Verify what we got: the renderer substitutes its "no texture" when the
+			// device texture could not be created.
+			if (pTexture->GetTextureID() != id || pTexture->GetWidth() != width || pTexture->GetHeight() != height || pTexture->GetNumMips() != 1
+				|| pTexture->GetTextureType() != eTT_2D || pTexture->GetTextureDstFormat() != eTF_R8G8B8A8)
+			{
+				*pFailure = "the created texture does not match the requested size / format";
+				pTexture->Release();
+				return nullptr;
+			}
+			LogDebug("texture <%s> id <%d> %dx%d created", name, id, width, height);
+			*pFailure = "";
+			return pTexture;
+		}
+
+		bool UpdateTexture(ITexture* pTexture, const uint8_t* rgba, int width, int height)
+		{
+			if (!Available() || pTexture == nullptr || rgba == nullptr)
 				return false;
-			gEnv->pRenderer->UpdateTextureInVideoMemory(static_cast<uint32>(textureId), const_cast<unsigned char*>(rgba), 0, 0, width, height, eTF_R8G8B8A8);
+			const int id = pTexture->GetTextureID();
+			if (id <= 0 || pTexture->GetWidth() != width || pTexture->GetHeight() != height || pTexture->GetNumMips() != 1
+				|| pTexture->GetTextureDstFormat() != eTF_R8G8B8A8 || gEnv->pRenderer->EF_GetTextureByID(id) != pTexture)
+				return false;
+			gEnv->pRenderer->UpdateTextureInVideoMemory(static_cast<uint32>(id), const_cast<unsigned char*>(rgba), 0, 0, width, height, eTF_R8G8B8A8);
 			return true;
 		}
 
-		ITexture* GetTexture(int textureId)
+		void ReleaseTexture(ITexture* pTexture)
 		{
-			if (!Available() || textureId <= 0)
-				return nullptr;
-			return gEnv->pRenderer->EF_GetTextureByID(textureId);
-		}
-
-		void RemoveTexture(int textureId)
-		{
-			if (!Available() || textureId <= 0)
+			if (pTexture == nullptr)
 				return;
-			LogDebug("texture id <%d> removed", textureId);
-			gEnv->pRenderer->RemoveTexture(static_cast<unsigned int>(textureId));
+			LogDebug("texture <%s> id <%d> released", pTexture->GetName(), pTexture->GetTextureID());
+			pTexture->Release();
 		}
 
 		bool SetMaterialTexture(IMaterial* pMaterial, int subMaterial, int textureSlot, ITexture* pTexture, ITexture** ppPrevious)

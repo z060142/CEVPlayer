@@ -48,7 +48,7 @@ namespace CEVPlayer
 		uint64_t GetFrameSerial() const override { return m_frameSerial; }
 		const char* GetTextureName() const override { return m_textureName.c_str(); }
 		int GetTextureId() const override { return m_textureId; }
-		ITexture* GetTexture() const override;
+		ITexture* GetTexture() const override { return m_pTexture; }
 		void SetFullscreen(bool enable, EVideoFit fit) override;
 		bool IsFullscreen() const override { return m_fullscreen; }
 		bool BindMaterial(IMaterial* pMaterial, int subMaterial, int textureSlot) override;
@@ -70,7 +70,7 @@ namespace CEVPlayer
 		//! ReleaseRenderResources() and the destructor are valid.
 		void PrepareDestroy();
 		//! True while a texture or material binding still has to be released (needs renderer calls).
-		bool HasRenderResources() const { return m_textureId != 0 || !m_bindings.empty(); }
+		bool HasRenderResources() const { return m_pTexture != nullptr || !m_bindings.empty(); }
 		//! Unbinds materials and removes the texture. Only called while renderer calls are allowed (or at shutdown).
 		void ReleaseRenderResources();
 		void ListState(char* buffer, size_t size) const;
@@ -82,6 +82,8 @@ namespace CEVPlayer
 		void MarkDestroyed() { m_destroyed = true; }
 		void SetStatsEnabled(bool enabled) { m_core.SetStatsEnabled(enabled); }
 		const std::string& Name() const { return m_textureName; }
+		//! The texture this player owns (valid for name clash checks of the manager).
+		bool HasTexture() const { return m_pTexture != nullptr; }
 
 	private:
 		enum class EPhase : uint8_t { None, Loading, Ready, Failed };
@@ -100,6 +102,7 @@ namespace CEVPlayer
 			ITexture* pPrevious = nullptr;  // texture the slot had before (reference owned by us while applied)
 			bool applied = false;
 			bool removeRequested = false;   // UnbindMaterial() while renderer calls were not allowed
+			bool failed = false;            // the slot could not be bound: reported once, not retried until the texture changes
 		};
 		static constexpr uint32_t kMaxEvents = 32;
 
@@ -107,6 +110,9 @@ namespace CEVPlayer
 		void OnLoaded();
 		void OnLoadFailed();
 		bool EnsureTexture();
+		//! Ready -> Failed (texture creation refused, or the core reported a mid-stream failure): stops audio and
+		//! presentation, queues OnError.
+		void FailPlayer(cev::Status status, const char* reason);
 		void ApplyBindings();
 		void RemoveAppliedBindings();
 		void ProcessBindingRemovals();
@@ -120,6 +126,7 @@ namespace CEVPlayer
 		cev::PlayerCore m_core;
 		uint32_t m_id;
 		std::string m_textureName;
+		bool m_autoName = true;  // generated "$cev_video_<w>x<h>_<k>" (reusable, see CPlayerManager::MakeAutoTextureName)
 		std::string m_path;
 
 		EPhase m_phase = EPhase::None;
@@ -135,6 +142,7 @@ namespace CEVPlayer
 		float m_volume = 1.f;
 
 		// presentation
+		ITexture* m_pTexture = nullptr; // one reference owned by this player (RenderBridge::ReleaseTexture)
 		int m_textureId = 0;
 		int m_textureWidth = 0;
 		int m_textureHeight = 0;

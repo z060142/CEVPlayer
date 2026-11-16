@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -20,10 +21,11 @@ namespace CEVPlayer
 
 	private:
 		void EnsureLoaded() const;
+		void Load() const;
 
 		std::string m_path;
 		mutable std::vector<uint8_t> m_data;
-		mutable bool m_loaded = false;
+		mutable std::once_flag m_loadOnce; // Length() / Read() may be the first call on different threads
 		mutable cev::Status m_status = cev::Status::Ok;
 	};
 }

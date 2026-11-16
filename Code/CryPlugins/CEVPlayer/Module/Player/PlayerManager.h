@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <CrySystem/ISystem.h>
@@ -39,6 +40,10 @@ namespace CEVPlayer
 
 		// ---- engine events ----
 		void OnSystemEvent(ESystemEvent event);
+		//! Level system callbacks (failed loads only report OnLoadingError, no system event): registered once the
+		//! game framework exists, removed at shutdown. Both are idempotent.
+		void RegisterLevelListener();
+		void UnregisterLevelListener();
 		//! FULL_SHUTDOWN / FAST_SHUTDOWN (renderer still alive): releases everything. Idempotent.
 		void Shutdown();
 		bool IsShutDown() const { return m_shutdown; }
@@ -51,6 +56,11 @@ namespace CEVPlayer
 		std::shared_ptr<cev::DecodePool> AcquirePool();
 		void SetFullscreen(CVideoPlayerImpl* pPlayer, bool enable);
 		bool GlobalStatsEnabled() const;
+		//! Name for the texture of an auto-named player: "$cev_video_<w>x<h>_<k>" with the lowest k that no other
+		//! player uses. The engine keeps textures that were drawn through the aux geometry alive (aux texture
+		//! cache), so a fresh name per player would leak one texture per played video; reusing the names makes the
+		//! renderer hand out the same texture object again.
+		std::string MakeAutoTextureName(int width, int height, const CVideoPlayerImpl* pSelf) const;
 
 		// ---- console ----
 		void ListPlayers() const;
@@ -62,12 +72,17 @@ namespace CEVPlayer
 
 	private:
 		class CConsoleListener;
+		class CLevelListener;
 
 		CVideoPlayerImpl* Find(const IVideoPlayer* pPlayer) const;
 		void ReapZombies(bool force);
 		void ReapPendingDestroy();
 		void LogStats();
 		void DestroyConsolePlayer();
+		bool TextureNameInUse(const std::string& name, const CVideoPlayerImpl* pSelf) const;
+		void BeginLevelLoading(const char* why);
+		void EndLevelLoading(const char* why);
+		void NoteLevelActivity(float timeoutSeconds);
 
 		std::vector<std::unique_ptr<CVideoPlayerImpl>> m_players;
 		std::vector<std::unique_ptr<CVideoPlayerImpl>> m_zombies;     // destroyed while renderer calls were not allowed
@@ -79,12 +94,15 @@ namespace CEVPlayer
 		std::shared_ptr<cev::DecodePool> m_pool;
 		uint32_t m_nextId = 1;
 		bool m_levelLoading = false;
+		float m_levelDeadline = 0.f;   // safety net: loading flag is dropped when nothing was heard until then
 		bool m_shutdown = false;
 		bool m_dispatching = false;
 		bool m_statsApplied = false;
 
 		IVideoPlayer* m_pConsolePlayer = nullptr;
 		std::unique_ptr<CConsoleListener> m_consoleListener;
+		std::unique_ptr<CLevelListener> m_levelListener;
+		bool m_levelListenerRegistered = false;
 
 		float m_statsNextTime = 0.f;
 	};

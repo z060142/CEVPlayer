@@ -30,16 +30,28 @@ namespace CEVPlayer
 		return nullptr;
 	}
 
-	CLegacyPlayback::SEntry* CLegacyPlayback::FindTexture(const char* textureName)
+	const CLegacyPlayback::SEntry* CLegacyPlayback::FindTexture(const char* textureName) const
 	{
-		if (textureName == nullptr)
+		if (textureName == nullptr || textureName[0] == 0)
 			return nullptr;
+		const std::string normalized = NormalizeTextureName(textureName); // entries are stored under the normalized name
 		for (const std::unique_ptr<SEntry>& e : m_textures)
 		{
-			if (e->textureName == textureName)
+			if (e->textureName == normalized)
 				return e.get();
 		}
 		return nullptr;
+	}
+
+	CLegacyPlayback::SEntry* CLegacyPlayback::FindTexture(const char* textureName)
+	{
+		return const_cast<SEntry*>(static_cast<const CLegacyPlayback*>(this)->FindTexture(textureName));
+	}
+
+	bool CLegacyPlayback::IsTextureVideoOwner(const char* textureName, const IVideoPlayerEventListener* pListener) const
+	{
+		const SEntry* const e = FindTexture(textureName);
+		return e != nullptr && pListener != nullptr && e->pListener == pListener;
 	}
 
 	void CLegacyPlayback::Fire(SEntry& entry, EVideoPlayerEvents event)
@@ -58,7 +70,8 @@ namespace CEVPlayer
 		path += videoName;
 		path += VIDEO_FORMAT_EXT;
 
-		IVideoPlayer* const pPlayer = m_manager.CreatePlayer(textureName);
+		const std::string normalizedTexture = NormalizeTextureName(textureName);
+		IVideoPlayer* const pPlayer = m_manager.CreatePlayer(textureName); // normalizes the same way
 		if (pPlayer == nullptr)
 			return nullptr;
 		pPlayer->AddListener(this);
@@ -74,7 +87,7 @@ namespace CEVPlayer
 		entry->pPlayer = pPlayer;
 		entry->pListener = pListener;
 		entry->videoName = videoName;
-		entry->textureName = textureName != nullptr ? textureName : "";
+		entry->textureName = normalizedTexture;
 		return entry;
 	}
 
@@ -95,42 +108,50 @@ namespace CEVPlayer
 		if (gEnv->pSystem->IsQuitting() || videoName == nullptr || videoName[0] == '\0')
 			return;
 
-		if (m_main)
-		{
-			LogWarning("Can't play 2D video because some video already playing. Video will be queued and played later");
-			SQueued queued;
-			queued.pListener = pListener;
-			queued.videoName = videoName;
-			queued.looped = looped;
-			queued.isSkippable = isSkippable;
-			queued.canBePaused = canBePaused;
-			m_queue.push_back(queued);
-			return;
-		}
-
 		if (audioTrack > 0)
 			LogDebug("audio track %d requested for <%s>: track selection is not supported yet, the first audio track plays", audioTrack, videoName);
 
-		std::unique_ptr<SEntry> entry = StartVideo(pListener, videoName, nullptr, looped);
-		if (!entry)
+		SQueued request;
+		request.pListener = pListener;
+		request.videoName = videoName;
+		request.looped = looped;
+		request.isSkippable = isSkippable;
+		request.canBePaused = canBePaused;
+
+		if (m_main)
 		{
-			LogError("Can't play 2D video <%s>", videoName);
+			LogWarning("Can't play 2D video because some video already playing. Video will be queued and played later");
+			m_queue.push_back(request);
 			return;
 		}
+		StartMain(request);
+	}
+
+	bool CLegacyPlayback::StartMain(const SQueued& request)
+	{
+		std::unique_ptr<SEntry> entry = StartVideo(request.pListener, request.videoName.c_str(), nullptr, request.looped);
+		if (!entry)
+		{
+			LogError("Can't play 2D video <%s>", request.videoName.c_str());
+			return false;
+		}
 		entry->is2D = true;
-		entry->skippable = isSkippable;
-		entry->canBePaused = canBePaused;
+		entry->skippable = request.isSkippable;
+		entry->canBePaused = request.canBePaused;
 		entry->pPlayer->SetFullscreen(true, EVideoFit::Fill); // the old plug-in stretched the video over the window
 		m_main = std::move(entry);
+		return true;
 	}
 
 	void CLegacyPlayback::StartNextQueued()
 	{
-		if (m_main || m_queue.empty())
-			return;
-		const SQueued next = m_queue.front();
-		m_queue.pop_front();
-		Play2DVideo(next.pListener, next.videoName.c_str(), false, next.looped, 0, next.isSkippable, next.canBePaused);
+		// A queued video that cannot start (missing file, rejected) must not block the ones behind it.
+		while (!m_main && !m_queue.empty())
+		{
+			const SQueued next = m_queue.front();
+			m_queue.pop_front();
+			StartMain(next);
+		}
 	}
 
 	void CLegacyPlayback::Pause2DVideo()
@@ -196,38 +217,45 @@ namespace CEVPlayer
 	}
 
 	// ------------------------------------------------------------------------------------------------ textures
-	void CLegacyPlayback::PlayVideo(IVideoPlayerEventListener* pListener, const char* videoName, const char* textureName, bool /*preload*/, bool looped, const char* /*stopTexture*/)
+	bool CLegacyPlayback::PlayVideo(IVideoPlayerEventListener* pListener, const char* videoName, const char* textureName, bool /*preload*/, bool looped, const char* /*stopTexture*/)
 	{
 		if (gEnv->pSystem->IsQuitting() || videoName == nullptr || textureName == nullptr || textureName[0] == '\0')
-			return;
+			return false;
 
 		LogDebug("PlayVideo(%p, %s, %s, %s)", static_cast<void*>(pListener), videoName, textureName, looped ? "looped" : "once");
 
 		if (FindTexture(textureName) != nullptr)
 		{
 			LogWarning("Can't play texture video because owner already play video");
-			return;
+			return false;
 		}
 		std::unique_ptr<SEntry> entry = StartVideo(pListener, videoName, textureName, looped);
 		if (!entry)
 		{
 			LogError("Can't play texture video <%s>", videoName);
-			return;
+			return false;
 		}
 		m_textures.push_back(std::move(entry));
+		return true;
 	}
 
 	void CLegacyPlayback::PauseVideo(const char* textureName)
 	{
 		SEntry* const e = FindTexture(textureName);
-		if (e != nullptr && e->pPlayer->GetState() == EVideoPlayerState::Playing)
+		if (e == nullptr)
+			return;
+		e->autoPaused = false; // an explicit request: the game pause no longer owns this video's state
+		if (e->pPlayer->GetState() == EVideoPlayerState::Playing)
 			e->pPlayer->Pause();
 	}
 
 	void CLegacyPlayback::ResumeVideo(const char* textureName)
 	{
 		SEntry* const e = FindTexture(textureName);
-		if (e != nullptr && e->pPlayer->GetState() == EVideoPlayerState::Paused)
+		if (e == nullptr)
+			return;
+		e->autoPaused = false;
+		if (e->pPlayer->GetState() == EVideoPlayerState::Paused)
 			e->pPlayer->Resume();
 	}
 
@@ -256,14 +284,8 @@ namespace CEVPlayer
 
 	int CLegacyPlayback::GetTextureIDByTextureName(const char* textureName) const
 	{
-		if (textureName == nullptr)
-			return 0;
-		for (const std::unique_ptr<SEntry>& e : m_textures)
-		{
-			if (e->textureName == textureName)
-				return e->pPlayer->GetTextureId();
-		}
-		return 0;
+		const SEntry* const e = FindTexture(textureName);
+		return e != nullptr ? e->pPlayer->GetTextureId() : 0;
 	}
 
 	void CLegacyPlayback::ClearTextureVideos()
@@ -286,10 +308,21 @@ namespace CEVPlayer
 		for (const std::unique_ptr<SEntry>& e : m_textures)
 		{
 			const EVideoPlayerState state = e->pPlayer->GetState();
-			if (pause && state == EVideoPlayerState::Playing)
-				e->pPlayer->Pause();
-			else if (!pause && state == EVideoPlayerState::Paused)
-				e->pPlayer->Resume();
+			if (pause)
+			{
+				if (state == EVideoPlayerState::Playing)
+				{
+					e->pPlayer->Pause();
+					e->autoPaused = true;
+				}
+			}
+			else if (e->autoPaused)
+			{
+				// Only what the game pause paused: a video the game paused on purpose stays paused.
+				e->autoPaused = false;
+				if (state == EVideoPlayerState::Paused)
+					e->pPlayer->Resume();
+			}
 		}
 	}
 
@@ -310,6 +343,16 @@ namespace CEVPlayer
 			if (e->pListener == pListener)
 				e->pListener = nullptr;
 		}
+	}
+
+	void CLegacyPlayback::DetachListeners()
+	{
+		if (m_main)
+			m_main->pListener = nullptr;
+		for (SQueued& q : m_queue)
+			q.pListener = nullptr;
+		for (const std::unique_ptr<SEntry>& e : m_textures)
+			e->pListener = nullptr;
 	}
 
 	void CLegacyPlayback::Shutdown()

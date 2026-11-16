@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <string>
+
 #include <CrySchematyc/Reflection/TypeDesc.h>
 #include <CrySchematyc/Env/IEnvRegistrar.h>
 #include <CrySchematyc/Utils/SharedString.h>
@@ -62,5 +64,10 @@ namespace CEVPlayer
 		bool                     m_IsPreloaded = true;
 		bool                     m_IsLooped = false;
 		bool                     m_IsCanPlayInEditor = false;
+	private:
+		//! True when the texture video named m_playedTexture was started by this component and still runs.
+		bool OwnsVideo() const;
+		//! Output texture name the last successful Play() used (the property may have been edited since).
+		std::string              m_playedTexture;
 	};
 }

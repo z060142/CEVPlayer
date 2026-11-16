@@ -51,7 +51,11 @@ namespace CEVPlayer
 	{
 		if (textureName != nullptr && textureName[0] != '\0')
 		{
-			m_textureName = textureName;
+			bool changed = false;
+			m_textureName = NormalizeTextureName(textureName, &changed);
+			m_autoName = false;
+			if (changed)
+				LogWarning("player %u: texture name <%s> is used as <%s> (names must start with '$' and are limited in length)", id, textureName, m_textureName.c_str());
 		}
 		else
 		{
@@ -230,6 +234,8 @@ namespace CEVPlayer
 		m_core.SetRate(static_cast<double>(m_rate));
 		m_core.SetStatsEnabled(m_manager.GlobalStatsEnabled());
 		EnsureTexture();
+		if (m_phase != EPhase::Ready)
+			return; // the texture was refused: the player failed (OnError queued)
 		StartVoice();
 		Emit(EEvent::Ready);
 
@@ -257,6 +263,21 @@ namespace CEVPlayer
 		m_playPending = false;
 		LogError("player %u: loading <%s> failed: %s (%s)", m_id, m_path.c_str(), cev::StatusToString(err.status), cev::StatusDetailToString(err.detail));
 		Emit(EEvent::Error, static_cast<int>(err.status));
+	}
+
+	void CVideoPlayerImpl::FailPlayer(cev::Status status, const char* reason)
+	{
+		LogError("player %u: <%s> failed: %s (%s)", m_id, m_path.c_str(), cev::StatusToString(status), reason != nullptr ? reason : "");
+		StopVoice();
+		m_core.Unload();
+		m_phase = EPhase::Failed;
+		m_loadStatus = status;
+		m_playPending = false;
+		m_seekPending = false;
+		m_pausedByLevelLoad = false;
+		m_needUpload = false;
+		m_endedSent = false;
+		Emit(EEvent::Error, static_cast<int>(status));
 	}
 
 	// ------------------------------------------------------------------------------------------------ control
@@ -410,34 +431,35 @@ namespace CEVPlayer
 	}
 
 	// ------------------------------------------------------------------------------------------------ textures
-	ITexture* CVideoPlayerImpl::GetTexture() const
-	{
-		return m_textureId != 0 ? RenderBridge::GetTexture(m_textureId) : nullptr;
-	}
-
 	bool CVideoPlayerImpl::EnsureTexture()
 	{
 		if (m_phase != EPhase::Ready || !m_info.hasVideo || m_info.width <= 0 || m_info.height <= 0)
 			return false;
-		if (m_textureId != 0 && (m_textureWidth != m_info.width || m_textureHeight != m_info.height))
+		if (m_pTexture != nullptr && (m_textureWidth != m_info.width || m_textureHeight != m_info.height))
 		{
 			if (!m_manager.RenderCallsAllowed())
 				return false;
 			ReleaseTexture(true); // size changed: new texture, bindings move over
 		}
-		if (m_textureId != 0)
+		if (m_pTexture != nullptr)
 			return true;
 		if (!RenderBridge::Available() || !m_manager.RenderCallsAllowed())
 			return false;
 
 		RenderBridge::ProbeOnce();
-		const int id = RenderBridge::CreateTexture(m_textureName.c_str(), m_info.width, m_info.height);
-		if (id <= 0)
+		if (m_autoName)
+			m_textureName = m_manager.MakeAutoTextureName(m_info.width, m_info.height, this);
+		const char* failure = "";
+		ITexture* const pTexture = RenderBridge::CreateTexture(m_textureName.c_str(), m_info.width, m_info.height, &failure);
+		if (pTexture == nullptr)
 		{
-			LogError("player %u: cannot create texture <%s> %dx%d", m_id, m_textureName.c_str(), m_info.width, m_info.height);
+			LogError("player %u: cannot create texture <%s> %dx%d: %s", m_id, m_textureName.c_str(), m_info.width, m_info.height, failure);
+			FailPlayer(cev::Status::Unsupported, failure);
 			return false;
 		}
-		m_textureId = id;
+		m_pTexture = pTexture;
+		m_textureId = pTexture->GetTextureID();
+		LogDebug("player %u: texture <%s> id %d %dx%d", m_id, m_textureName.c_str(), m_textureId, m_info.width, m_info.height);
 		m_textureWidth = m_info.width;
 		m_textureHeight = m_info.height;
 		m_needUpload = true;
@@ -457,11 +479,17 @@ namespace CEVPlayer
 			}
 			m_bindings.clear();
 		}
-		if (m_textureId != 0)
+		else
 		{
-			RenderBridge::RemoveTexture(m_textureId);
-			m_textureId = 0;
+			for (SBinding& b : m_bindings)
+				b.failed = false; // the new texture gets a fresh try
 		}
+		if (m_pTexture != nullptr)
+		{
+			RenderBridge::ReleaseTexture(m_pTexture);
+			m_pTexture = nullptr;
+		}
+		m_textureId = 0;
 		m_textureWidth = 0;
 		m_textureHeight = 0;
 		m_needUpload = false;
@@ -490,13 +518,19 @@ namespace CEVPlayer
 			}
 			return;
 		}
-		if (RenderBridge::UpdateTexture(m_textureId, view.rgba, view.width, view.height))
+		if (RenderBridge::UpdateTexture(m_pTexture, view.rgba, view.width, view.height))
 		{
 			++m_uploads;
 			m_frameSerial = view.serial;
 			m_core.NoteUpload(static_cast<uint64_t>(view.width) * static_cast<uint64_t>(view.height) * 4u);
 			m_needUpload = false;
 			Emit(EEvent::NewFrame, 0, view.serial);
+		}
+		else
+		{
+			// The texture no longer matches our buffer (another user recreated the same name at a different
+			// size / format): never write into it, give up instead of retrying every frame.
+			FailPlayer(cev::Status::InvalidState, "the output texture was changed by someone else");
 		}
 	}
 
@@ -519,7 +553,7 @@ namespace CEVPlayer
 		binding.subMaterial = subMaterial;
 		binding.textureSlot = textureSlot;
 		m_bindings.push_back(binding);
-		if (m_textureId != 0 && m_manager.RenderCallsAllowed())
+		if (m_pTexture != nullptr && m_manager.RenderCallsAllowed())
 			ApplyBindings();
 		return true;
 	}
@@ -537,14 +571,12 @@ namespace CEVPlayer
 
 	void CVideoPlayerImpl::ApplyBindings()
 	{
-		if (m_textureId == 0)
-			return;
-		ITexture* const pTexture = RenderBridge::GetTexture(m_textureId);
+		ITexture* const pTexture = m_pTexture;
 		if (pTexture == nullptr)
 			return;
 		for (SBinding& b : m_bindings)
 		{
-			if (b.applied || b.removeRequested)
+			if (b.applied || b.removeRequested || b.failed)
 				continue;
 			ITexture* pPrevious = nullptr;
 			if (RenderBridge::SetMaterialTexture(b.pMaterial, b.subMaterial, b.textureSlot, pTexture, &pPrevious))
@@ -554,14 +586,15 @@ namespace CEVPlayer
 			}
 			else
 			{
-				LogWarning("player %u: cannot bind <%s> to material <%s> sub %d slot %d", m_id, m_textureName.c_str(), b.pMaterial->GetName(), b.subMaterial, b.textureSlot);
+				b.failed = true; // reported once, not retried every frame
+				LogWarning("player %u: cannot bind <%s> to material <%s> sub %d slot %d (not retried)", m_id, m_textureName.c_str(), b.pMaterial->GetName(), b.subMaterial, b.textureSlot);
 			}
 		}
 	}
 
 	void CVideoPlayerImpl::RemoveAppliedBindings()
 	{
-		ITexture* const pTexture = m_textureId != 0 ? RenderBridge::GetTexture(m_textureId) : nullptr;
+		ITexture* const pTexture = m_pTexture;
 		for (SBinding& b : m_bindings)
 		{
 			if (b.applied)
@@ -575,7 +608,7 @@ namespace CEVPlayer
 
 	void CVideoPlayerImpl::ProcessBindingRemovals()
 	{
-		ITexture* const pTexture = m_textureId != 0 ? RenderBridge::GetTexture(m_textureId) : nullptr;
+		ITexture* const pTexture = m_pTexture;
 		for (std::vector<SBinding>::iterator it = m_bindings.begin(); it != m_bindings.end();)
 		{
 			if (!it->removeRequested)
@@ -619,12 +652,19 @@ namespace CEVPlayer
 			else if (ls == cev::LoadState::Failed)
 				OnLoadFailed();
 		}
+		if (m_phase == EPhase::Ready && m_core.GetLoadState() == cev::LoadState::Failed)
+		{
+			// The core gave up while playing (stream changed resolution, internal error): stop presenting.
+			const cev::LoadError err = m_core.GetLoadError();
+			FailPlayer(err.status, cev::StatusDetailToString(err.detail));
+			return;
+		}
 		if (m_phase != EPhase::Ready)
 			return;
 
 		if (m_info.hasVideo)
 		{
-			if (m_textureId == 0)
+			if (m_pTexture == nullptr)
 				EnsureTexture(); // retry (renderer / level loading state changed)
 			else if (!m_bindings.empty())
 			{
@@ -655,7 +695,7 @@ namespace CEVPlayer
 			m_endedSent = false;
 		}
 
-		if ((fresh || m_needUpload) && m_textureId != 0)
+		if ((fresh || m_needUpload) && m_pTexture != nullptr)
 			UploadFrame();
 	}
 

@@ -1,4 +1,4 @@
-// CEVPlayer public player API (interface version 1).
+// CEVPlayer public player API (interface version 2).
 //
 // This header is the contract for other plug-ins (CryXTUI, game code, ...): it contains no CRYENGINE includes
 // and no implementation details. Obtain the factory through IVideoPlugin (CEVPlayer/IVideoPlugin.h):
@@ -18,6 +18,21 @@
 // player methods, RemoveListener or DestroyPlayer from inside a callback.
 //
 // Pixel format: the texture is RGBA8 with premultiplied alpha (IsPremultiplied() is always true).
+//
+// Lifetime: IVideoPlayer* belongs to the plug-in. It is valid from CreatePlayer until DestroyPlayer or until the
+// plug-in shuts down (system events ESYSTEM_EVENT_FULL_SHUTDOWN / FAST_SHUTDOWN, or the module is unloaded). At
+// shutdown all players are destroyed (no callbacks are sent) and every IVideoPlayer* and IVideoPlayerListener
+// registration is gone: never use a player pointer after that, and make CreatePlayer's nullptr result (returned
+// once shutdown began) a normal case. A player whose playback fails later (texture refused, the stream changes its
+// format) goes to EVideoPlayerState::Error and sends OnError; it stops presenting but the object stays valid until
+// you destroy it.
+//
+// Textures: the renderer keeps a texture alive for as long as something drew it through its 2D aux geometry
+// (fullscreen output), also after the player is gone. Prefer the generated names for fullscreen players: they are
+// reused, so repeated playback does not grow the texture count. A texture name chosen by you must not be used by
+// an engine texture (render targets / non RGBA8 textures are refused, the player fails with OnError), and the
+// video must not be larger than the renderer's maximum texture size (OnError).
+
 
 #pragma once
 
@@ -29,7 +44,7 @@ struct IMaterial;
 namespace CEVPlayer
 {
 	//! Version of this header. Bumped when a virtual is appended / a struct is extended.
-	constexpr uint32_t kVideoPlayerInterfaceVersion = 1;
+	constexpr uint32_t kVideoPlayerInterfaceVersion = 2;
 
 	//! Bits returned by IVideoPlugin::GetVideoPlayerCaps().
 	enum EVideoPlayerCaps : uint32_t
@@ -46,7 +61,7 @@ namespace CEVPlayer
 		Paused,
 		Ended,       //!< reached the end and is not looping
 		Loading,     //!< Load() is in progress (IsLoaded() == false)
-		Error,       //!< Load() failed, see the OnError callback
+		Error,       //!< Load() failed or playback failed later (OnError was sent); the object stays valid
 	};
 
 	//! How the fullscreen output places the picture on the screen.
@@ -74,7 +89,8 @@ namespace CEVPlayer
 		virtual void OnLooped(IVideoPlayer& player) { (void)player; }
 		//! Reached the end of a non-looping video.
 		virtual void OnEnded(IVideoPlayer& player) { (void)player; }
-		//! Loading failed (errorCode is a cev::Status value, message is a static string).
+		//! Loading failed, or a loaded video failed during playback (errorCode is a cev::Status value, message is a
+		//! static string). The player is in the Error state afterwards.
 		virtual void OnError(IVideoPlayer& player, int errorCode, const char* message) { (void)player; (void)errorCode; (void)message; }
 		// ---- appended in version 1 as defaulted callbacks (used by the legacy wrappers) ----
 		virtual void OnPaused(IVideoPlayer& player) { (void)player; }
@@ -120,8 +136,9 @@ namespace CEVPlayer
 		virtual uint64_t GetFrameSerial() const = 0; //!< counts uploaded pictures, usable as a "changed" test
 
 		// ---- output: texture ----
-		//! Texture name as registered with the renderer (e.g. "$cev_video_3"); may be used in .mtl files and
-		//! Flash. The default is generated; use IVideoPlugin::CreatePlayer(name) to choose it.
+		//! Texture name as registered with the renderer (e.g. "$tv"); may be used in .mtl files and Flash. The
+		//! default is generated ("$cev_video_<w>x<h>_<k>", final once IsLoaded(), reused by later players); use
+		//! IVideoPlugin::CreatePlayer(name) to choose it.
 		virtual const char* GetTextureName() const = 0;
 		virtual int         GetTextureId() const = 0;   //!< renderer texture id, 0 while there is no texture
 		virtual ITexture*   GetTexture() const = 0;     //!< nullptr while there is no texture

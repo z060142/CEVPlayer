@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <string>
+
 namespace CEVPlayer
 {
 	class CPlayerManager;
@@ -34,6 +36,17 @@ namespace CEVPlayer
 	};
 
 	extern SPluginEnv* mEnv;
+
+	//! The public API (IVideoPlugin, IVideoPlayer) is main thread only.
+	inline bool IsMainThread()
+	{
+		return gEnv == nullptr || gEnv->mMainThreadId == THREADID_NULL || CryGetCurrentThreadId() == gEnv->mMainThreadId;
+	}
+
+	//! Texture names must start with '$' to be reachable from materials / Flash. Prefixes a missing '$' and caps
+	//! the length (the renderer copies names into a 128 byte buffer). `*pChanged` tells whether it had to change
+	//! anything. nullptr / empty -> empty string.
+	std::string NormalizeTextureName(const char* name, bool* pChanged = nullptr);
 
 #define Log(...) do { if(mEnv && !mEnv->m_bDisableLog) { CryLog (TITLE __VA_ARGS__); } } while(0)
 #define LogDebug(...) do { if(mEnv && (mEnv->m_bDebugLog || mEnv->m_cevLog)) { CryLog (TITLE __VA_ARGS__); } } while(0)

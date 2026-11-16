@@ -6,7 +6,9 @@
 #include <cstdio>
 #include <string>
 
+#include <CryGame/IGameFramework.h>
 #include <CryRenderer/IRenderer.h>
+#include <ILevelSystem.h>
 
 #include "Player/VideoPlayerImpl.h"
 #include "Render/FullscreenOutput.h"
@@ -16,7 +18,15 @@ namespace CEVPlayer
 {
 	namespace
 	{
-		const char* const kConsoleTextureName = "$cev_console";
+		// Level loading flag safety net (seconds without any sign of life from the level system / the loading
+		// screen events). A failed load only reports OnLoadingError; this covers whatever is not reported at all.
+		constexpr float kLoadIdleTimeout = 120.f;
+		constexpr float kLoadCompleteTimeout = 15.f; // after OnLoadingComplete only the precache steps are left
+
+		float NowSeconds()
+		{
+			return gEnv != nullptr && gEnv->pTimer != nullptr ? gEnv->pTimer->GetAsyncCurTime() : 0.f;
+		}
 
 		// Scratch buffers of the per-frame output step (kept across frames: no allocation in steady state).
 		std::vector<FullscreenOutput::SLayer> s_layers;
@@ -49,8 +59,46 @@ namespace CEVPlayer
 		CPlayerManager& m_manager;
 	};
 
+	std::string NormalizeTextureName(const char* name, bool* pChanged)
+	{
+		if (pChanged != nullptr)
+			*pChanged = false;
+		if (name == nullptr || *name == 0)
+			return std::string();
+		std::string result;
+		if (name[0] != '$')
+			result = "$";
+		result += name;
+		constexpr size_t kMaxNameLength = 100;
+		if (result.size() > kMaxNameLength)
+			result.resize(kMaxNameLength);
+		if (pChanged != nullptr)
+			*pChanged = result != name;
+		return result;
+	}
+
+	//! Clears the loading flag when the level system reports a failed load (it sends no system event then).
+	class CPlayerManager::CLevelListener final : public ILevelSystemListener
+	{
+	public:
+		explicit CLevelListener(CPlayerManager& manager) : m_manager(manager) {}
+
+		bool OnLoadingStart(ILevelInfo*) override { m_manager.NoteLevelActivity(kLoadIdleTimeout); return true; }
+		void OnLoadingLevelEntitiesStart(ILevelInfo*) override { m_manager.NoteLevelActivity(kLoadIdleTimeout); }
+		void OnLoadingProgress(ILevelInfo*, int) override { m_manager.NoteLevelActivity(kLoadIdleTimeout); }
+		// Not the end yet: LEVEL_LOAD_END / GAMEPLAY_START follow after the precache steps, renderer calls stay
+		// off until then. The short deadline only matters when those events never come.
+		void OnLoadingComplete(ILevelInfo*) override { m_manager.NoteLevelActivity(kLoadCompleteTimeout); }
+		void OnLoadingError(ILevelInfo*, const char*) override { m_manager.EndLevelLoading("level system: loading error"); }
+		void OnUnloadComplete(ILevelInfo*) override { m_manager.EndLevelLoading("level system: unload complete"); }
+
+	private:
+		CPlayerManager& m_manager;
+	};
+
 	CPlayerManager::CPlayerManager()
 		: m_consoleListener(std::make_unique<CConsoleListener>(*this))
+		, m_levelListener(std::make_unique<CLevelListener>(*this))
 	{
 		m_players.reserve(16);
 		m_snapshot.reserve(16);
@@ -65,6 +113,84 @@ namespace CEVPlayer
 	bool CPlayerManager::GlobalStatsEnabled() const
 	{
 		return mEnv->m_cevStats != 0 || mEnv->m_bDebugDraw != 0;
+	}
+
+	void CPlayerManager::RegisterLevelListener()
+	{
+		if (m_levelListenerRegistered || m_shutdown || gEnv == nullptr || gEnv->pGameFramework == nullptr)
+			return;
+		ILevelSystem* const pLevelSystem = gEnv->pGameFramework->GetILevelSystem();
+		if (pLevelSystem == nullptr)
+			return;
+		pLevelSystem->AddListener(m_levelListener.get());
+		m_levelListenerRegistered = true;
+		Log("level system listener registered");
+	}
+
+	void CPlayerManager::UnregisterLevelListener()
+	{
+		if (!m_levelListenerRegistered)
+			return;
+		m_levelListenerRegistered = false;
+		if (gEnv != nullptr && gEnv->pGameFramework != nullptr)
+		{
+			if (ILevelSystem* const pLevelSystem = gEnv->pGameFramework->GetILevelSystem())
+				pLevelSystem->RemoveListener(m_levelListener.get());
+		}
+	}
+
+	void CPlayerManager::BeginLevelLoading(const char* why)
+	{
+		if (m_levelLoading || m_shutdown)
+			return;
+		m_levelLoading = true;
+		m_levelDeadline = NowSeconds() + kLoadIdleTimeout;
+		LogDebug("level loading started (%s): clocks paused, no renderer calls", why);
+		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
+			p->OnLevelLoadBegin();
+	}
+
+	void CPlayerManager::EndLevelLoading(const char* why)
+	{
+		if (!m_levelLoading)
+			return;
+		m_levelLoading = false;
+		LogDebug("level loading finished (%s): resuming", why);
+		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
+			p->OnLevelLoadEnd();
+	}
+
+	void CPlayerManager::NoteLevelActivity(float timeoutSeconds)
+	{
+		if (m_levelLoading)
+			m_levelDeadline = NowSeconds() + timeoutSeconds;
+	}
+
+	bool CPlayerManager::TextureNameInUse(const std::string& name, const CVideoPlayerImpl* pSelf) const
+	{
+		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
+		{
+			if (p.get() != pSelf && p->HasTexture() && stricmp(p->Name().c_str(), name.c_str()) == 0)
+				return true;
+		}
+		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_zombies)
+		{
+			if (p.get() != pSelf && p->HasTexture() && stricmp(p->Name().c_str(), name.c_str()) == 0)
+				return true;
+		}
+		return false;
+	}
+
+	std::string CPlayerManager::MakeAutoTextureName(int width, int height, const CVideoPlayerImpl* pSelf) const
+	{
+		char buffer[64];
+		for (int k = 0; k < 4096; ++k)
+		{
+			std::snprintf(buffer, sizeof(buffer), "$cev_video_%dx%d_%d", width, height, k);
+			if (!TextureNameInUse(buffer, pSelf))
+				break;
+		}
+		return buffer;
 	}
 
 	bool CPlayerManager::RenderCallsAllowed() const
@@ -102,11 +228,12 @@ namespace CEVPlayer
 			return nullptr;
 		if (textureName != nullptr && textureName[0] != '\0')
 		{
+			const std::string normalized = NormalizeTextureName(textureName);
 			for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
 			{
-				if (!p->IsDestroyed() && stricmp(p->GetTextureName(), textureName) == 0)
+				if (!p->IsDestroyed() && stricmp(p->GetTextureName(), normalized.c_str()) == 0)
 				{
-					LogWarning("texture name <%s> is already used by player %u, both would write the same texture", textureName, p->Id());
+					LogWarning("texture name <%s> is already used by player %u, both would write the same texture", normalized.c_str(), p->Id());
 					break;
 				}
 			}
@@ -202,7 +329,16 @@ namespace CEVPlayer
 	{
 		// No renderer calls and no frame stepping while a level loads or after shutdown. Clocks of playing
 		// players are paused for the duration (OnSystemEvent), so nothing is lost.
-		if (m_shutdown || m_levelLoading)
+		if (m_shutdown)
+			return;
+		if (m_levelLoading && NowSeconds() > m_levelDeadline)
+		{
+			LogWarning("level loading flag was not cleared by the engine for a long time: assuming the load ended");
+			EndLevelLoading("timeout");
+		}
+		if (m_players.empty())
+			s_statsLines.clear(); // no stale overlay lines once the last player is gone
+		if (m_levelLoading)
 			return;
 		if (m_players.empty() && m_zombies.empty())
 			return;
@@ -301,24 +437,12 @@ namespace CEVPlayer
 		switch (event)
 		{
 		case ESYSTEM_EVENT_LEVEL_LOAD_START_LOADINGSCREEN:
-			if (!m_levelLoading)
-			{
-				m_levelLoading = true;
-				LogDebug("level loading started: clocks paused, no renderer calls");
-				for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
-					p->OnLevelLoadBegin();
-			}
+			BeginLevelLoading("loading screen started");
 			break;
 		case ESYSTEM_EVENT_LEVEL_LOAD_END:
 		case ESYSTEM_EVENT_LEVEL_GAMEPLAY_START:
 		case ESYSTEM_EVENT_LEVEL_LOAD_ERROR:
-			if (m_levelLoading)
-			{
-				m_levelLoading = false;
-				LogDebug("level loading finished: resuming");
-				for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
-					p->OnLevelLoadEnd();
-			}
+			EndLevelLoading("system event");
 			break;
 		case ESYSTEM_EVENT_FULL_SHUTDOWN:
 		case ESYSTEM_EVENT_FAST_SHUTDOWN:
@@ -336,6 +460,7 @@ namespace CEVPlayer
 		// The renderer is still alive when this runs (FULL_SHUTDOWN is sent before the plug-ins and the renderer
 		// are released, FAST_SHUTDOWN just before the renderer is). Release every texture now.
 		m_shutdown = true;
+		UnregisterLevelListener();
 		m_levelLoading = false;
 		m_pConsolePlayer = nullptr;
 		m_dispatching = false;
@@ -384,7 +509,7 @@ namespace CEVPlayer
 		if (m_shutdown || path == nullptr || path[0] == '\0')
 			return;
 		DestroyConsolePlayer();
-		IVideoPlayer* const p = CreatePlayer(kConsoleTextureName);
+		IVideoPlayer* const p = CreatePlayer(nullptr); // generated, reusable texture name (fullscreen only)
 		if (p == nullptr)
 			return;
 		m_pConsolePlayer = p;
