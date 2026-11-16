@@ -21,10 +21,10 @@
 |---|---|---|
 | M0 獨立倉、SDK、patch 01、腳本、兩樹編譯舊插件 | 編譯完成，冒煙測試待做 | 官方版整樹建置 0 錯誤；patch 01 + sync 後舊插件在官方版與 CECE 都建置成功，apply_patches 重跑為冪等。CECE 整樹有 fork 本身的 4 組錯誤（AssimpSDK、HPi/LodGenerator 缺 XT、GameSDK unity 重複定義），見 docs/research/02-baseline-build.md；依使用者指示以官方版為主線，CECE 只驗證 CEVPlayer 目標。 |
 | M1 執行期核心（解碼層、渲染橋、使用端、計數、查詢接口） | 完成（第一階段路徑） | Core 自測 6000+ 項、模糊測試；CE 橋接冒煙 PASS；兩輪獨立審查已修。第一階段限制：全螢幕走 aux（最上層、直通 alpha 有黑邊）、CPU 轉色、載入畫面期間不推進。 |
-| M2 快速路線聲音與腳本綁定 | 完成，審查中 | M2a：聲音時鐘、重取樣、.cevvideo、語言、標記點、禁用內嵌聲音；M2b：描述表（36 項）、29 個 FlowGraph 節點、Schematyc 元件、CryVS（只在 CECE 編譯，未實跑） |
-| M3 規範路線（CryAudio 位置查詢，optional patch） | 進行中 | 設計：docs/design/M3-cue-route.md |
-| M4 資產與編輯器 | 未開始 | |
-| M5 FFmpeg 轉碼 | 未開始 | |
+| M2 快速路線聲音與腳本綁定 | 完成 | M2a：聲音時鐘、重取樣、.cevvideo、語言、標記點、禁用內嵌聲音；M2b：描述表（36 項）、29 個 FlowGraph 節點、Schematyc 元件、CryVS（只在 CECE 編譯，未實跑） |
+| M3 規範路線（CryAudio 位置查詢，optional patch） | 完成 | optional patch 02（CryAudio 播放位置 + SDL_mixer 實作）；官方版套用後整樹 0 錯誤；cue 時鐘與 trigger 位置差 ±7 ms；未套 patch 退回影片時鐘 |
+| M4 資產與編輯器 | 完成（畫面待手動驗收） | EditorCEVPlayer：資產類型、WebM 匯入、三欄視窗、QViewport 預覽、離線處理（分離音軌／WAV／Ogg，對齊 ≤0.3 取樣）、ACE 註冊、資產圖示、打包工具；手動驗收清單 docs/manual-acceptance-M4.md |
+| M5 FFmpeg 轉碼 | 進行中 | 已完成：CEVPlayerFFmpeg（偵測、執行、轉檔指令、SHA-256 驗證安裝）與 CI 工作流程（未實跑）；進行中：編輯器整合 |
 
 ## 決策紀錄
 
@@ -34,3 +34,5 @@
 - 2026-11-16 本機 VS 沒裝 ATL/MFC 且無法提權安裝 → 由 VS 套件解出到 D:/coding11/_tools/atlmfc，經 baseline_compat.props 引入（只有 Release MFC）。
 - 2026-11-16 依使用者要求，CEVPlayer 的 5 個第三方 SDK 集中到 `Code/SDKs/CEVPlayer/`（偏離需求單的 `Code/SDKs/<名稱>`）。
 - 2026-11-16 CE 插件預設無 /EHsc；CEVPlayerCore 單獨開 /EHsc，例外不跨出 Core API。
+- 2026-11-16 M4 使用者決定：WAV/OGG 放影片資產資料夾內；原始影片複製進 Assets；預覽先用 QViewport，不穩定再改 XTFrame 子視窗。資產圖示以 image summon 產生（WEBM 字樣）。
+- 2026-11-16 依使用者指示推上 GitHub（rebuild 分支）。
