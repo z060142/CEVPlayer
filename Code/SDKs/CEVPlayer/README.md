@@ -1,16 +1,16 @@
-# CEVPlayer 第三方 SDK
+# CEVPlayer third-party SDKs
 
-CEVPlayer 專用的預編譯函式庫，集中在這個母資料夾，與引擎原有的 `Code/SDKs/*` 分開。
+Prebuilt libraries used only by CEVPlayer, grouped in this parent folder and kept apart from the engine's own `Code/SDKs/*`.
 
-| 資料夾 | 系列 | 用途 |
+| Folder | Family | Purpose |
 |---|---|---|
-| `libvpx/` | WebM 專案 | VP8 / VP9 影像解碼（只含解碼器） |
-| `libwebm/` | WebM 專案 | WebM（Matroska）容器解析 |
-| `libogg/` | Xiph.org | Ogg 封包（libvorbis 需要） |
-| `libvorbis/` | Xiph.org | Vorbis 聲音解碼 |
-| `libopus/` | Xiph.org | Opus 聲音解碼 |
+| `libvpx/` | WebM Project | VP8 / VP9 video decoding (decoders only) |
+| `libwebm/` | WebM Project | WebM (Matroska) container parsing |
+| `libogg/` | Xiph.org | Ogg packets (required by libvorbis) |
+| `libvorbis/` | Xiph.org | Vorbis audio decoding |
+| `libopus/` | Xiph.org | Opus audio decoding |
 
-- 每個資料夾：`include/`、`lib/win64/release/`（Profile 與 Release，/MD）、`lib/win64/debug/`（/MDd）、`VERSION`（版本、來源 URL、SHA-256、編譯旗標）、授權檔。
-- 重建：`bash tools/build_sdks.sh`（輸出到這裡）。
-- 引入引擎：`tools/sync_sources.sh <engine-root>` 把整個資料夾複製到 `<engine>/Code/SDKs/CEVPlayer/`，CMake 模組 `Tools/CMake/modules/<lib>.cmake` 以 `${SDK_DIR}/CEVPlayer/<lib>` 定位。
-- SDL2 不在這裡：沿用引擎自帶的 `Code/SDKs/SDL2`。
+- Each folder contains `include/`, `lib/win64/release/` (Profile and Release, `/MD`), `lib/win64/debug/` (`/MDd`), `VERSION` (version, source URL, SHA-256, build flags) and the license files.
+- Rebuild: `bash tools/build_sdks.sh` (writes into this folder).
+- Engine integration: `tools/sync_sources.sh <engine-root>` copies this whole folder to `<engine>/Code/SDKs/CEVPlayer/`; the CMake modules `Tools/CMake/modules/<lib>.cmake` locate each library at `${SDK_DIR}/CEVPlayer/<lib>`.
+- SDL2 is not included here: the engine's own `Code/SDKs/SDL2` is used.
