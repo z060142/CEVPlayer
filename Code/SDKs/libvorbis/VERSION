@@ -1,0 +1,9 @@
+libvorbis 1.3.7
+Source:   https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz
+SHA-256:  b33cc4934322bcbf6efcbacf49e3ca01aadbea4114ec9589d1b1e9d20f72954b (release tarball, upstream tag v1.3.7)
+Build:    CMake (VS2022 generator, -DBUILD_SHARED_LIBS=OFF), Release flags: /Ox /GS- /DNDEBUG /D_RELEASE, Debug flags: /Z7 /Od /Ob0 /Oy- /RTC1 /GS /DDEBUG /D_DEBUG
+Depends:  libogg (include/ogg from Code/SDKs/libogg)
+Target:   Windows x64, MSVC (Visual Studio 2022 v143), static library
+CRT:      /MD (release, also Profile) and /MDd (debug), static library, x64, VS2022 v143
+Layout:   lib/win64/release = Release + Profile builds, lib/win64/debug = Debug builds
+Built by: tools/build_sdks.sh
