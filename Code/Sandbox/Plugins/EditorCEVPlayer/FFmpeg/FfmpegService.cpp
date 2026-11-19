@@ -381,7 +381,14 @@ namespace CEVEditor
 			error = reason;
 			return 0;
 		}
-		const ff::FfmpegPackage pkg = ff::PinnedFfmpegPackage();
+		ff::FfmpegPackage pkg = ff::PinnedFfmpegPackage();
+		// tests: CEV_EDITOR_FFMPEG_DOWNLOAD_URL replaces the URL (e.g. an unreachable host to see the connection failure message)
+		const QByteArray urlOverride = qgetenv("CEV_EDITOR_FFMPEG_DOWNLOAD_URL");
+		if (!urlOverride.isEmpty())
+		{
+			pkg.url = urlOverride.constData();
+			CryLogAlways("[CEVEditor] ffmpeg download: URL replaced by CEV_EDITOR_FFMPEG_DOWNLOAD_URL: %s", pkg.url.c_str());
+		}
 		return SubmitInstall(false, pkg.url, pkg.sha256, pkg.version, error);
 	}
 

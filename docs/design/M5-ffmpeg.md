@@ -71,7 +71,7 @@ Core/offline/tests/cevffmpeg_selftest.cpp
 
 ## 6. 下載（FfmpegInstall）
 
-- 外掛寫死 `kFfmpegMinimalVersion` 與 `kFfmpegMinimalSha256`。目前為 `"unreleased"` 與空字串：下載停用，`FfmpegDownloadDisabledReason()` 回傳說明（「尚未發佈最小版，請手動選擇 ffmpeg」）。第一次 CI 發佈後把 workflow 摘要印出的兩個值貼進標頭。
+- 外掛寫死 `kFfmpegMinimalVersion` 與 `kFfmpegMinimalSha256`。目前釘住 Release `ffmpeg-minimal-v8.0.3-cev1`：版本 `"8.0.3-cev1"`、SHA-256 `b89f1dee75a7f19ed2fbcc80f72d718fe415515399bc7199a1a1e88cded64033`（資產 `ffmpeg-minimal-8.0.3-cev1-win64.zip`，5,936,960 位元組，檔案在 zip 根目錄：`ffmpeg.exe`、`LICENSE`、`licenses/`、`BUILD.txt`…），下載啟用。兩個值為 `"unreleased"` 與空字串時下載停用，`FfmpegDownloadDisabledReason()` 回傳說明（「尚未發佈最小版，請手動選擇 ffmpeg」）。每次發佈新的 `ffmpeg-minimal-v*` 都要把兩個值一起更新。
 - URL：`https://github.com/z060142/CEVPlayer/releases/download/ffmpeg-minimal-v<版本>/ffmpeg-minimal-<版本>-win64.zip`。版本字串只允許 `[A-Za-z0-9._-]`（會進入路徑與 URL）。
 - 抓取經 `IFfmpegFetcher` 介面：`WinHttpFetcher`（系統元件，零額外相依；跟隨重新導向——GitHub 發佈資產會 302 到 CDN；只允許 https，loopback 才允許 http）與 `LocalFileFetcher`（自測 / 離線安裝）。
 - **先驗雜湊再解壓**：自己實作的 SHA-256（FIPS 180-4，附標準向量測試）。**雜湊不符 → 拒絕**（`Status::InvalidData`，訊息含實際與預期值），不解壓、刪除下載檔、保留舊的安裝。期望雜湊為空或格式錯誤也拒絕（絕不安裝未驗證的檔案）。
@@ -199,7 +199,8 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 ### 10.5 FFmpeg 缺少時的流程
 
 - 偵測：設定路徑、下載副本、PATH（`Locate` 順序不變）。
-- 互動（匯入對話框按 OK、`Generate variants...`、`Re-compress...`）：`EnsureUsableModal`。下載可用時提供「Download minimal build」與「Choose ffmpeg.exe...」（含授權 / 來源 / 雜湊驗證說明，下載有進度與取消）；`FfmpegDownloadDisabledReason()` 非空（目前釘住 `unreleased`）時視窗顯示原因，**只**提供手動選擇。選到的檔案再過一次能力檢查，不足就顯示缺少項目 / 被拒絕的原因。SHA-256 不符：庫拒絕並不解壓，訊息含實際與預期雜湊（視窗與 log 都會顯示）。
+- 互動（匯入對話框按 OK、`Generate variants...`、`Re-compress...`）：`EnsureUsableModal`。下載可用時提供「Download minimal build」與「Choose ffmpeg.exe...」（含授權 / 來源 / 雜湊驗證說明，下載有進度與取消）；`FfmpegDownloadDisabledReason()` 非空（未釘住 Release 時）時視窗顯示原因，**只**提供手動選擇。選到的檔案再過一次能力檢查，不足就顯示缺少項目 / 被拒絕的原因。SHA-256 不符：庫拒絕並不解壓，訊息含實際與預期雜湊（視窗與 log 都會顯示）。
+- 下載連線失敗（WinHTTP 12002 逾時、12007 無法解析名稱、12029 無法連線、12030 / 12031 連線中斷 / 重設、12152 無效回應、12157 / 12175 安全通道失敗）：`ExplainFfmpegDownloadFailure()` 把訊息改寫成白話：連線被擋或無法使用（常見是防火牆或資安軟體擋住編輯器），列出下載 URL 與預期 SHA-256，並說明手動路徑：用瀏覽器下載 zip、解壓到任意位置、在 Edit > Preferences > CEVPlayer/FFmpeg 設定 `ffmpeg.exe`（資訊欄 FFmpeg 區段的 Preferences 按鈕在失敗狀態也可用）。原始訊息（含錯誤碼）保留在結尾，log / 通知 / 工作清單顯示同一段文字。其他錯誤不改寫。測試用環境變數 `CEV_EDITOR_FFMPEG_DOWNLOAD_URL` 可替換下載 URL（例如不可達的位址）以觸發此訊息。
 - 非互動（console）：Absent 時拒絕並印出原因與設定方式；偵測仍進行中則 job 等待結果（`WaitForExe`）。
 
 ## 11. Console 指令
@@ -214,6 +215,7 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 | `cev_editor_variants <asset> <高度> [crf:N]` | 產生變體。 |
 | `cev_editor_recompress <asset> [crf:N] [height:PX] [variants:a,b 或 none] [refresh]` | 重新壓縮。 |
 | `cev_editor_ffmpeg_install_test <zip> <sha256> [版本]` | 測試用：下載流程用本機 zip（`LocalFileFetcher`），雜湊驗證 / staging / 安裝與真實下載相同。 |
+| `cev_editor_ffmpeg_download` | 測試用：資訊欄「Download minimal build」按鈕的同一個呼叫（`CFfmpegService::StartDownload`：WinHTTP 抓釘住的 Release、驗 SHA-256、安裝、重新偵測）。 |
 
 測試用環境變數：`CEV_EDITOR_SETTINGS`（設定檔位置）、`CEV_EDITOR_FFMPEG_NO_PATH=1`（偵測時不搜尋 PATH）。
 
@@ -237,7 +239,7 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 
 ## 13. 未驗證與限制
 
-- 真實下載（WinHTTP + GitHub Release）：釘住版本仍是 `unreleased`，UI 只驗到「停用 + 原因 + 只能手動選擇」的邏輯與本機 zip 的雜湊 / 安裝路徑；對話框（`EnsureUsableModal`、`Set up FFmpeg...`、進度對話框、下載按鈕）**沒有人工點過**，見 `manual-acceptance-M5.md`。
+- 真實下載（WinHTTP + GitHub Release）：已驗證（2026-11-19，測試機）。Sandbox 外：`cevffmpeg_selftest --real-download <暫存資料夾> --real-download-mp4 <h264.mp4>` 走同一個 `DownloadAndInstallFfmpeg` + `WinHttpFetcher`（含 GitHub 轉址）、驗 SHA-256、安裝到暫存資料夾，定位結果為 `ffmpeg 8.0.3 (downloaded copy)`、匯入無缺項，MP4 → WebM 轉檔並播放 60 格；錯誤雜湊被拒且不留檔。Sandbox 內：`cev_editor_ffmpeg_download` 下載安裝到 `%LOCALAPPDATA%\CEVPlayer\ffmpeg\8.0.3-cev1`，`cev_editor_ffmpeg_status` 為 ready / 8.0.3 / downloaded copy，H.264 MP4 匯入成 WebM、預覽自測 PASS；暫時改錯的釘住雜湊被拒（`SHA-256 mismatch`）且沒有安裝。同一台機器曾因本機防火牆擋住 Sandbox.exe（與新建的測試 exe）的連線而得到 WinHTTP 12029：這是機器特定的限制，處理方式見下一條。對話框（`EnsureUsableModal`、`Set up FFmpeg...`、進度對話框、下載按鈕）仍**沒有人工點過**，見 `manual-acceptance-M5.md`。
 - 匯入對話框、編輯器視窗拖放（單檔 / 多檔 / PNG 資料夾）、`Generate variants...` / `Re-compress...` 對話框、資訊欄 FFmpeg 區段與 Variants 表只經編譯與 console 路徑（同一組後端）驗證，沒有 UI 自動化。
 - 對話框的變體清單不事先探測來源高度（對話框時來源高度未知）：高度不低於影片者由 job 略過並記錄，不是灰掉（已存在資產的對話框則用已知高度灰掉）。
 - 失敗或取消後，匯入時新建的**空資料夾**會留下（檔案都已刪除）。

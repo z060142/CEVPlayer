@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "CEVOffline/FfmpegInstall.h"
 
 #include <algorithm>
@@ -173,6 +174,31 @@ namespace cev
 				return p;
 			}
 
+			bool IsFfmpegConnectionError(unsigned long e)
+			{
+				switch (e)
+				{
+				case 12002: case 12007: case 12029: case 12030: case 12031: case 12152: case 12157: case 12175:
+					return true;
+				default:
+					return false;
+				}
+			}
+
+			std::string ExplainFfmpegDownloadFailure(const std::string& fetchMessage, const FfmpegPackage& package)
+			{
+				const size_t at = fetchMessage.rfind("(error ");
+				if (at == std::string::npos)
+					return fetchMessage;
+				const unsigned long code = std::strtoul(fetchMessage.c_str() + at + 7, nullptr, 10);
+				if (!IsFfmpegConnectionError(code))
+					return fetchMessage;
+				return "The FFmpeg download could not connect: the connection was blocked or is unavailable (commonly a firewall or "
+					"security software blocking the editor, or no network). To continue manually: download " + package.url +
+					" with a browser, check that its SHA-256 is " + package.sha256 + ", unpack it anywhere and set the path to ffmpeg.exe in "
+					"Edit > Preferences > CEVPlayer/FFmpeg. [" + fetchMessage + "]";
+			}
+
 			Result LocalFileFetcher::Fetch(const std::string& urlIn, const std::string& dstFile, const Control& ctl)
 			{
 				using detail::Res;
@@ -325,6 +351,8 @@ namespace cev
 				if (!r.Ok())
 				{
 					fs::remove(zip, ec);
+					if (r.status != Status::Cancelled)
+						r.message = ExplainFfmpegDownloadFailure(r.message, package);
 					return r;
 				}
 				if (ctl.progress)

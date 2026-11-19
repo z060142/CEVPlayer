@@ -1,8 +1,8 @@
 // FfmpegInstall: download + verify + extract our minimal ffmpeg build.
 //
 //   * The plugin hard-codes the version and the SHA-256 of the release zip (kFfmpegMinimalVersion /
-//     kFfmpegMinimalSha256). Until a release exists they are "unreleased" / "": downloading is disabled and
-//     FfmpegDownloadDisabledReason() says so.
+//     kFfmpegMinimalSha256), currently the release ffmpeg-minimal-v8.0.3-cev1. Without a pinned release they are
+//     "unreleased" / "": downloading is then disabled and FfmpegDownloadDisabledReason() says so.
 //   * The zip comes through an IFfmpegFetcher (WinHTTP in the editor, a local file in the selftest). Its SHA-256 is
 //     checked BEFORE anything is extracted; a mismatch deletes the download and refuses (Status::InvalidData).
 //   * Extraction uses the Windows 10 (1803+) bsdtar in %SystemRoot%\System32\tar.exe, which reads zip archives.
@@ -24,8 +24,8 @@ namespace cev
 		namespace ffmpeg
 		{
 			// ---- pinned release (update both together with every new ffmpeg-minimal-v* release) ------------------------
-			constexpr const char* kFfmpegMinimalVersion = "unreleased";
-			constexpr const char* kFfmpegMinimalSha256 = ""; // 64 lower case hex digits of the release zip
+			constexpr const char* kFfmpegMinimalVersion = "8.0.3-cev1";
+			constexpr const char* kFfmpegMinimalSha256 = "b89f1dee75a7f19ed2fbcc80f72d718fe415515399bc7199a1a1e88cded64033"; // 64 lower case hex digits of the release zip
 			constexpr const char* kFfmpegMinimalRepo = "z060142/CEVPlayer";
 
 			// "ffmpeg-minimal-<version>-win64.zip"
@@ -100,6 +100,16 @@ namespace cev
 
 			// The pinned package (url built from the constants). Empty fields when download is disabled.
 			FfmpegPackage PinnedFfmpegPackage();
+
+			// Connection-class WinHTTP errors (12002 timeout, 12007 name not resolved, 12029 cannot connect, 12030 / 12031
+			// connection aborted / reset, 12152 invalid response, 12157 / 12175 secure channel failure).
+			bool IsFfmpegConnectionError(unsigned long winHttpError);
+			// Turns a failed fetch message into the text the editor shows. When it carries "(error N)" with a connection-class
+			// N, the result says in plain English that the connection was blocked or unavailable (commonly a firewall or
+			// security software blocking the editor), names the URL and the expected SHA-256 and explains the manual route
+			// (download with a browser, unpack, set ffmpeg.exe in Preferences > CEVPlayer/FFmpeg); the raw message is kept at
+			// the end. Any other message is returned unchanged. Pure function (no network).
+			std::string ExplainFfmpegDownloadFailure(const std::string& fetchMessage, const FfmpegPackage& package);
 
 			// Verifies `zipPath` against `expectedSha256` and installs it into installDir (see the header comment).
 			// Status::InvalidData on a hash mismatch (nothing extracted, the zip is NOT deleted: the caller owns it).
