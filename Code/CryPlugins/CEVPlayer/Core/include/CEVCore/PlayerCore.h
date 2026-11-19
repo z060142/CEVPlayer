@@ -32,6 +32,13 @@ namespace cev
 {
 	enum class LoadState : uint8_t { Unloaded, Loading, Ready, Failed };
 	enum class PlayerState : uint8_t { Stopped, Playing, Paused, Ended };
+	// What the video worker does for a player whose picture nobody sees (PlayerCore::SetVisible).
+	//   Visible:    normal decoding into the frame ring.
+	//   DecodeOnly: hidden; packets are decoded up to the clock (decoder state stays current) but no ring slot is
+	//               taken, nothing is copied, converted or presented.
+	//   Stopped:    hidden longer than the stop threshold; no video packet is decoded at all.
+	// The clock and the audio are not affected by any of them.
+	enum class VideoVisibility : uint8_t { Visible, DecodeOnly, Stopped };
 
 	struct PlayerConfig
 	{
@@ -145,6 +152,19 @@ namespace cev
 		bool IsLooping() const;
 		double GetTime() const;              // media clock, clamped to the duration
 		uint32_t GetLoopCount() const;       // completed loops
+
+		// ---- visibility (consumer thread) ----
+		// Call once per frame before Update(). `dtSeconds` is the caller's time since the previous call; the stop
+		// threshold is accumulated from it (no wall clock is read). Hidden: DecodeOnly at once, Stopped after
+		// SetHiddenStopSeconds() of continuous hiding (<= 0: never). Visible again: from DecodeOnly the output simply
+		// resumes; from Stopped the video decoder catches up in skip mode from the keyframe before the clock time
+		// (or from where it stopped, when that is later) and the last presented frame stays current meanwhile
+		// (StatsSnapshot::lastCatchUpMs / lastCatchUpFrames). While not Visible the end of a non looping video and
+		// the loop wrap follow the clock and the duration only. Survives Load() / Unload() (the state is reset to
+		// Visible by Unload()).
+		void SetVisible(bool visible, double dtSeconds);
+		void SetHiddenStopSeconds(double seconds); // default 2.0
+		VideoVisibility GetVisibility() const;
 
 		// ---- presenting (consumer thread) ----
 		// Asks the clock which frame is due. Returns true when a new frame became current (upload it).

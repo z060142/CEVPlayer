@@ -1060,5 +1060,9 @@ namespace cev
 		return d.loadState.load(std::memory_order_acquire) == LoadState::Ready && d.VideoAtEnd();
 	}
 
+	void PlayerCore::SetVisible(bool, double) {}
+	void PlayerCore::SetHiddenStopSeconds(double) {}
+	VideoVisibility PlayerCore::GetVisibility() const { return VideoVisibility::Visible; }
+
 	uint32_t PlayerCore::DecodeErrors() const { return m_impl->decodeErrors.load(std::memory_order_relaxed); }
 }

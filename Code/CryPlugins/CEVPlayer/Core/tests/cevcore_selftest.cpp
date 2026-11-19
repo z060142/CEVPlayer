@@ -542,6 +542,29 @@ namespace
 		c = PickDescriptorVariant(d, -1, true, 500, &PlanExists, &files);
 		CHECK(c.variant == -1 && c.missingFile == "v/main_540.webm"); // 540 chosen but missing
 		CHECK(DescriptorAvOffsetSeconds(d) == 0.0);
+
+		// M7: start-of-playback choice by the aggregated on-screen pixel height (360 / 720 / 1080 variants)
+		VideoDescriptor h;
+		h.video = "h/main.webm";
+		std::vector<std::string> hfiles = { "h/main.webm", "h/v360.webm", "h/v720.webm", "h/v1080.webm" };
+		VideoDescriptor::SVariant h1080; h1080.file = "h/v1080.webm"; h1080.width = 1920; h1080.height = 1080;
+		VideoDescriptor::SVariant h360; h360.file = "h/v360.webm"; h360.width = 640; h360.height = 360;
+		VideoDescriptor::SVariant h720; h720.file = "h/v720.webm"; h720.width = 1280; h720.height = 720;
+		h.variants = { h1080, h360, h720 };
+		c = PickDescriptorVariant(h, -1, true, 300, &PlanExists, &hfiles);
+		CHECK(c.variant == 2 && c.videoPath == "h/v360.webm");
+		c = PickDescriptorVariant(h, -1, true, 700, &PlanExists, &hfiles);
+		CHECK(c.variant == 3 && c.videoPath == "h/v720.webm");
+		c = PickDescriptorVariant(h, -1, true, 1000, &PlanExists, &hfiles);
+		CHECK(c.variant == 1 && c.videoPath == "h/v1080.webm");
+		c = PickDescriptorVariant(h, -1, true, 0, &PlanExists, &hfiles);
+		CHECK(c.variant == -1 && c.videoPath == "h/main.webm"); // unknown height: the main video, not the smallest
+		c = PickDescriptorVariant(h, -1, true, -5, &PlanExists, &hfiles);
+		CHECK(c.variant == -1 && c.videoPath == "h/main.webm");
+		c = PickDescriptorVariant(h, 3, true, 300, &PlanExists, &hfiles);
+		CHECK(c.variant == 3); // a forced variant wins over the height
+		c = PickDescriptorVariant(h, 0, true, 300, &PlanExists, &hfiles);
+		CHECK(c.variant == -1); // forced main video
 	}
 
 	void TestStatusAndSources()
@@ -3475,6 +3498,146 @@ namespace
 }
 
 // =====================================================================================================================
+	// ---------------------------------------------------------------------------------------------------------------
+	// M7: visibility (decode only / stopped / catch-up) and the end of playback while hidden
+	// ---------------------------------------------------------------------------------------------------------------
+	//! One hidden frame step: no waiting for frames (nothing is presented while hidden).
+	bool HiddenStep(PlayerCore& p, ManualClock& clk, double step)
+	{
+		p.SetVisible(false, step);
+		const bool fresh = p.Update();
+		clk.Advance(step);
+		return fresh;
+	}
+
+	void TestHiddenCatchUp(const Clip& clip, uint32_t keyframeInterval)
+	{
+		g_context = std::string("hidden ") + clip.file;
+		ManualClock clk;
+		PlayerCore p(MakeConfig(clk));
+		if (!LoadAndWait(p, ClipPath(clip), true))
+			return;
+		const MediaInfo& info = p.GetInfo();
+		const double step = 1.0 / 60.0;
+		const double period = 1.0 / info.frameRate;
+		p.SetHiddenStopSeconds(1.0);
+		Sim sim;
+		sim.Init(p, clk);
+		CHECK(p.GetVisibility() == VideoVisibility::Visible);
+		CHECK(Succeeded(p.Play()));
+		for (int i = 0; i < 30; ++i)
+		{
+			p.SetVisible(true, step);
+			CHECK(sim.Step());
+		}
+		CHECK(sim.presented > 5);
+
+		// --- phase A: hidden for 0.5 s (decode only)
+		const uint64_t presentedA = p.GetStats().framesPresented;
+		bool freshWhileHidden = HiddenStep(p, clk, step);
+		CHECK(p.GetVisibility() == VideoVisibility::DecodeOnly);
+		std::this_thread::sleep_for(std::chrono::milliseconds(50)); // a frame in flight at the switch settles
+		const StatsSnapshot a0 = p.GetStats();
+		const double tA0 = clk.NowSeconds();
+		for (int i = 0; i < 29; ++i)
+			freshWhileHidden = HiddenStep(p, clk, step) || freshWhileHidden;
+		const double tA = clk.NowSeconds();
+		const uint64_t expectA = static_cast<uint64_t>((tA - tA0) / period) - 2;
+		CHECKF(WaitFor([&] { return p.GetStats().framesDecodeOnly - a0.framesDecodeOnly >= expectA; }, 5000),
+			"decode only frames %llu, expected >= %llu", (unsigned long long)(p.GetStats().framesDecodeOnly - a0.framesDecodeOnly), (unsigned long long)expectA);
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		const StatsSnapshot a1 = p.GetStats();
+		CHECK(!freshWhileHidden);
+		CHECK(a1.framesPresented == presentedA);
+		CHECKF(a1.copyBytes == a0.copyBytes && a1.colorBytes == a0.colorBytes, "copy %llu -> %llu, colour %llu -> %llu",
+			(unsigned long long)a0.copyBytes, (unsigned long long)a1.copyBytes, (unsigned long long)a0.colorBytes, (unsigned long long)a1.colorBytes);
+		// the decoder keeps pace with the clock but does not run ahead of it
+		CHECKF(a1.framesDecodeOnly - a0.framesDecodeOnly <= static_cast<uint64_t>((tA - tA0) / period) + 3,
+			"decode only ran ahead: %llu frames in %.3f s", (unsigned long long)(a1.framesDecodeOnly - a0.framesDecodeOnly), tA - tA0);
+
+		// --- visible again after the first stage: output resumes without a catch-up
+		p.SetVisible(true, step);
+		CHECK(p.GetVisibility() == VideoVisibility::Visible);
+		const uint64_t before = sim.presented;
+		CHECK(sim.RunUntilPresented(before + 1));
+		FrameView fv;
+		CHECK(p.GetFrame(fv));
+		CHECKF(std::fabs(fv.pts - p.GetTime()) <= 2.0 * period + step, "resumed frame pts %.3f at clock %.3f", fv.pts, p.GetTime());
+		CHECK(p.GetStats().catchUps == 0);
+
+		// --- phase B: hidden for 1.5 s (decode only, then stopped after 1.0 s)
+		int steps = 0;
+		while (p.GetVisibility() != VideoVisibility::Stopped && steps < 200)
+		{
+			HiddenStep(p, clk, step);
+			++steps;
+		}
+		CHECKF(steps >= 59 && steps <= 61, "stopped after %d hidden steps (threshold 1.0 s = 60 steps)", steps);
+		std::this_thread::sleep_for(std::chrono::milliseconds(80));
+		const uint64_t stoppedAt = p.GetStats().framesDecodeOnly;
+		for (int i = 0; i < 30; ++i)
+			HiddenStep(p, clk, step);
+		std::this_thread::sleep_for(std::chrono::milliseconds(80));
+		CHECKF(p.GetStats().framesDecodeOnly == stoppedAt, "decoding went on while stopped: %llu -> %llu",
+			(unsigned long long)stoppedAt, (unsigned long long)p.GetStats().framesDecodeOnly);
+
+		// --- visible: catch up from the keyframe before the clock, then present at the clock
+		p.SetVisible(true, step);
+		CHECK(p.GetVisibility() == VideoVisibility::Visible);
+		const uint64_t beforeB = sim.presented;
+		CHECK(sim.RunUntilPresented(beforeB + 1));
+		CHECK(WaitFor([&] { return p.GetStats().catchUps == 1; }, 5000));
+		const StatsSnapshot b = p.GetStats();
+		CHECK(p.GetFrame(fv));
+		CHECKF(std::fabs(fv.pts - p.GetTime()) <= 2.0 * period + step, "frame after catch-up pts %.3f at clock %.3f", fv.pts, p.GetTime());
+		CHECKF(b.lastCatchUpFrames <= keyframeInterval, "catch-up decoded %u frames (keyframe interval %u)", b.lastCatchUpFrames, keyframeInterval);
+		CHECKF(b.lastCatchUpMs > 0.0f, "catch-up time %.3f ms", b.lastCatchUpMs);
+		Log("  %-34s ok: decode only %llu frames in %.2f s, stopped after %d steps, catch-up %u frames %.2f ms\n", g_context.c_str(),
+			(unsigned long long)(a1.framesDecodeOnly - a0.framesDecodeOnly), tA - tA0, steps, b.lastCatchUpFrames, b.lastCatchUpMs);
+
+		// Unload resets the visibility
+		p.SetVisible(false, step);
+		p.Unload();
+		CHECK(p.GetVisibility() == VideoVisibility::Visible);
+	}
+
+	void TestHiddenEnd(const Clip& clip)
+	{
+		const double step = 1.0 / 60.0;
+		for (int pass = 0; pass < 2; ++pass)
+		{
+			const bool loop = pass == 1;
+			g_context = std::string(loop ? "hidden loop " : "hidden end ") + clip.file;
+			ManualClock clk;
+			PlayerCore p(MakeConfig(clk));
+			if (!LoadAndWait(p, ClipPath(clip), true))
+				return;
+			const double duration = p.GetInfo().durationSeconds;
+			p.SetHiddenStopSeconds(0.2);
+			CHECK(Succeeded(p.SetLoop(loop)));
+			CHECK(Succeeded(p.Play()));
+			double tEvent = -1.0;
+			for (int i = 0; i < static_cast<int>((duration + 2.0) / step) && tEvent < 0.0; ++i)
+			{
+				const double before = clk.NowSeconds();
+				HiddenStep(p, clk, step);
+				if (!loop && p.GetState() == PlayerState::Ended)
+					tEvent = before;
+				if (loop && p.GetLoopCount() == 1)
+					tEvent = before;
+			}
+			CHECK(p.GetVisibility() == VideoVisibility::Stopped);
+			CHECKF(tEvent >= duration - 1e-3 - step && tEvent <= duration + step + 1e-6, "%s at clock %.3f, duration %.3f",
+				loop ? "wrap" : "end", tEvent, duration);
+			if (loop)
+			{
+				CHECK(p.GetState() == PlayerState::Playing);
+				CHECK(p.GetTime() < 0.1);
+			}
+			Log("  %-34s ok: %s at clock %.3f (duration %.3f)\n", g_context.c_str(), loop ? "wrap" : "Ended", tEvent, duration);
+		}
+	}
+
 int main(int argc, char** argv)
 {
 #if defined(CEV_DEFAULT_MEDIA_DIR)
@@ -3580,6 +3743,11 @@ int main(int argc, char** argv)
 		TestMidStreamResize();
 		TestAudioThreadVersusUnload();
 		TestWorkerExceptions();
+	}
+	if (wanted("hidden"))
+	{
+		TestHiddenCatchUp(*FindClip("vp8_vorbis.webm"), 50); // -g 50: a keyframe every 2 s
+		TestHiddenEnd(*FindClip("vp9_odd_321x181.webm"));
 	}
 	if (wanted("stress"))
 		TestStress(stressIterations);
