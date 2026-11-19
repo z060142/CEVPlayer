@@ -8,12 +8,15 @@
 #include <AssetSystem/Asset.h>
 #include <AssetSystem/AssetManager.h>
 #include <IEditor.h>
+#include <IResourceSelectorHost.h>
 #include <PathUtils.h>
+#include <CrySerialization/IArchiveHost.h>
 
 #include <QFile>
 #include <QIcon>
 #include <QPixmap>
 #include <QPointer>
+#include <QScrollArea>
 #include <QTimer>
 
 #include <QToolWindowManager/QToolWindowManager.h>
@@ -21,6 +24,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <functional>
+#include <iterator>
 #include <vector>
 #include <cstdlib>
 #include <cstring>
@@ -30,6 +36,7 @@
 
 #include "AutoScript.h"
 #include "Asset/ImportQueue.h"
+#include "Asset/Sha256.h"
 #include "Asset/VideoImport.h"
 #include "Editor/VideoEditor.h"
 #include "FFmpeg/FfmpegService.h"
@@ -61,6 +68,18 @@ namespace
 				if (CEVEditor::CFfmpegService* const pService = CEVEditor::CFfmpegService::Get())
 					pService->EnsureDetected(); // lazy detection of ffmpeg on a job thread, cached
 			}
+			else if (event == eNotify_OnIdleUpdate && !m_preferencesReady)
+			{
+				// the first idle update comes after the editor loaded the preferences (CEditorImpl::InitFinished): the old
+				// settings file can be imported into the preference page now, and the FFmpeg service takes the value over
+				m_preferencesReady = true;
+				CEVEditor::MigrateLegacyEditorSettings();
+				if (CEVEditor::CFfmpegService* const pService = CEVEditor::CFfmpegService::Get())
+				{
+					pService->ReloadConfiguredPath();
+					pService->EnsureDetected();
+				}
+			}
 			else if (event == eNotify_OnQuit)
 			{
 				if (CEVEditor::CImportQueue* const pQueue = CEVEditor::CImportQueue::Get())
@@ -75,6 +94,9 @@ namespace
 				}
 			}
 		}
+
+	private:
+		bool m_preferencesReady = false;
 	};
 	CQuitListener* g_pQuitListener = nullptr;
 
@@ -304,7 +326,7 @@ namespace
 			return;
 		if (pArgs->GetArgCount() < 2)
 		{
-			CryLogAlways("[CEVEditor] usage: cev_editor_ffmpeg_path <path to ffmpeg.exe or its folder | -> (stored in %s)", EditorSettingsPath().c_str());
+			CryLogAlways("[CEVEditor] usage: cev_editor_ffmpeg_path <path to ffmpeg.exe or its folder | -> (stored in the editor preferences, %s)", CEVEditor::kPreferencesPagePath);
 			return;
 		}
 		std::string path = pArgs->GetArg(1);
@@ -749,6 +771,341 @@ namespace
 		PreviewTestWaitReady(t);
 	}
 
+	// ---- cev_editor_info_test [legacy:<asset.cevvideo>] [alt:<abs .webm>] [trigger:<name>] [ffmpeg:<path>] ----
+	// Self test of the info panel's engine facilities on the asset open in the video editor (E1): descriptor edits through the
+	// property tree's serialization path -> modified -> Save -> values on disk; the ACE trigger selector; the engine's Reimport with
+	// the stored settings; source check by size / time (touch -> confirmed by hash; new content -> reimport needed -> Reimport);
+	// the FFmpeg path preference (and the one-time import of the old settings file). `legacy:` also checks that an asset imported
+	// before E1 got its source file registered when it was opened. The asset is modified (use a scratch asset). One PASS / FAIL line.
+	struct SInfoTest
+	{
+		std::string legacy;
+		std::string alt;
+		std::string trigger = "mute_all";
+		std::string ffmpeg = "T:/cev/e1/pref_test/ffmpeg.exe";
+		QPointer<CEVEditor::CVideoEditor> editor;
+		std::string metadataRel;
+		std::string copyAbs;
+		std::string settingsBefore;
+		std::string prefBefore;
+		int checks = 0;
+		int failed = 0;
+		int waitedMs = 0;
+
+		void Check(bool ok, const char* what, const std::string& detail = std::string())
+		{
+			++checks;
+			if (!ok)
+				++failed;
+			CryLogAlways("[CEVEditor] info_test: %s %s%s%s", ok ? "ok  " : "FAIL", what, detail.empty() ? "" : ": ", detail.c_str());
+		}
+		CAsset* Asset() const { return CEVEditor::CVideoEditor::Current() != nullptr && editor ? editor->GetAssetBeingEdited() : nullptr; }
+	};
+	bool g_infoTestRunning = false;
+
+	void InfoTestEnd(const std::shared_ptr<SInfoTest>& t)
+	{
+		CryLogAlways("[CEVEditor] info_test: %s (%d checks, %d failed)", t->failed == 0 ? "PASS" : "FAIL", t->checks, t->failed);
+		g_infoTestRunning = false;
+	}
+
+	std::string ReadTextFile(const std::string& abs)
+	{
+		std::ifstream in(std::filesystem::u8path(abs), std::ios::binary);
+		return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+	}
+
+	//! Waits (event loop) until the editor's source check has a result, then calls `next`.
+	void InfoTestWaitSource(std::shared_ptr<SInfoTest> t, std::function<void(std::shared_ptr<SInfoTest>)> next)
+	{
+		if (t->editor && !t->editor->State().source.checked && t->waitedMs < 30000)
+		{
+			t->waitedMs += 100;
+			QTimer::singleShot(100, [t, next]() { InfoTestWaitSource(t, next); });
+			return;
+		}
+		t->waitedMs = 0;
+		next(t);
+	}
+
+	void InfoTestPreferences(std::shared_ptr<SInfoTest> t)
+	{
+		using namespace CEVEditor;
+		CFfmpegService* const pService = CFfmpegService::Get();
+		// the old settings file (CEV_EDITOR_SETTINGS of the runner) was imported once at the first idle update
+		const std::string legacyValue = LoadEditorSetting(SettingKey::kFfmpegPath);
+		t->Check(gCevEditorPreferences.legacySettingsImported, "old settings file was looked at once (preference remembers it)", EditorSettingsPath());
+		if (!legacyValue.empty())
+			t->Check(std::string(gCevEditorPreferences.ffmpegPath.c_str()) == legacyValue, "FFmpeg path imported from the old settings file", std::string(gCevEditorPreferences.ffmpegPath.c_str()));
+		t->Check(!MigrateLegacyEditorSettings(), "the import runs only once");
+		t->prefBefore = gCevEditorPreferences.ffmpegPath.c_str();
+		// the Preferences window writes the page through its Serialize (edit archive); here the JSON archive does the same input
+		auto setThroughPage = [](const std::string& value) -> bool
+		{
+			SCevEditorPreferences page;
+			page.ffmpegPath = value.c_str();
+			page.legacySettingsImported = gCevEditorPreferences.legacySettingsImported;
+			DynArray<char> buffer;
+			Serialization::IArchiveHost* const pHost = gEnv->pSystem->GetArchiveHost();
+			if (!pHost->SaveJsonBuffer(buffer, Serialization::SStruct(page)) || !pHost->LoadJsonBuffer(Serialization::SStruct(gCevEditorPreferences), buffer.data(), buffer.size()))
+				return false;
+			GetIEditor()->GetPreferences()->Save();
+			return true;
+		};
+		t->Check(setThroughPage(t->ffmpeg), "FFmpeg path set through the preference page", t->ffmpeg);
+		QTimer::singleShot(1500, [t, pService, setThroughPage]()
+		{
+			const std::string configured = pService != nullptr ? pService->ConfiguredPath() : std::string();
+			t->Check(configured == t->ffmpeg, "FFmpeg service took the preference over", configured);
+			gEnv->pConsole->ExecuteString("cev_editor_ffmpeg_status");
+			const std::string described = pService != nullptr ? DescribeStatus(pService->Status()) : std::string();
+			t->Check(described.find("configured path: " + t->ffmpeg) != std::string::npos, "cev_editor_ffmpeg_status shows it", described.substr(0, 300));
+			// back to what it was (the runner restores the whole settings folder anyway)
+			t->Check(setThroughPage(t->prefBefore), "FFmpeg path preference restored", t->prefBefore.empty() ? "(empty)" : t->prefBefore);
+			QTimer::singleShot(1500, [t]() { InfoTestEnd(t); });
+		});
+	}
+
+	void InfoTestAfterSecondReimport(std::shared_ptr<SInfoTest> t)
+	{
+		using namespace CEVEditor;
+		const SSourceStatus& s = t->editor->State().source;
+		t->Check(s.checked && !s.reimportNeeded && s.copyMatchesImport, "after Reimport: source up to date", s.text);
+		CAsset* const pAsset = t->Asset();
+		if (pAsset != nullptr)
+		{
+			std::string sha;
+			CEVEditor::Sha256File(t->copyAbs, sha);
+			t->Check(CDetails(*pAsset).Get(DetailKey::kSourceSha256) == sha, "Reimport recorded the hash of the new source content");
+			t->Check(CDetails(*pAsset).Get(DetailKey::kImportSettings) == t->settingsBefore, "import settings unchanged by the second Reimport", CDetails(*pAsset).Get(DetailKey::kImportSettings));
+		}
+		InfoTestPreferences(t);
+	}
+
+	void InfoTestAfterContentChange(std::shared_ptr<SInfoTest> t)
+	{
+		using namespace CEVEditor;
+		const SSourceStatus& s = t->editor->State().source;
+		t->Check(s.checked && s.reimportNeeded, "new source content: reimport needed", s.text);
+		const bool started = t->editor->Reimport();
+		t->Check(started, "Reimport (CAsset::Reimport) after the content change");
+		QTimer::singleShot(300, [t]() { InfoTestWaitSource(t, InfoTestAfterSecondReimport); });
+	}
+
+	void InfoTestAfterTouch(std::shared_ptr<SInfoTest> t)
+	{
+		using namespace CEVEditor;
+		const SSourceStatus& s = t->editor->State().source;
+		t->Check(s.checked && s.hashed && s.copyMatchesImport && !s.reimportNeeded, "touched source: hash says unchanged", s.text);
+		QTimer::singleShot(1500, [t]()
+		{
+			CAsset* const pAsset = t->Asset();
+			const std::string stamp = pAsset != nullptr ? CDetails(*pAsset).Get(DetailKey::kSourceStamp) : std::string();
+			t->Check(!stamp.empty() && stamp == FileStamp(t->copyAbs), "new size / time stamp recorded (next check without hash)", stamp);
+			t->editor->RecheckSource();
+			const SSourceStatus& again = t->editor->State().source;
+			t->Check(again.checked && !again.hashed && !again.confirming, "check again: stat only, no hash", again.text);
+			if (t->alt.empty())
+			{
+				t->Check(false, "alt:<webm> given for the content change");
+				InfoTestPreferences(t);
+				return;
+			}
+			std::string error;
+			if (pAsset == nullptr || !ReleaseAssetFiles(t->metadataRel, pAsset->GetGUID(), 10000, error))
+				t->Check(false, "release the files before replacing the source", error);
+			std::error_code ec;
+			std::filesystem::copy_file(std::filesystem::u8path(t->alt), std::filesystem::u8path(t->copyAbs), std::filesystem::copy_options::overwrite_existing, ec);
+			t->Check(!ec, "source file replaced by other content", t->alt + (ec ? " -> " + ec.message() : std::string()));
+			t->editor->RecheckSource();
+			t->Check(t->editor->State().source.confirming, "after the replacement: needs confirmation");
+			InfoTestWaitSource(t, InfoTestAfterContentChange);
+		});
+	}
+
+	void InfoTestAfterReimport(std::shared_ptr<SInfoTest> t)
+	{
+		using namespace CEVEditor;
+		CAsset* const pAsset = t->Asset();
+		if (pAsset == nullptr)
+		{
+			t->Check(false, "asset still open after Reimport");
+			InfoTestEnd(t);
+			return;
+		}
+		const CDetails details(*pAsset);
+		t->Check(details.Get(DetailKey::kImportSettings) == t->settingsBefore, "import settings unchanged by Reimport", details.Get(DetailKey::kImportSettings));
+		t->Check(details.Get(DetailKey::kImportState) == "ready", "import state ready after Reimport");
+		t->Check(!pAsset->GetSourceFile().empty(), "source file still registered after Reimport", pAsset->GetSourceFile().c_str());
+		const SSourceStatus& s = t->editor->State().source;
+		t->Check(s.checked && !s.reimportNeeded, "source up to date after Reimport", s.text);
+		// touch: new modification time, same content
+		std::string error;
+		ReleaseAssetFiles(t->metadataRel, pAsset->GetGUID(), 10000, error);
+		std::error_code ec;
+		const auto now = std::filesystem::file_time_type::clock::now();
+		std::filesystem::last_write_time(std::filesystem::u8path(t->copyAbs), now, ec);
+		t->Check(!ec, "source file touched", ec ? ec.message() : FileStamp(t->copyAbs));
+		t->editor->RecheckSource();
+		const SSourceStatus& pending = t->editor->State().source;
+		t->Check(pending.confirming && !pending.checked, "touched source: needs confirmation", pending.text);
+		InfoTestWaitSource(t, InfoTestAfterTouch);
+	}
+
+	void InfoTestStart(std::shared_ptr<SInfoTest> t)
+	{
+		using namespace CEVEditor;
+		CVideoEditor* const pEditor = t->editor.data();
+		CVideoInfoPanel* const pPanel = pEditor != nullptr ? pEditor->InfoPanel() : nullptr;
+		CAsset* const pAsset = t->Asset();
+		if (pPanel == nullptr || pAsset == nullptr)
+		{
+			t->Check(false, "an open video editor with an asset and an info panel");
+			InfoTestEnd(t);
+			return;
+		}
+		t->metadataRel = pAsset->GetMetadataFile().c_str();
+		const CDetails details(*pAsset);
+		t->copyAbs = AssetsAbsolute(details.Get(DetailKey::kSourcePath));
+		t->settingsBefore = details.Get(DetailKey::kImportSettings);
+
+		// ---- legacy asset: the source file was registered when it was opened
+		if (!t->legacy.empty())
+		{
+			CAsset* const pLegacy = CAssetManager::GetInstance()->FindAssetForMetadata((t->legacy + ".cryasset").c_str());
+			if (pLegacy == nullptr)
+			{
+				t->Check(false, "legacy asset found", t->legacy);
+			}
+			else
+			{
+				const std::string expected = CDetails(*pLegacy).Get(DetailKey::kSourcePath);
+				t->Check(!expected.empty() && _stricmp(pLegacy->GetSourceFile().c_str(), expected.c_str()) == 0, "legacy asset: source file registered", std::string(pLegacy->GetSourceFile().c_str()) + " (Details sourcePath " + expected + ")");
+				const std::string xml = ReadTextFile(AssetsAbsolute(pLegacy->GetMetadataFile().c_str()));
+				t->Check(xml.find("source=\"" + FileNameOf(expected) + "\"") != std::string::npos, "legacy asset: .cryasset on disk has the source attribute", "source=\"" + FileNameOf(expected) + "\"");
+				t->Check(pLegacy->HasSourceFile() && pLegacy->GetType()->IsImported(), "legacy asset: Reimport available (IsImported && HasSourceFile, the Asset Browser's condition)");
+			}
+		}
+		t->Check(pAsset->HasSourceFile() && pAsset->GetType()->IsImported() && !pAsset->IsImmutable(), "test asset: Reimport available (IsImported && HasSourceFile && !immutable)", pAsset->GetSourceFile().c_str());
+
+		// ---- descriptor through the property tree's serialization path
+		SDescriptor d = pPanel->EditedDescriptor();
+		d.avOffsetMs = 123.5;
+		SDescriptor::SMarker marker;
+		marker.name = "e1_marker";
+		marker.time = 1.25;
+		d.markers.push_back(marker);
+		const bool hasLanguage = !d.languages.empty();
+		if (hasLanguage)
+			d.languages.front().trigger = t->trigger;
+		pAsset->SetModified(false);
+		std::string error;
+		const bool applied = pPanel->ApplyThroughSerializationForTest(d, error);
+		t->Check(applied, "edit applied through SDescriptor::Serialize (JSON archive -> tree object -> tree change handler)", error);
+		const SDescriptor& state = pEditor->State().descriptor;
+		t->Check(pAsset->IsModified(), "asset is modified after the edit");
+		t->Check(state.avOffsetMs == 123.5, "A/V offset in the editor", std::to_string(state.avOffsetMs));
+		const bool markerInState = std::any_of(state.markers.begin(), state.markers.end(), [](const SDescriptor::SMarker& m) { return m.name == "e1_marker" && std::fabs(m.time - 1.25) < 1e-9; });
+		t->Check(markerInState, "marker in the editor");
+		const SStaticResourceSelectorEntry* const pSelector = GetIEditor()->GetResourceSelectorHost() != nullptr ? GetIEditor()->GetResourceSelectorHost()->GetSelector("AudioTrigger") : nullptr;
+		t->Check(pSelector != nullptr, "the AudioTrigger resource selector is registered (Audio Controls Editor)");
+		if (hasLanguage)
+			t->Check(!state.languages.empty() && state.languages.front().trigger == t->trigger, "language trigger field took an existing trigger name", t->trigger);
+		else
+			t->Check(true, "language trigger", "the asset has no language");
+
+		// ---- save, then the file on disk
+		const bool saved = pEditor->OnSave();
+		t->Check(saved && !pAsset->IsModified(), "saved (not modified any more)");
+		SDescriptor disk;
+		const bool read = LoadDescriptor(AssetsAbsolute(DescriptorRel(*pAsset)), disk, error);
+		t->Check(read && disk.avOffsetMs == 123.5, "A/V offset on disk after reloading", read ? std::to_string(disk.avOffsetMs) : error);
+		t->Check(read && std::any_of(disk.markers.begin(), disk.markers.end(), [](const SDescriptor::SMarker& m) { return m.name == "e1_marker" && std::fabs(m.time - 1.25) < 1e-6; }), "marker on disk after reloading");
+		if (hasLanguage)
+			t->Check(read && !disk.languages.empty() && disk.languages.front().trigger == t->trigger, "trigger on disk after reloading");
+		pEditor->RefreshAssetState();
+		t->Check(pPanel->EditedDescriptor().avOffsetMs == 123.5, "property tree shows the saved value after the reload");
+
+		// ---- the engine's Reimport with the stored settings
+		InfoTestWaitSource(t, [](std::shared_ptr<SInfoTest> t2)
+		{
+			const bool started = t2->editor && t2->editor->Reimport();
+			t2->Check(started, "Reimport (CAsset::Reimport -> CVideoAssetImporter::ReimportAsset)");
+			QTimer::singleShot(300, [t2]() { InfoTestWaitSource(t2, InfoTestAfterReimport); });
+		});
+	}
+
+	void CmdInfoTest(IConsoleCmdArgs* pArgs)
+	{
+		using namespace CEVEditor;
+		if (g_infoTestRunning)
+		{
+			CryLogAlways("[CEVEditor] info_test: already running");
+			return;
+		}
+		auto t = std::make_shared<SInfoTest>();
+		for (int i = 1; i < pArgs->GetArgCount(); ++i)
+		{
+			const std::string arg = pArgs->GetArg(i);
+			auto value = [&arg](const char* key) -> const char*
+			{
+				const size_t n = std::strlen(key);
+				return arg.compare(0, n, key) == 0 && arg.size() > n && (arg[n] == ':' || arg[n] == '=') ? arg.c_str() + n + 1 : nullptr;
+			};
+			if (const char* v = value("legacy")) t->legacy = v;
+			else if (const char* v = value("alt")) t->alt = v;
+			else if (const char* v = value("trigger")) t->trigger = v;
+			else if (const char* v = value("ffmpeg")) t->ffmpeg = v;
+			else CryLogAlways("[CEVEditor] info_test: unknown argument '%s'", arg.c_str());
+		}
+		t->editor = CVideoEditor::Current();
+		g_infoTestRunning = true;
+		InfoTestStart(t);
+	}
+
+	// cev_editor_info_grab png:<path>: saves the info panel of the open video editor as PNG (QWidget::grab): <path> is the
+	// visible part, <path without .png>_full.png the whole scrolled content
+	void CmdInfoGrab(IConsoleCmdArgs* pArgs)
+	{
+		using namespace CEVEditor;
+		std::string png;
+		for (int i = 1; i < pArgs->GetArgCount(); ++i)
+		{
+			const std::string arg = pArgs->GetArg(i);
+			if (arg.compare(0, 4, "png:") == 0 || arg.compare(0, 4, "png=") == 0)
+				png = arg.substr(4);
+			else if (!png.empty())
+				png += " " + arg; // a path with spaces arrives as several arguments
+		}
+		CVideoEditor* const pEditor = CVideoEditor::Current();
+		CVideoInfoPanel* const pPanel = pEditor != nullptr ? pEditor->InfoPanel() : nullptr;
+		if (pPanel == nullptr || png.empty())
+		{
+			CryLogAlways("[CEVEditor] info_grab: FAILED (%s)", png.empty() ? "usage: cev_editor_info_grab png:<path>" : "no info panel");
+			return;
+		}
+		const QPixmap visible = pPanel->grab();
+		const bool ok1 = !visible.isNull() && visible.save(QString::fromUtf8(png.c_str()), "PNG");
+		std::string full = png;
+		if (full.size() > 4 && _stricmp(full.c_str() + full.size() - 4, ".png") == 0)
+			full.resize(full.size() - 4);
+		full += "_full.png";
+		bool ok2 = false;
+		int fullW = 0, fullH = 0;
+		if (QScrollArea* const pScroll = pPanel->findChild<QScrollArea*>())
+		{
+			if (QWidget* const pContent = pScroll->widget())
+			{
+				const QPixmap all = pContent->grab();
+				fullW = all.width();
+				fullH = all.height();
+				ok2 = !all.isNull() && all.save(QString::fromUtf8(full.c_str()), "PNG");
+			}
+		}
+		CryLogAlways("[CEVEditor] info_grab: %s %s (%dx%d), %s %s (%dx%d)", ok1 ? "saved" : "FAILED", png.c_str(), visible.width(), visible.height(),
+			ok2 ? "saved" : "FAILED", full.c_str(), fullW, fullH);
+	}
+
 	// cev_editor_preview_dock <float|dock|tab_other|tab_preview>: moves the preview panel of the open video editor through the
 	// docking manager the way a user drags it (floating window, back into the area of the info panel, switching tabs there)
 	void CmdPreviewDock(IConsoleCmdArgs* pArgs)
@@ -910,6 +1267,8 @@ CEditorCEVPlayerPlugin::CEditorCEVPlayerPlugin()
 		REGISTER_COMMAND("cev_editor_close", CmdClose, VF_NULL, "cev_editor_close: close the CEV Video Editor windows");
 		REGISTER_COMMAND("cev_editor_status", CmdStatus, VF_NULL, "cev_editor_status: log preview / job counters of the CEV editor");
 		REGISTER_COMMAND("cev_editor_preview_test", CmdPreviewTest, VF_NULL, "cev_editor_preview_test [png:<path>] [pause:<s>] [close]: self test of the preview of the open video editor (load, play 1 s, pause, no repaint while paused, PNG, close)");
+		REGISTER_COMMAND("cev_editor_info_test", CmdInfoTest, VF_NULL, "cev_editor_info_test [legacy:<asset.cevvideo>] [alt:<abs webm>] [trigger:<name>] [ffmpeg:<path>]: self test of the info panel on the open (scratch) asset: property tree edit, save, Reimport, source check, FFmpeg preference");
+		REGISTER_COMMAND("cev_editor_info_grab", CmdInfoGrab, VF_NULL, "cev_editor_info_grab png:<path>: save the info panel of the open video editor as PNG (visible part and whole content)");
 		REGISTER_COMMAND("cev_editor_preview_dock", CmdPreviewDock, VF_NULL, "cev_editor_preview_dock <float|dock|tab_other|tab_preview>: move the preview panel through the docking manager (test)");
 		REGISTER_COMMAND("cev_editor_rename", CmdRename, VF_NULL, "cev_editor_rename <asset.cevvideo> <newName>: rename a video asset through the asset manager");
 		REGISTER_COMMAND("cev_editor_move", CmdMove, VF_NULL, "cev_editor_move <asset.cevvideo> <folder>: move a video asset through the asset manager");
@@ -957,6 +1316,8 @@ CEditorCEVPlayerPlugin::~CEditorCEVPlayerPlugin()
 		pConsole->RemoveCommand("cev_editor_status");
 		pConsole->RemoveCommand("cev_editor_preview_test");
 		pConsole->RemoveCommand("cev_editor_preview_dock");
+		pConsole->RemoveCommand("cev_editor_info_grab");
+		pConsole->RemoveCommand("cev_editor_info_test");
 		pConsole->RemoveCommand("cev_editor_rename");
 		pConsole->RemoveCommand("cev_editor_move");
 		pConsole->RemoveCommand("cev_editor_delete");

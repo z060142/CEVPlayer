@@ -5,12 +5,6 @@
 #include <chrono>
 #include <filesystem>
 
-#include <QCheckBox>
-#include <QComboBox>
-#include <QDesktopServices>
-#include <QFileDialog>
-#include <QMessageBox>
-#include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -21,14 +15,21 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QTableWidget>
-#include <QUrl>
 #include <QVBoxLayout>
+
+#include <AssetSystem/Asset.h>
+#include <CrySerialization/IArchiveHost.h>
+#include <CrySystem/ISystem.h>
+#include <IEditor.h>
+#include <Notifications/NotificationCenter.h>
+#include <Serialization/QPropertyTreeLegacy/QPropertyTreeLegacy.h>
 
 #include "Asset/VideoImport.h"
 #include "Editor/VideoEditor.h"
 #include "FFmpeg/FfmpegService.h"
 #include "Jobs/JobRunner.h"
 #include "Offline/IOfflineOps.h"
+#include "Settings/EditorSettings.h"
 
 namespace CEVEditor
 {
@@ -37,7 +38,6 @@ namespace CEVEditor
 	namespace
 	{
 		QString Q(const std::string& s) { return QString::fromUtf8(s.c_str()); }
-		std::string S(const QString& q) { return std::string(q.toUtf8().constData()); }
 
 		QString SizeText(unsigned long long bytes)
 		{
@@ -55,6 +55,16 @@ namespace CEVEditor
 				return false;
 			return _stricmp(path.c_str() + dot + 1, ext) == 0;
 		}
+
+		void Notify(bool warning, const QString& title, const QString& text)
+		{
+			if (GetIEditor() == nullptr || GetIEditor()->GetNotificationCenter() == nullptr)
+				return;
+			if (warning)
+				GetIEditor()->GetNotificationCenter()->ShowWarning(title, text);
+			else
+				GetIEditor()->GetNotificationCenter()->ShowInfo(title, text);
+		}
 	}
 
 	CVideoInfoPanel::CVideoInfoPanel(CVideoEditor* pEditor, QWidget* pParent)
@@ -62,6 +72,7 @@ namespace CEVEditor
 		, m_pEditor(pEditor)
 	{
 		setWindowTitle(tr("Info"));
+		m_pArchiveContext.reset(new yasli::Context(&m_context));
 		BuildUi();
 		if (CJobRunner* const pRunner = CJobRunner::Get())
 		{
@@ -80,6 +91,12 @@ namespace CEVEditor
 		RefreshJobs();
 	}
 
+	CVideoInfoPanel::~CVideoInfoPanel()
+	{
+		if (m_pTree != nullptr)
+			m_pTree->detach(); // the tree holds a pointer to m_edit
+	}
+
 	void CVideoInfoPanel::BuildUi()
 	{
 		QVBoxLayout* const pOuter = new QVBoxLayout(this);
@@ -95,6 +112,7 @@ namespace CEVEditor
 		QFont titleFont = m_pTitle->font();
 		titleFont.setBold(true);
 		m_pTitle->setFont(titleFont);
+		m_pTitle->setWordWrap(true);
 		pMain->addWidget(m_pTitle);
 
 		m_pInfo = new QLabel(pContent);
@@ -130,7 +148,7 @@ namespace CEVEditor
 		pVariantsLayout->addWidget(m_pVariants);
 		pMain->addWidget(pVariantsBox);
 
-		// ---- FFmpeg
+		// ---- FFmpeg (the path is an editor preference: Edit > Preferences > CEVPlayer / FFmpeg)
 		QGroupBox* const pFfmpegBox = new QGroupBox(tr("FFmpeg"), pContent);
 		QVBoxLayout* const pFfmpegLayout = new QVBoxLayout(pFfmpegBox);
 		m_pFfmpegState = new QLabel(pFfmpegBox);
@@ -141,24 +159,16 @@ namespace CEVEditor
 		m_pFfmpegDetail->setTextInteractionFlags(Qt::TextSelectableByMouse);
 		pFfmpegLayout->addWidget(m_pFfmpegDetail);
 		QHBoxLayout* const pFfmpegButtons = new QHBoxLayout();
-		QPushButton* const pLocate = new QPushButton(tr("Locate..."), pFfmpegBox);
-		pLocate->setToolTip(tr("Choose ffmpeg.exe (stored in %LOCALAPPDATA%/CEVPlayer/editor.json). It needs libvpx-vp9, libopus and the webm muxer."));
+		QPushButton* const pPreferences = new QPushButton(tr("Open preferences"), pFfmpegBox);
+		pPreferences->setToolTip(tr("The FFmpeg path is set in Edit > Preferences > %1. It needs libvpx-vp9, libopus and the webm muxer.").arg(QString::fromUtf8(kPreferencesPagePath)));
 		m_pFfmpegDownload = new QPushButton(tr("Download minimal build"), pFfmpegBox);
 		QPushButton* const pRedetect = new QPushButton(tr("Re-detect"), pFfmpegBox);
-		pFfmpegButtons->addWidget(pLocate);
+		pFfmpegButtons->addWidget(pPreferences);
 		pFfmpegButtons->addWidget(m_pFfmpegDownload);
 		pFfmpegButtons->addWidget(pRedetect);
 		pFfmpegButtons->addStretch(1);
 		pFfmpegLayout->addLayout(pFfmpegButtons);
-		connect(pLocate, &QPushButton::clicked, this, [this]()
-		{
-			CFfmpegService* const pService = CFfmpegService::Get();
-			if (pService == nullptr)
-				return;
-			const QString file = QFileDialog::getOpenFileName(this, tr("Choose ffmpeg.exe"), QString::fromUtf8(pService->ConfiguredPath().c_str()), tr("ffmpeg (ffmpeg.exe);;All files (*)"));
-			if (!file.isEmpty())
-				pService->SetPath(std::string(file.toUtf8().constData()));
-		});
+		connect(pPreferences, &QPushButton::clicked, this, []() { OpenEditorPreferences(); });
 		connect(m_pFfmpegDownload, &QPushButton::clicked, this, [this]()
 		{
 			CFfmpegService* const pService = CFfmpegService::Get();
@@ -166,9 +176,9 @@ namespace CEVEditor
 				return;
 			std::string error;
 			if (pService->StartDownload(error) == 0)
-				QMessageBox::warning(this, tr("FFmpeg"), QString::fromUtf8(error.c_str()));
+				Notify(true, tr("FFmpeg"), QString::fromUtf8(error.c_str()));
 			else
-				Log(tr("Downloading the minimal FFmpeg build (progress in the job list) ..."));
+				CryLogAlways("[CEVEditor] downloading the minimal FFmpeg build (progress in the notification center and the job list)");
 		});
 		connect(pRedetect, &QPushButton::clicked, this, [this]()
 		{
@@ -177,70 +187,18 @@ namespace CEVEditor
 		});
 		pMain->addWidget(pFfmpegBox);
 
-		// ---- descriptor
+		// ---- descriptor: the engine's property tree on SDescriptor::Serialize; every change goes to the editor at once
 		QGroupBox* const pDescBox = new QGroupBox(tr("Descriptor (.cevvideo)"), pContent);
 		QVBoxLayout* const pDescLayout = new QVBoxLayout(pDescBox);
-		QGridLayout* const pGrid = new QGridLayout();
-		pGrid->addWidget(new QLabel(tr("Audio route"), pDescBox), 0, 0);
-		m_pRoute = new QComboBox(pDescBox);
-		m_pRoute->addItems({ "embedded", "mixed", "cue" });
-		pGrid->addWidget(m_pRoute, 0, 1);
-		pGrid->addWidget(new QLabel(tr("A/V offset (ms)"), pDescBox), 1, 0);
-		m_pAvOffset = new QDoubleSpinBox(pDescBox);
-		m_pAvOffset->setRange(-5000.0, 5000.0);
-		m_pAvOffset->setDecimals(1);
-		m_pAvOffset->setToolTip(tr("Positive: the picture is shown later than the sound by this much."));
-		pGrid->addWidget(m_pAvOffset, 1, 1);
-		pGrid->addWidget(new QLabel(tr("Default language"), pDescBox), 2, 0);
-		m_pDefaultLanguage = new QComboBox(pDescBox);
-		pGrid->addWidget(m_pDefaultLanguage, 2, 1);
-		pDescLayout->addLayout(pGrid);
-
-		pDescLayout->addWidget(new QLabel(tr("Languages"), pDescBox));
-		m_pLanguages = new QTableWidget(0, 6, pDescBox);
-		m_pLanguages->setHorizontalHeaderLabels({ tr("Name"), tr("Embedded"), tr("File"), tr("Trigger"), tr("Pause"), tr("Resume") });
-		m_pLanguages->horizontalHeader()->setStretchLastSection(true);
-		m_pLanguages->setMinimumHeight(90);
-		pDescLayout->addWidget(m_pLanguages);
-		QHBoxLayout* const pLangButtons = new QHBoxLayout();
-		QPushButton* const pAddLang = new QPushButton(tr("Add language"), pDescBox);
-		QPushButton* const pRemoveLang = new QPushButton(tr("Remove"), pDescBox);
-		pLangButtons->addWidget(pAddLang);
-		pLangButtons->addWidget(pRemoveLang);
-		pLangButtons->addStretch(1);
-		pDescLayout->addLayout(pLangButtons);
-		connect(pAddLang, &QPushButton::clicked, this, [this]() { AddLanguageRow(QString(), false, QString(), QString(), QString(), QString()); });
-		connect(pRemoveLang, &QPushButton::clicked, this, [this]()
-		{
-			const int row = m_pLanguages->currentRow();
-			if (row >= 0)
-				m_pLanguages->removeRow(row);
-		});
-
-		pDescLayout->addWidget(new QLabel(tr("Markers"), pDescBox));
-		m_pMarkers = new QTableWidget(0, 2, pDescBox);
-		m_pMarkers->setHorizontalHeaderLabels({ tr("Name"), tr("Time (s)") });
-		m_pMarkers->horizontalHeader()->setStretchLastSection(true);
-		m_pMarkers->setMinimumHeight(70);
-		pDescLayout->addWidget(m_pMarkers);
-		QHBoxLayout* const pMarkerButtons = new QHBoxLayout();
-		QPushButton* const pAddMarker = new QPushButton(tr("Add marker"), pDescBox);
-		QPushButton* const pRemoveMarker = new QPushButton(tr("Remove"), pDescBox);
-		pMarkerButtons->addWidget(pAddMarker);
-		pMarkerButtons->addWidget(pRemoveMarker);
-		pMarkerButtons->addStretch(1);
-		pDescLayout->addLayout(pMarkerButtons);
-		connect(pAddMarker, &QPushButton::clicked, this, [this]() { AddMarkerRow(QString(), 0.0); });
-		connect(pRemoveMarker, &QPushButton::clicked, this, [this]()
-		{
-			const int row = m_pMarkers->currentRow();
-			if (row >= 0)
-				m_pMarkers->removeRow(row);
-		});
-
-		QPushButton* const pApply = new QPushButton(tr("Apply to descriptor (then Save)"), pDescBox);
-		connect(pApply, &QPushButton::clicked, this, &CVideoInfoPanel::OnApplyDescriptor);
-		pDescLayout->addWidget(pApply);
+		m_pTree = new QPropertyTreeLegacy(pDescBox);
+		m_pTree->setSizeToContent(true);
+		m_pTree->setExpandLevels(2);
+		m_pTree->setArchiveContext(m_pArchiveContext.get());
+		connect(m_pTree, &QPropertyTreeLegacy::signalChanged, this, &CVideoInfoPanel::OnTreeChanged);
+		pDescLayout->addWidget(m_pTree);
+		QLabel* const pDescHint = new QLabel(tr("Changes mark the asset as modified; Save (Ctrl+S) writes the descriptor."), pDescBox);
+		pDescHint->setWordWrap(true);
+		pDescLayout->addWidget(pDescHint);
 		pMain->addWidget(pDescBox);
 
 		// ---- operations
@@ -252,12 +210,13 @@ namespace CEVEditor
 		m_pOpButtons = new QWidget(pOpsBox);
 		QGridLayout* const pOps = new QGridLayout(m_pOpButtons);
 		pOps->setContentsMargins(0, 0, 0, 0);
-		auto addButton = [&](const QString& text, const QString& tip, int row, int col, std::function<void()> fn)
+		auto addButton = [&](const QString& text, const QString& tip, int row, int col, std::function<void()> fn) -> QPushButton*
 		{
 			QPushButton* const b = new QPushButton(text, m_pOpButtons);
 			b->setToolTip(tip);
 			connect(b, &QPushButton::clicked, this, [fn]() { fn(); });
 			pOps->addWidget(b, row, col);
+			return b;
 		};
 		auto language = [this]() -> std::string
 		{
@@ -297,44 +256,29 @@ namespace CEVEditor
 			if (m_pEditor)
 				m_pEditor->UpgradeToCue();
 		});
-		addButton(tr("Reimport source"), tr("Copies the original file over the copy of the source again (hash and details are renewed)."), 2, 1, [this]()
+		m_pBtnReimport = addButton(tr("Reimport"), tr("The asset's Reimport (the same as in the Asset Browser): the stored import settings are used again; a changed original file is copied over the source file first."), 2, 1, [this]()
 		{
-			if (!m_pEditor) return;
-			std::string error;
-			if (m_pEditor->ReimportSource(error))
-				Log(m_pEditor->State().details.Get(DetailKey::kTranscoded) == "1" ? tr("Reimport started: the source is copied again and encoded on a job.") : tr("Reimported the source."));
-			else
-				Log(tr("Reimport failed: %1").arg(Q(error)));
+			if (m_pEditor && !m_pEditor->Reimport())
+				Notify(true, tr("Video asset"), tr("This asset cannot be reimported (no source file registered, or read-only)."));
 		});
-		addButton(tr("Generate variants..."), tr("FFmpeg: smaller copies of the video (<name>_<height>p.webm) listed in the descriptor <Variants>."), 3, 0, [this]()
+		m_pBtnVariants = addButton(tr("Generate variants..."), tr("FFmpeg: smaller copies of the video (<name>_<height>p.webm) listed in the descriptor <Variants>."), 3, 0, [this]()
 		{
 			if (m_pEditor)
 				m_pEditor->GenerateVariantsDialog();
 		});
-		addButton(tr("Re-compress / resize..."), tr("FFmpeg: encodes the video again from the stored source copy with another quality / height; the asset keeps its GUID."), 3, 1, [this]()
+		m_pBtnRecompress = addButton(tr("Re-compress / resize..."), tr("FFmpeg: encodes the video again from the stored source copy with another quality / height; the asset keeps its GUID."), 3, 1, [this]()
 		{
 			if (m_pEditor)
 				m_pEditor->RecompressDialog();
 		});
-		addButton(tr("Open folder"), tr("Opens the folder of the asset."), 4, 0, [this]()
-		{
-			if (m_pEditor && m_pEditor->HasAsset())
-				QDesktopServices::openUrl(QUrl::fromLocalFile(Q(AssetsAbsolute(m_pEditor->State().folderRel))));
-		});
 		pOpsLayout->addWidget(m_pOpButtons);
-		for (QPushButton* const b : m_pOpButtons->findChildren<QPushButton*>())
-		{
-			if (b->text() == tr("Generate variants..."))
-				m_pBtnVariants = b;
-			else if (b->text() == tr("Re-compress / resize..."))
-				m_pBtnRecompress = b;
-		}
 
 		m_pAce = new QLabel(pOpsBox);
 		m_pAce->setWordWrap(true);
 		m_pAce->setTextInteractionFlags(Qt::TextSelectableByMouse);
 		pOpsLayout->addWidget(m_pAce);
 
+		// progress and results of the jobs are also in the notification center; the list and the full log of each job stay here
 		pOpsLayout->addWidget(new QLabel(tr("Jobs"), pOpsBox));
 		m_pJobs = new QListWidget(pOpsBox);
 		m_pJobs->setMinimumHeight(60);
@@ -351,6 +295,7 @@ namespace CEVEditor
 		m_pLog->setReadOnly(true);
 		m_pLog->setMaximumBlockCount(2000);
 		m_pLog->setMinimumHeight(90);
+		m_pLog->setToolTip(tr("Full output of the jobs (FFmpeg / audio operations)."));
 		pOpsLayout->addWidget(m_pLog);
 		pMain->addWidget(pOpsBox);
 		pMain->addStretch(1);
@@ -359,29 +304,6 @@ namespace CEVEditor
 	void CVideoInfoPanel::Log(const QString& line)
 	{
 		m_pLog->appendPlainText(line);
-	}
-
-	void CVideoInfoPanel::AddLanguageRow(const QString& name, bool embedded, const QString& file, const QString& trigger, const QString& pause, const QString& resume)
-	{
-		const int row = m_pLanguages->rowCount();
-		m_pLanguages->insertRow(row);
-		m_pLanguages->setItem(row, 0, new QTableWidgetItem(name));
-		QTableWidgetItem* const check = new QTableWidgetItem();
-		check->setFlags(Qt::ItemIsUserCheckable | Qt::ItemIsEnabled);
-		check->setCheckState(embedded ? Qt::Checked : Qt::Unchecked);
-		m_pLanguages->setItem(row, 1, check);
-		m_pLanguages->setItem(row, 2, new QTableWidgetItem(file));
-		m_pLanguages->setItem(row, 3, new QTableWidgetItem(trigger));
-		m_pLanguages->setItem(row, 4, new QTableWidgetItem(pause));
-		m_pLanguages->setItem(row, 5, new QTableWidgetItem(resume));
-	}
-
-	void CVideoInfoPanel::AddMarkerRow(const QString& name, double time)
-	{
-		const int row = m_pMarkers->rowCount();
-		m_pMarkers->insertRow(row);
-		m_pMarkers->setItem(row, 0, new QTableWidgetItem(name));
-		m_pMarkers->setItem(row, 1, new QTableWidgetItem(QString::number(time, 'f', 3)));
 	}
 
 	void CVideoInfoPanel::Refresh()
@@ -402,8 +324,8 @@ namespace CEVEditor
 			m_pAce->clear();
 			m_pFiles->setRowCount(0);
 			m_pVariants->setRowCount(0);
-			m_pLanguages->setRowCount(0);
-			m_pMarkers->setRowCount(0);
+			m_pTree->detach();
+			m_pTree->setEnabled(false);
 			return;
 		}
 		const CVideoEditor::SState& st = m_pEditor->State();
@@ -438,20 +360,24 @@ namespace CEVEditor
 
 		if (st.source.checked)
 		{
-			const bool stale = st.source.originalExists && !st.source.originalMatchesImport;
 			m_pSource->setText(Q(st.source.text));
-			m_pSource->setStyleSheet(stale || !st.source.copyExists || !st.source.copyMatchesImport ? "color: #e0a030;" : "color: #70c070;");
+			m_pSource->setStyleSheet(st.source.reimportNeeded || !st.source.copyExists ? "color: #e0a030;" : "color: #70c070;");
 		}
 		else
 		{
-			m_pSource->setText(tr("Checking the source file ..."));
+			m_pSource->setText(st.source.confirming ? Q(st.source.text) : tr("Checking the source file ..."));
 			m_pSource->setStyleSheet(QString());
 		}
+
+		CAsset* const pAsset = m_pEditor->GetAssetBeingEdited();
+		const bool canReimport = pAsset != nullptr && pAsset->HasSourceFile() && !pAsset->IsImmutable();
+		m_pBtnReimport->setEnabled(canReimport);
+		m_pBtnReimport->setText(st.source.reimportNeeded ? tr("Reimport (source changed)") : tr("Reimport"));
 
 		const std::string ace = st.details.Get(DetailKey::kAceLibrary);
 		if (!ace.empty())
 		{
-			m_pAce->setText(tr("SDL_mixer / ACE: library %1, copies %2\nWwise / FMOD: this plug-in only writes the SDL_mixer registration. Manual steps: import the WAV / Ogg of this asset into your middleware project, create one start / pause / resume event per language, and enter the trigger names of the Languages table above.")
+			m_pAce->setText(tr("SDL_mixer / ACE: library %1, copies %2\nWwise / FMOD: this plug-in only writes the SDL_mixer registration. Manual steps: import the WAV / Ogg of this asset into your middleware project, create one start / pause / resume event per language, and pick the triggers in the Languages of the descriptor above.")
 				.arg(Q(ace)).arg(Q(st.details.Get(DetailKey::kSdlFiles))));
 		}
 		else
@@ -461,8 +387,8 @@ namespace CEVEditor
 
 		FillFiles();
 		FillVariants();
-		// The tables hold what the user is typing: refill them only when the descriptor in the state was replaced
-		// (asset opened / reloaded / merged), not on every state change (e.g. when a background check finishes).
+		// The tree holds what the user is editing: refill it only when the descriptor in the state was replaced (asset opened /
+		// reloaded / merged), not on every state change (e.g. when a background check finishes).
 		if (m_filledRevision != m_pEditor->DescriptorRevision())
 		{
 			m_filledRevision = m_pEditor->DescriptorRevision();
@@ -481,11 +407,11 @@ namespace CEVEditor
 			if (rel == st.descriptorRel)
 				role = tr("descriptor (shipped)");
 			else if (rel == st.videoRel && rel == st.sourceCopyRel)
-				role = tr("video (shipped), copy of the source");
+				role = tr("video (shipped), source file of the asset");
 			else if (rel == st.videoRel)
 				role = tr("video (shipped)");
 			else if (rel == st.sourceCopyRel)
-				role = tr("source copy - original file, not shipped");
+				role = tr("source file - original file, not shipped");
 			else if (HasExtension(rel, "wav") || HasExtension(rel, "ogg"))
 				role = tr("sound file (the engine also lists it as a Sound asset)");
 			else if (std::any_of(st.descriptor.variants.begin(), st.descriptor.variants.end(), [&](const SDescriptor::SVariant& v) { return _stricmp((st.folderRel + v.file).c_str(), rel.c_str()) == 0; }))
@@ -592,7 +518,7 @@ namespace CEVEditor
 		}
 		for (const std::string& r : s.rejected)
 			detail += "\n" + tr("Not usable: %1").arg(Q(r));
-		detail += tr("\nConfigured path: %1").arg(s.configuredPath.empty() ? tr("(none)") : Q(s.configuredPath));
+		detail += tr("\nConfigured path (Preferences > %1): %2").arg(QString::fromUtf8(kPreferencesPagePath), s.configuredPath.empty() ? tr("(none)") : Q(s.configuredPath));
 		const std::string disabled = CFfmpegService::DownloadDisabledReason();
 		detail += disabled.empty() ? tr("\nDownload: our minimal build is available.") : tr("\nDownload: %1").arg(Q(disabled));
 		m_pFfmpegState->setText(state);
@@ -612,67 +538,65 @@ namespace CEVEditor
 
 	void CVideoInfoPanel::FillDescriptor()
 	{
-		m_filling = true;
-		const SDescriptor& d = m_pEditor->State().descriptor;
-		m_pRoute->setCurrentText(Q(d.route));
-		m_pAvOffset->setValue(d.avOffsetMs);
-		m_pLanguages->setRowCount(0);
-		m_pDefaultLanguage->clear();
-		m_pDefaultLanguage->addItem(QString());
-		for (const SDescriptor::SLanguage& l : d.languages)
-		{
-			AddLanguageRow(Q(l.name), l.embedded, Q(l.file), Q(l.trigger), Q(l.pauseTrigger), Q(l.resumeTrigger));
-			m_pDefaultLanguage->addItem(Q(l.name));
-		}
-		m_pDefaultLanguage->setCurrentText(Q(d.defaultLanguage));
-		m_pLanguages->resizeColumnsToContents();
-		m_pMarkers->setRowCount(0);
-		for (const SDescriptor::SMarker& m : d.markers)
-			AddMarkerRow(Q(m.name), m.time);
-		m_filling = false;
+		const CVideoEditor::SState& st = m_pEditor->State();
+		m_edit = st.descriptor;
+		m_context.folderRel = st.folderRel;
+		m_pTree->setEnabled(true);
+		if (!m_pTree->attached())
+			m_pTree->attach(yasli::Serializer(m_edit));
+		else
+			m_pTree->revert();
 	}
 
-	void CVideoInfoPanel::OnApplyDescriptor()
+	void CVideoInfoPanel::OnTreeChanged()
 	{
-		if (!m_pEditor || !m_pEditor->HasAsset() || m_filling)
+		if (!m_pEditor || !m_pEditor->HasAsset())
 			return;
-		SDescriptor d = m_pEditor->State().descriptor; // keeps the variants and the root triggers
-		d.route = S(m_pRoute->currentText());
-		d.avOffsetMs = m_pAvOffset->value();
+		SDescriptor d = m_pEditor->State().descriptor; // keeps the video, the variants and the root triggers
+		d.route = m_edit.route;
+		d.avOffsetMs = m_edit.avOffsetMs;
 		d.languages.clear();
-		for (int row = 0; row < m_pLanguages->rowCount(); ++row)
+		for (const SDescriptor::SLanguage& l : m_edit.languages)
 		{
-			auto text = [&](int col) { QTableWidgetItem* const it = m_pLanguages->item(row, col); return it ? S(it->text().trimmed()) : std::string(); };
-			SDescriptor::SLanguage l;
-			l.name = text(0);
-			if (l.name.empty())
-				continue;
-			QTableWidgetItem* const check = m_pLanguages->item(row, 1);
-			l.embedded = check != nullptr && check->checkState() == Qt::Checked;
-			l.file = text(2);
-			l.trigger = text(3);
-			l.pauseTrigger = text(4);
-			l.resumeTrigger = text(5);
-			d.languages.push_back(l);
+			if (!l.name.empty())
+				d.languages.push_back(l);
 		}
-		d.defaultLanguage = S(m_pDefaultLanguage->currentText());
+		d.defaultLanguage = m_edit.defaultLanguage;
 		if (d.FindLanguage(d.defaultLanguage) < 0)
 			d.defaultLanguage.clear();
-		d.markers.clear();
-		for (int row = 0; row < m_pMarkers->rowCount(); ++row)
-		{
-			QTableWidgetItem* const name = m_pMarkers->item(row, 0);
-			QTableWidgetItem* const time = m_pMarkers->item(row, 1);
-			if (name == nullptr || time == nullptr || name->text().trimmed().isEmpty())
-				continue;
-			SDescriptor::SMarker m;
-			m.name = S(name->text().trimmed());
-			m.time = time->text().toDouble();
-			d.markers.push_back(m);
-		}
+		d.markers = m_edit.markers;
 		std::stable_sort(d.markers.begin(), d.markers.end(), [](const SDescriptor::SMarker& a, const SDescriptor::SMarker& b) { return a.time < b.time; });
-		m_pEditor->SetDescriptor(d);
-		Log(tr("Descriptor changed in memory: Save (Ctrl+S) writes it."));
+		m_pEditor->SetDescriptor(d); // marks the asset modified; Save writes the file
+		if (!DescriptorsEqual(d, m_edit))
+		{
+			m_edit = d; // markers sorted, empty language rows dropped, default language checked
+			m_pTree->revert();
+		}
+	}
+
+	bool CVideoInfoPanel::ApplyThroughSerializationForTest(const SDescriptor& changed, std::string& error)
+	{
+		if (!m_pEditor || !m_pEditor->HasAsset() || gEnv == nullptr || gEnv->pSystem == nullptr || gEnv->pSystem->GetArchiveHost() == nullptr)
+		{
+			error = "no asset / no archive host";
+			return false;
+		}
+		Serialization::IArchiveHost* const pHost = gEnv->pSystem->GetArchiveHost();
+		SDescriptor source = changed;
+		DynArray<char> buffer;
+		if (!pHost->SaveJsonBuffer(buffer, Serialization::SStruct(source)))
+		{
+			error = "SaveJsonBuffer failed";
+			return false;
+		}
+		if (!pHost->LoadJsonBuffer(Serialization::SStruct(m_edit), buffer.data(), buffer.size()))
+		{
+			error = "LoadJsonBuffer failed";
+			return false;
+		}
+		OnTreeChanged();
+		m_pTree->revert();
+		return true;
 	}
 
 	void CVideoInfoPanel::RefreshJobs()

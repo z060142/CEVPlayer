@@ -62,8 +62,13 @@ namespace CEVEditor
 		// ---- edits from the panels (main thread) ----
 		void SetDescriptor(const SDescriptor& descriptor);   //!< marks the asset modified; saved by Save
 		void ReloadPreview();
-		//! Replaces the file of the source copy again from the recorded original (preview player is released first).
-		bool ReimportSource(std::string& error);
+		//! The engine's reimport of the asset (CAsset::Reimport -> CVideoAssetImporter::ReimportAsset, stored import settings).
+		//! False when the asset has no registered source file (PNG sequence) or is read-only.
+		bool Reimport();
+		//! Checks the source file again (size / time, hash when they changed); the result arrives with StateChanged.
+		void RecheckSource();
+		//! After a reimport: media info and source status are read again, the preview reloads.
+		void RefreshAfterReimport();
 		void RunAudioOps(const SAudioOps& ops);
 		//! FFmpeg operations (variants / re-encode) on a job; the window refreshes when it is done.
 		void RunTranscodeOps(const STranscodeOps& ops);
@@ -75,6 +80,8 @@ namespace CEVEditor
 		static CVideoEditor* Current();                        //!< the last window that opened an asset (console command, tests)
 		//! The preview panel of this window (null while it is not created / was closed).
 		CVideoPreviewPanel* PreviewPanel() const;
+		//! The info panel of this window (null while it is not created / was closed).
+		CVideoInfoPanel* InfoPanel() const;
 
 		//! Opens the dropped / selected files (webm mp4 mov mkv avi, folders of PNG files): options dialog, then the import queue
 		//! (one file at a time on a job, merge on the main thread). Several files: one dialog, one batch.

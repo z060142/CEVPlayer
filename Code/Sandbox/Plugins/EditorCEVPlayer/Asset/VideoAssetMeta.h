@@ -28,6 +28,8 @@ namespace CEVEditor
 		constexpr const char* kSourceOriginal = "sourceOriginalPath"; // absolute path of the file that was imported
 		constexpr const char* kSourceSha256   = "sourceSha256";       // hash of the copy at import time
 		constexpr const char* kSourceSize     = "sourceSize";
+		constexpr const char* kSourceStamp   = "sourceStamp";        // "<size>:<mtime>" of the source copy when its hash was last taken
+		constexpr const char* kOriginalStamp = "originalStamp";      // "<size>:<mtime>" of the original file when its hash was last taken
 		constexpr const char* kImportSettings = "importSettings";     // key=value;key=value
 		constexpr const char* kImportState    = "importState";        // ready | processing | failed
 		constexpr const char* kWidth          = "width";

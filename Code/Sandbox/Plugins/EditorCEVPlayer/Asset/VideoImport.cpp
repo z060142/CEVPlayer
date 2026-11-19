@@ -204,8 +204,56 @@ namespace CEVEditor
 			edit.SetFiles(list);
 		}
 		if (details != nullptr)
+		{
 			edit.SetDetails(details->ToPairs());
+			// the engine's source file follows Details sourcePath (rename / move / re-encode change it)
+			const std::string sourceRel = RegistrableSourceFile(asset.GetMetadataFile().c_str(), *details);
+			if (_stricmp(sourceRel.c_str(), asset.GetSourceFile().c_str()) != 0)
+				edit.SetSourceFile(sourceRel.c_str());
+		}
 		return edit.WriteToFile();
+	}
+
+	std::string RegistrableSourceFile(const std::string& metadataRel, const CDetails& details)
+	{
+		// CAsset stores the source file by name only: it must be in the folder of the .cryasset (Asset.cpp, GetMetadata)
+		const std::string rel = details.Get(DetailKey::kSourcePath);
+		if (rel.empty() || _stricmp(FolderOf(rel).c_str(), FolderOf(metadataRel).c_str()) != 0)
+			return std::string();
+		return rel;
+	}
+
+	bool EnsureSourceRegistered(CAsset& asset)
+	{
+		if (!asset.GetSourceFile().empty())
+			return false;
+		const CDetails details(asset);
+		const std::string rel = RegistrableSourceFile(asset.GetMetadataFile().c_str(), details);
+		std::error_code ec;
+		if (rel.empty() || !fs::is_regular_file(fs::u8path(AssetsAbsolute(rel)), ec))
+			return false;
+		if (!WriteAssetFilesAndDetails(asset, nullptr, &details))
+		{
+			CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_WARNING, "[CEVEditor] '%s': cannot register the source file %s (read-only .cryasset?)", asset.GetName().c_str(), rel.c_str());
+			return false;
+		}
+		CryLogAlways("[CEVEditor] '%s': registered the source file %s (asset imported before the source was registered with the engine)", asset.GetName().c_str(), rel.c_str());
+		return true;
+	}
+
+	std::string FileStamp(const std::string& absPath)
+	{
+		std::error_code ec;
+		const fs::path p = fs::u8path(absPath);
+		if (absPath.empty() || !fs::is_regular_file(p, ec))
+			return std::string();
+		const unsigned long long size = static_cast<unsigned long long>(fs::file_size(p, ec));
+		if (ec)
+			return std::string();
+		const auto time = fs::last_write_time(p, ec);
+		if (ec)
+			return std::string();
+		return std::to_string(size) + ":" + std::to_string(static_cast<long long>(time.time_since_epoch().count()));
 	}
 
 	// ---------------------------------------------------------------------------------------------------------------
@@ -721,6 +769,11 @@ namespace CEVEditor
 		details.Set(DetailKey::kSourceSha256, sourceSha);
 		const std::uintmax_t sourceSize = plan.kind == ESourceKind::PngSequence ? 0 : fs::file_size(src, ec);
 		details.Set(DetailKey::kSourceSize, std::to_string(static_cast<unsigned long long>(ec ? 0 : sourceSize)));
+		if (plan.kind != ESourceKind::PngSequence)
+		{
+			details.Set(DetailKey::kSourceStamp, FileStamp(copyPath.u8string()));
+			details.Set(DetailKey::kOriginalStamp, FileStamp(absSrc));
+		}
 		details.Set(DetailKey::kSourceKind, plan.kind == ESourceKind::Webm ? "webm" : plan.kind == ESourceKind::Video ? "video" : "png-sequence");
 		details.Set(DetailKey::kTranscoded, transcode ? "1" : "0");
 		details.Set(DetailKey::kImportSettings, options.ToSettingsString());
@@ -760,6 +813,9 @@ namespace CEVEditor
 			fileList.emplace_back(f.c_str());
 		edit.SetFiles(fileList);
 		edit.SetDetails(details.ToPairs());
+		const std::string sourceRel = RegistrableSourceFile(r.metadataRel, details);
+		if (!sourceRel.empty())
+			edit.SetSourceFile(sourceRel.c_str()); // the engine's Reimport (Asset Browser) works from this file
 		track(fs::u8path(AssetsAbsolute(r.metadataRel)));
 		if (!edit.WriteToFile())
 			return fail("cannot write " + r.metadataRel + " (read-only file or folder?)");
@@ -812,6 +868,21 @@ namespace CEVEditor
 	}
 
 	// ---------------------------------------------------------------------------------------------------------------
+	namespace
+	{
+		//! The original file changed since its hash was recorded (stamp first, hash only when the stamp differs). False when it is not there.
+		bool OriginalChanged(const std::string& originalAbs, const std::string& recordedStamp, const std::string& recordedSha, const std::atomic<bool>* cancel)
+		{
+			std::error_code ec;
+			if (originalAbs.empty() || !fs::is_regular_file(fs::u8path(originalAbs), ec))
+				return false;
+			if (!recordedStamp.empty() && FileStamp(originalAbs) == recordedStamp)
+				return false;
+			std::string hash;
+			return Sha256File(originalAbs, hash, cancel) && !recordedSha.empty() && hash != recordedSha;
+		}
+	}
+
 	bool ReimportVideo(CAsset& asset, std::string& error)
 	{
 		CDetails details(asset);
@@ -822,31 +893,43 @@ namespace CEVEditor
 		}
 		const std::string original = details.Get(DetailKey::kSourceOriginal);
 		const std::string copyRel = details.Get(DetailKey::kSourcePath);
-		if (original.empty() || copyRel.empty())
+		if (copyRel.empty())
 		{
 			error = "the asset has no recorded source file";
 			return false;
 		}
 		std::error_code ec;
-		const fs::path src = fs::u8path(original);
-		if (!fs::is_regular_file(src, ec))
+		const fs::path copyPath = fs::u8path(AssetsAbsolute(copyRel));
+		// The source file next to the asset is what the engine reimports from. When the original file outside the project
+		// changed since the import it is copied over the source file first (what the old "Reimport source" button did); an
+		// unchanged or missing original leaves the source file as it is (it may have been replaced on purpose).
+		if (OriginalChanged(original, details.Get(DetailKey::kOriginalStamp), details.Get(DetailKey::kSourceSha256), nullptr))
 		{
-			error = "the original file no longer exists: " + original;
+			SMediaInfo originalInfo;
+			if (!ProbeMediaFile(original, originalInfo, error))
+				return false;
+			if (!CopyFileReplace(fs::u8path(original), copyPath, error))
+				return false;
+			CryLogAlways("[CEVEditor] reimport '%s': the original file changed, copied %s over %s", asset.GetName().c_str(), original.c_str(), copyRel.c_str());
+		}
+		if (!fs::is_regular_file(copyPath, ec))
+		{
+			error = "the source file is missing: " + copyRel;
 			return false;
 		}
 		SMediaInfo info;
-		if (!ProbeMediaFile(original, info, error))
-			return false;
-		if (!CopyFileReplace(src, fs::u8path(AssetsAbsolute(copyRel)), error))
+		if (!ProbeMediaFile(copyPath.u8string(), info, error))
 			return false;
 		std::string sha;
-		if (!Sha256File(AssetsAbsolute(copyRel), sha))
+		if (!Sha256File(copyPath.u8string(), sha))
 		{
-			error = "cannot hash the copied video";
+			error = "cannot hash the source file";
 			return false;
 		}
 		details.Set(DetailKey::kSourceSha256, sha);
-		details.Set(DetailKey::kSourceSize, std::to_string(static_cast<unsigned long long>(fs::file_size(src, ec))));
+		details.Set(DetailKey::kSourceSize, std::to_string(static_cast<unsigned long long>(fs::file_size(copyPath, ec))));
+		details.Set(DetailKey::kSourceStamp, FileStamp(copyPath.u8string()));
+		details.Set(DetailKey::kOriginalStamp, FileStamp(original));
 		FillMediaDetails(details, info);
 		details.Set(DetailKey::kImportState, "ready");
 		if (!WriteAssetFilesAndDetails(asset, nullptr, &details))
@@ -857,30 +940,137 @@ namespace CEVEditor
 		return true;
 	}
 
-	SSourceStatus CheckSourceStatus(const std::string& copyAbs, const std::string& originalAbs, const std::string& importedSha256, const std::atomic<bool>* cancel)
+	int ReimportWithStoredSettings(CAsset& asset, std::string& error, std::function<void(bool ok)> onFinished)
+	{
+		const std::string metadataRel = asset.GetMetadataFile().c_str();
+		const CryGUID guid = asset.GetGUID();
+		if (IsTranscodedAsset(asset))
+		{
+			// the video was made by FFmpeg: encode again from the source file with the stored settings (crf / height, the
+			// variants of the descriptor); a changed original file is copied over the source file first
+			const CDetails details(asset);
+			const SImportOptions settings = SImportOptions::FromSettingsString(details.Get(DetailKey::kImportSettings));
+			SDescriptor desc;
+			std::string descError;
+			LoadDescriptor(AssetsAbsolute(DescriptorRel(asset)), desc, descError);
+			STranscodeOps ops;
+			ops.recompress = true;
+			ops.refreshIfOriginalChanged = true;
+			ops.crf = settings.crf;
+			ops.height = settings.height;
+			ops.changeVariants = true;
+			ops.variants = VariantHeights(desc);
+			ops.removeOtherVariants = false;
+			const int job = SubmitTranscodeOps(asset, ops, error, [metadataRel, onFinished](bool ok)
+			{
+				RefreshEditorsAfterReimport(metadataRel);
+				if (onFinished)
+					onFinished(ok);
+			});
+			return job == 0 ? 0 : 2;
+		}
+		// the source file is replaced / re-read: nobody may hold it open (preview player, background checks, audio jobs)
+		if (!ReleaseAssetFiles(metadataRel, guid, 15000, error))
+			return 0;
+		const bool ok = ReimportVideo(asset, error);
+		RefreshEditorsAfterReimport(metadataRel);
+		if (onFinished)
+			onFinished(ok);
+		return ok ? 1 : 0;
+	}
+
+	SSourceStatus CheckSourceStatus(const SSourceCheckInput& in, const std::atomic<bool>* cancel)
 	{
 		SSourceStatus s;
-		s.originalPath = originalAbs;
+		s.originalPath = in.originalAbs;
 		std::error_code ec;
 		std::string hash;
-		s.copyExists = !copyAbs.empty() && fs::is_regular_file(fs::u8path(copyAbs), ec);
-		if (s.copyExists && Sha256File(copyAbs, hash, cancel))
-			s.copyMatchesImport = importedSha256.empty() || hash == importedSha256;
-		s.originalExists = !originalAbs.empty() && fs::is_regular_file(fs::u8path(originalAbs), ec);
-		if (s.originalExists && Sha256File(originalAbs, hash, cancel))
-			s.originalMatchesImport = importedSha256.empty() || hash == importedSha256;
+		s.copyExists = !in.copyAbs.empty() && fs::is_regular_file(fs::u8path(in.copyAbs), ec);
+		if (s.copyExists)
+		{
+			s.copyStamp = FileStamp(in.copyAbs);
+			if (!in.copyStamp.empty() && s.copyStamp == in.copyStamp)
+			{
+				s.copyMatchesImport = true; // size and time as recorded: not hashed
+			}
+			else
+			{
+				s.hashed = true;
+				if (Sha256File(in.copyAbs, hash, cancel))
+					s.copyMatchesImport = in.importedSha256.empty() || hash == in.importedSha256;
+			}
+		}
+		s.originalExists = !in.originalAbs.empty() && fs::is_regular_file(fs::u8path(in.originalAbs), ec);
+		if (s.originalExists)
+		{
+			s.originalStamp = FileStamp(in.originalAbs);
+			if (!in.originalStamp.empty() && s.originalStamp == in.originalStamp)
+			{
+				s.originalMatchesImport = true;
+			}
+			else
+			{
+				s.hashed = true;
+				if (Sha256File(in.originalAbs, hash, cancel))
+					s.originalMatchesImport = in.importedSha256.empty() || hash == in.importedSha256;
+			}
+		}
 		s.checked = !(cancel != nullptr && cancel->load());
+		s.reimportNeeded = s.copyExists && (!s.copyMatchesImport || (s.originalExists && !s.originalMatchesImport));
 		if (!s.copyExists)
-			s.text = "The copy of the source video is missing.";
+			s.text = "The source file of the asset is missing.";
 		else if (!s.copyMatchesImport)
-			s.text = "The copy of the source video was changed after the import (hash differs).";
+			s.text = "Source changed, reimport needed: the source file next to the asset differs from what was imported.";
 		else if (!s.originalExists)
-			s.text = originalAbs.empty() ? "Source up to date (no original path recorded)." : "Source up to date. The original file is not at its recorded location any more.";
+			s.text = in.originalAbs.empty() ? "Source up to date (no original path recorded)." : "Source up to date. The original file is not at its recorded location any more.";
 		else if (!s.originalMatchesImport)
-			s.text = "Source updated, reimport needed: the original file differs from the imported copy.";
+			s.text = "Source changed, reimport needed: the original file differs from the imported one.";
 		else
-			s.text = "Source up to date.";
+			s.text = s.hashed ? "Source up to date (size / time had changed, the content is the same: confirmed by hash)." : "Source up to date.";
 		return s;
+	}
+
+	SSourceCheckInput SourceCheckInputOf(const CDetails& details)
+	{
+		SSourceCheckInput in;
+		const std::string copyRel = details.Get(DetailKey::kSourcePath);
+		in.copyAbs = copyRel.empty() ? std::string() : AssetsAbsolute(copyRel);
+		in.originalAbs = details.Get(DetailKey::kSourceKind) == "png-sequence" ? std::string() : details.Get(DetailKey::kSourceOriginal);
+		in.importedSha256 = details.Get(DetailKey::kSourceSha256);
+		in.copyStamp = details.Get(DetailKey::kSourceStamp);
+		in.originalStamp = details.Get(DetailKey::kOriginalStamp);
+		return in;
+	}
+
+	bool SourceStampsMatch(const SSourceCheckInput& in)
+	{
+		// both stamps recorded and equal to the files now (a missing original counts as "nothing to compare")
+		if (in.copyAbs.empty() || in.copyStamp.empty() || FileStamp(in.copyAbs) != in.copyStamp)
+			return false;
+		std::error_code ec;
+		if (!in.originalAbs.empty() && fs::is_regular_file(fs::u8path(in.originalAbs), ec))
+			return !in.originalStamp.empty() && FileStamp(in.originalAbs) == in.originalStamp;
+		return true;
+	}
+
+	bool RecordSourceStamps(CAsset& asset, const SSourceStatus& status)
+	{
+		// only after a hash confirmed that the content is still the imported one: the next check is a stat again
+		if (!status.checked || !status.copyMatchesImport || (status.originalExists && !status.originalMatchesImport))
+			return false;
+		CDetails details(asset);
+		bool changed = false;
+		if (!status.copyStamp.empty() && details.Get(DetailKey::kSourceStamp) != status.copyStamp)
+		{
+			details.Set(DetailKey::kSourceStamp, status.copyStamp);
+			changed = true;
+		}
+		if (status.originalExists && !status.originalStamp.empty() && details.Get(DetailKey::kOriginalStamp) != status.originalStamp)
+		{
+			details.Set(DetailKey::kOriginalStamp, status.originalStamp);
+			changed = true;
+		}
+		return changed && WriteAssetFilesAndDetails(asset, nullptr, &details);
 	}
 
 	// ---------------------------------------------------------------------------------------------------------------
@@ -1127,6 +1317,8 @@ namespace CEVEditor
 			std::string newSourceRel;                    // set when the source copy was created / refreshed
 			std::string newSourceSha;
 			std::string newSourceSize;
+			std::string newSourceStamp;
+			std::string newOriginalStamp;
 			SMediaInfo media;                            // of the new main video (recompress)
 			bool mediaKnown = false;
 			std::vector<SDescriptor::SVariant> variants; // made by this job
@@ -1227,6 +1419,8 @@ namespace CEVEditor
 			}
 		}
 		const std::string original = details.Get(DetailKey::kSourceOriginal);
+		const std::string originalStamp = details.Get(DetailKey::kOriginalStamp);
+		const std::string recordedSha = details.Get(DetailKey::kSourceSha256);
 		const std::vector<SDescriptor::SVariant> oldVariants = desc.variants;
 		const STranscodeOps o = ops;
 
@@ -1286,10 +1480,13 @@ namespace CEVEditor
 				std::string srcAbs;
 				std::error_code e;
 				const bool separateSource = !srcRel.empty() && _stricmp(srcRel.c_str(), masterRel.c_str()) != 0;
+				bool refresh = o.refreshSource;
+				if (separateSource && !refresh && o.refreshIfOriginalChanged)
+					refresh = OriginalChanged(original, originalStamp, recordedSha, ctx.cancel);
 				if (separateSource)
 				{
 					srcAbs = AssetsAbsolute(srcRel);
-					if (o.refreshSource)
+					if (refresh)
 					{
 						std::string copyError;
 						ctx.Log("copying the original file over the source copy");
@@ -1318,7 +1515,7 @@ namespace CEVEditor
 					}
 					result->newSourceRel = srcRel;
 				}
-				if (o.refreshSource || result->newSourceRel.size() > 0)
+				if (refresh || o.refreshIfOriginalChanged || result->newSourceRel.size() > 0)
 				{
 					std::string sha;
 					if (!Sha256File(srcAbs, sha, ctx.cancel))
@@ -1330,6 +1527,9 @@ namespace CEVEditor
 					result->newSourceRel = srcRel;
 					result->newSourceSha = sha;
 					result->newSourceSize = std::to_string(static_cast<unsigned long long>(fs::file_size(fs::u8path(srcAbs), e)));
+					result->newSourceStamp = FileStamp(srcAbs);
+					if (refresh || o.refreshIfOriginalChanged) // else the original may have changed without being copied: keep its old stamp
+						result->newOriginalStamp = FileStamp(original);
 				}
 				result->stage = fs::u8path(AssetsAbsolute(folder + name + ".stage.webm"));
 				ctx.Log("re-encoding " + srcRel + " (VP9 / Opus, crf " + std::to_string(o.crf) + (o.height > 0 ? ", height " + std::to_string(o.height) : std::string(", source size")) + ")");
@@ -1518,6 +1718,9 @@ namespace CEVEditor
 					newDetails.Set(DetailKey::kSourcePath, result->newSourceRel);
 					newDetails.Set(DetailKey::kSourceSha256, result->newSourceSha);
 					newDetails.Set(DetailKey::kSourceSize, result->newSourceSize);
+					newDetails.Set(DetailKey::kSourceStamp, result->newSourceStamp);
+					if (!result->newOriginalStamp.empty())
+						newDetails.Set(DetailKey::kOriginalStamp, result->newOriginalStamp);
 					if (std::find_if(files.begin(), files.end(), [&](const std::string& f) { return _stricmp(f.c_str(), result->newSourceRel.c_str()) == 0; }) == files.end())
 						files.push_back(result->newSourceRel);
 				}

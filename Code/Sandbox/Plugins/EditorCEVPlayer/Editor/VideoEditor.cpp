@@ -73,6 +73,16 @@ namespace CEVEditor
 		}
 	}
 
+	void RefreshEditorsAfterReimport(const std::string& metadataRel)
+	{
+		const std::vector<CVideoEditor*> copy = g_instances;
+		for (CVideoEditor* const pEditor : copy)
+		{
+			if (pEditor->HasAsset() && SameMetadata(pEditor->State().metadataRel, metadataRel))
+				pEditor->RefreshAfterReimport();
+		}
+	}
+
 	void ReleaseEditorsOfAsset(const std::string& metadataRel)
 	{
 		const std::vector<CVideoEditor*> copy = g_instances; // a release can queue work, never edits the list
@@ -104,6 +114,11 @@ namespace CEVEditor
 	CVideoPreviewPanel* CVideoEditor::PreviewPanel() const
 	{
 		return m_pPreview.data();
+	}
+
+	CVideoInfoPanel* CVideoEditor::InfoPanel() const
+	{
+		return m_pInfo.data();
 	}
 
 	void CVideoEditor::OnInitialize()
@@ -227,9 +242,7 @@ namespace CEVEditor
 		const std::string videoAbs = AssetsAbsolute(m_state.videoRel);
 		const std::string copyAbs = m_state.sourceCopyRel.empty() ? std::string() : AssetsAbsolute(m_state.sourceCopyRel);
 		const bool sequence = m_state.details.Get(DetailKey::kSourceKind) == "png-sequence";
-		const std::string original = sequence ? std::string() : m_state.details.Get(DetailKey::kSourceOriginal); // a folder: no hash to compare
 		const std::string sequenceFolder = m_state.details.Get(DetailKey::kSourceOriginal);
-		const std::string sha = m_state.details.Get(DetailKey::kSourceSha256);
 
 		// stream information of the main video (reads the container index: off the main thread)
 		auto media = std::make_shared<SMediaInfo>();
@@ -251,26 +264,38 @@ namespace CEVEditor
 			if (*mediaOk && self->m_pPreview)
 				self->m_pPreview->SetFps(media->fps);
 			Q_EMIT self->StateChanged();
-		}, owner);
+		}, owner, false);
 
-		// source copy / original file against the hash recorded at import time (hashes whole files)
-		auto status = std::make_shared<SSourceStatus>();
-		pRunner->Submit(tr("Check source file"), [copyAbs, original, sha, status, sequence, sequenceFolder](const SOpContext& ctx)
+		// the source file / original file: size and time against the stamps recorded with the hash; only when one of them changed
+		// (or was never recorded: assets of older versions) a job hashes the files ("needs confirmation" until it is done)
+		if (sequence && copyAbs.empty())
 		{
-			if (sequence && copyAbs.empty())
-			{
-				// PNG sequence: not copied into the project, only the folder is recorded
-				std::error_code ec;
-				status->checked = true;
-				status->originalPath = sequenceFolder;
-				status->originalExists = std::filesystem::is_directory(std::filesystem::u8path(sequenceFolder), ec);
-				status->text = status->originalExists ? "Source: PNG sequence in " + sequenceFolder + " (not copied into the project)."
-					: "Source: PNG sequence " + sequenceFolder + " (not copied into the project; the folder is not there any more).";
-				SOpResult r;
-				r.status = EOpStatus::Ok;
-				return r;
-			}
-			*status = CheckSourceStatus(copyAbs, original, sha, ctx.cancel);
+			// PNG sequence: not copied into the project, only the folder is recorded
+			std::error_code ec;
+			SSourceStatus st;
+			st.checked = true;
+			st.originalPath = sequenceFolder;
+			st.originalExists = std::filesystem::is_directory(std::filesystem::u8path(sequenceFolder), ec);
+			st.text = st.originalExists ? "Source: PNG sequence in " + sequenceFolder + " (not copied into the project)."
+				: "Source: PNG sequence " + sequenceFolder + " (not copied into the project; the folder is not there any more).";
+			m_state.source = st;
+			return;
+		}
+		const SSourceCheckInput input = SourceCheckInputOf(m_state.details);
+		if (SourceStampsMatch(input))
+		{
+			m_state.source = CheckSourceStatus(input, nullptr); // stat only, nothing is hashed
+			return;
+		}
+		SSourceStatus pending;
+		pending.confirming = true;
+		pending.text = "The source file's size / time changed (or was never recorded): confirming by hash ...";
+		m_state.source = pending;
+		CryLogAlways("[CEVEditor] '%s': source check needs confirmation (size / time differ from the recorded ones), hashing", m_state.assetName.c_str());
+		auto status = std::make_shared<SSourceStatus>();
+		pRunner->Submit(tr("Check source file"), [input, status](const SOpContext& ctx)
+		{
+			*status = CheckSourceStatus(input, ctx.cancel);
 			SOpResult r;
 			r.status = EOpStatus::Ok;
 			return r;
@@ -279,8 +304,43 @@ namespace CEVEditor
 			if (!self || self->m_generation != generation)
 				return;
 			self->m_state.source = *status;
+			CryLogAlways("[CEVEditor] '%s': source check: %s", self->m_state.assetName.c_str(), status->text.c_str());
 			Q_EMIT self->StateChanged();
-		}, owner);
+			// the content is the imported one: record the new stamps, the next check is a stat again
+			if (status->hashed)
+			{
+				if (CAsset* const pAsset = self->GetAssetBeingEdited())
+					RecordSourceStamps(*pAsset, *status);
+			}
+		}, owner, false);
+	}
+
+	void CVideoEditor::RecheckSource()
+	{
+		if (!m_stateValid)
+			return;
+		if (CAsset* const pAsset = GetAssetBeingEdited())
+			m_state.details = CDetails(*pAsset);
+		++m_generation;
+		StartBackgroundChecks();
+		Q_EMIT StateChanged();
+	}
+
+	void CVideoEditor::RefreshAfterReimport()
+	{
+		CAsset* const pAsset = GetAssetBeingEdited();
+		if (!m_stateValid || pAsset == nullptr)
+			return;
+		m_state.mediaKnown = false;
+		m_state.source = SSourceStatus();
+		++m_generation;
+		m_forcePreviewReload = true;
+		if (LoadState(*pAsset, true))
+		{
+			PushToPreview();
+			StartBackgroundChecks();
+			Q_EMIT StateChanged();
+		}
 	}
 
 	bool CVideoEditor::OnOpenAsset(CAsset* pAsset)
@@ -289,6 +349,9 @@ namespace CEVEditor
 		m_stateValid = false;
 		m_state = SState();
 		m_pushedPreviewKey.clear();
+		// assets imported before the source file was registered with the engine: register it now (the Asset Browser's
+		// Reimport and CAsset::Reimport need it)
+		EnsureSourceRegistered(*pAsset);
 		if (!LoadState(*pAsset, false))
 			return false;
 		g_pCurrent = this;
@@ -439,47 +502,13 @@ namespace CEVEditor
 		});
 	}
 
-	bool CVideoEditor::ReimportSource(std::string& error)
+	bool CVideoEditor::Reimport()
 	{
 		CAsset* const pAsset = GetAssetBeingEdited();
-		if (pAsset == nullptr)
-		{
-			error = "no asset opened";
+		if (pAsset == nullptr || !pAsset->HasSourceFile() || pAsset->IsImmutable() || !pAsset->IsWritable())
 			return false;
-		}
-		if (IsTranscodedAsset(*pAsset))
-		{
-			// the video was made by FFmpeg: copy the original over the source copy and encode again with the stored settings
-			const SImportOptions settings = SImportOptions::FromSettingsString(m_state.details.Get(DetailKey::kImportSettings));
-			STranscodeOps ops;
-			ops.recompress = true;
-			ops.refreshSource = true;
-			ops.crf = settings.crf;
-			ops.height = settings.height;
-			ops.changeVariants = true;
-			ops.variants = VariantHeights(m_state.descriptor);
-			ops.removeOtherVariants = false;
-			QPointer<CVideoEditor> self(this);
-			if (SubmitTranscodeOps(*pAsset, ops, error, [self](bool) { if (self) self->RefreshAssetState(); }) == 0)
-				return false;
-			error.clear();
-			return true; // runs on a job: the window refreshes when it is done
-		}
-		// the copy is replaced: nobody may hold it open (preview player, background checks, audio jobs)
-		if (!ReleaseAssetFiles(m_state.metadataRel, m_state.guid, 15000, error))
-			return false;
-		const bool ok = ReimportVideo(*pAsset, error);
-		m_state.mediaKnown = false;
-		m_state.source = SSourceStatus();
-		++m_generation;
-		m_forcePreviewReload = true;
-		if (LoadState(*pAsset, true))
-		{
-			PushToPreview();
-			StartBackgroundChecks();
-			Q_EMIT StateChanged();
-		}
-		return ok;
+		pAsset->Reimport(); // CVideoAssetImporter::ReimportAsset; the window refreshes through RefreshEditorsAfterReimport
+		return true;
 	}
 
 	void CVideoEditor::RunAudioOps(const SAudioOps& ops)

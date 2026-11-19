@@ -12,12 +12,12 @@
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QThread>
 #include <QVBoxLayout>
 
+#include <Controls/QuestionDialog.h>
 #include <ThreadingUtils.h>
 
 #include "Editor/TranscodeDialog.h"
@@ -231,16 +231,16 @@ namespace CEVEditor
 					const SImportPlan plan = PlanImport(std::string(sourceFile.toUtf8().constData()), folderRel, chosen);
 					if (!plan.ok)
 					{
-						QMessageBox::warning(QApplication::activeWindow(), tr("Import video"), QString::fromUtf8(plan.error.c_str()));
+						CQuestionDialog::SWarning(tr("Import video"), QString::fromUtf8(plan.error.c_str()), QDialogButtonBox::Ok, QDialogButtonBox::Ok, QApplication::activeWindow());
 						in = chosen;
 						continue;
 					}
 					chosen.overwrite = false;
 					if (plan.exists && plan.assetName != alreadyConfirmedName)
 					{
-						const QMessageBox::StandardButton answer = QMessageBox::warning(QApplication::activeWindow(), tr("Import video"),
-							QString::fromUtf8(plan.detail.c_str()) + tr("\n\nReplace it?"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-						if (answer != QMessageBox::Yes)
+						const QDialogButtonBox::StandardButton answer = CQuestionDialog::SWarning(tr("Import video"),
+							QString::fromUtf8(plan.detail.c_str()) + tr("\n\nReplace it?"), QDialogButtonBox::Yes | QDialogButtonBox::No, QDialogButtonBox::No, QApplication::activeWindow());
+						if (answer != QDialogButtonBox::Yes)
 						{
 							in = chosen; // back to the dialog: pick another name
 							continue;

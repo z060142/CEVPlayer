@@ -20,5 +20,8 @@ namespace CEVEditor
 	private:
 		std::vector<string> GetAssetNames(const std::vector<string>& assetTypes, CAssetImportContext& ctx) override;
 		std::vector<CAsset*> ImportAssets(const std::vector<string>& assetPaths, CAssetImportContext& ctx) override;
+		//! The engine's Reimport (Asset Browser, CAsset::Reimport): no dialog, the import settings stored in the Details are used
+		//! again (the default implementation would import afresh and lose them, AssetImporter.cpp). See ReimportWithStoredSettings.
+		void ReimportAsset(CAsset* pAsset) override;
 	};
 }

@@ -144,25 +144,62 @@ namespace CEVEditor
 	//! engine's drop handler merges what an importer returns). The asset must be in the asset manager by now.
 	void StartPostImportOps(const std::string& metadataRel, const std::string& assetName, const SImportOptions& options);
 
-	//! Main thread: copy the original file over the copy again (hash, probe and Details are renewed). The preview
-	//! player must not have the file open. Assets whose video was made by FFmpeg (IsTranscodedAsset) are reimported by
-	//! SubmitTranscodeOps (refreshSource) instead: this returns false for them.
+	//! Main thread: reimport of an asset whose video is the source file itself (a plain WebM copy): when the original file
+	//! outside the project changed since the import it is copied over the source file first; then the source file is probed and
+	//! hashed and the Details are renewed (the import settings stay). The preview player must not have the file open. Assets
+	//! whose video was made by FFmpeg (IsTranscodedAsset) are reimported by SubmitTranscodeOps instead: false for them.
 	bool ReimportVideo(CAsset& asset, std::string& error);
+	//! Main thread: the reimport of CVideoAssetImporter::ReimportAsset (the engine's Reimport, Asset Browser) with the import
+	//! settings stored in the Details. Returns 0 (failed, `error`), 1 (done) or 2 (an FFmpeg job runs; `onFinished` follows).
+	//! The editor windows that show the asset are refreshed afterwards.
+	int ReimportWithStoredSettings(CAsset& asset, std::string& error, std::function<void(bool ok)> onFinished = std::function<void(bool)>());
+	//! Implemented by the editor window (VideoEditor.cpp): re-reads the asset in every window that shows it and checks its
+	//! source again (after a reimport).
+	void RefreshEditorsAfterReimport(const std::string& metadataRel);
+
+	//! Details sourcePath when it can be the engine's source file of the asset (same folder as the .cryasset), else "".
+	std::string RegistrableSourceFile(const std::string& metadataRel, const CDetails& details);
+	//! Main thread: an asset imported before the source file was registered (empty CAsset::GetSourceFile) whose Details name a
+	//! source copy next to it gets it registered (the .cryasset is written). True when it was changed.
+	bool EnsureSourceRegistered(CAsset& asset);
+	//! "<size>:<mtime>" of a file, "" when it does not exist.
+	std::string FileStamp(const std::string& absPath);
 	//! The main video of the asset was transcoded from a separate source copy / PNG sequence (Details transcoded = 1).
 	bool IsTranscodedAsset(const CAsset& asset);
 
-	//! Source status of an asset, computed by hashing (call on a worker thread: reads whole files).
+	//! What the source check compares (from the Details): the files and the size / time stamps recorded with the hash.
+	struct SSourceCheckInput
+	{
+		std::string copyAbs;                 //!< the source file next to the asset ("" = none, PNG sequence)
+		std::string originalAbs;             //!< the original file outside the project ("" = none / PNG sequence folder)
+		std::string importedSha256;
+		std::string copyStamp;               //!< Details sourceStamp ("" = not recorded yet: hash)
+		std::string originalStamp;           //!< Details originalStamp
+	};
+	SSourceCheckInput SourceCheckInputOf(const CDetails& details);
+	//! Cheap (stat only, main thread is fine): the recorded stamps equal the files now, so no hash is needed.
+	bool SourceStampsMatch(const SSourceCheckInput& in);
+
+	//! Source status of an asset: size + modification time against the recorded stamps; only a file whose stamp differs (or that
+	//! has none recorded) is hashed (call on a worker thread then).
 	struct SSourceStatus
 	{
 		bool copyExists = false;
-		bool copyMatchesImport = false;      //!< hash of the copy == Details sourceSha256
+		bool copyMatchesImport = false;      //!< stamp as recorded, or hash of the copy == Details sourceSha256
 		bool originalExists = false;
-		bool originalMatchesImport = false;  //!< hash of the original file == Details sourceSha256
+		bool originalMatchesImport = false;  //!< stamp as recorded, or hash of the original file == Details sourceSha256
 		bool checked = false;
+		bool confirming = false;             //!< a stamp differs: the hash check is running ("needs confirmation")
+		bool hashed = false;                 //!< a file was hashed because its stamp differed / was missing
+		bool reimportNeeded = false;
+		std::string copyStamp;               //!< stamps of the files now (recorded again when the hash confirmed the content)
+		std::string originalStamp;
 		std::string originalPath;
 		std::string text;
 	};
-	SSourceStatus CheckSourceStatus(const std::string& copyAbs, const std::string& originalAbs, const std::string& importedSha256, const std::atomic<bool>* cancel);
+	SSourceStatus CheckSourceStatus(const SSourceCheckInput& in, const std::atomic<bool>* cancel);
+	//! Main thread: after a hash confirmed unchanged content, the current stamps go into the Details (no hash next time).
+	bool RecordSourceStamps(CAsset& asset, const SSourceStatus& status);
 
 	struct SAudioOps
 	{
@@ -184,7 +221,8 @@ namespace CEVEditor
 	struct STranscodeOps
 	{
 		bool recompress = false;          //!< re-encode the main video (crf / height) from the source copy (fallback: the current webm becomes the source copy)
-		bool refreshSource = false;       //!< recompress: copy the original file over the source copy first (Reimport of a transcoded asset)
+		bool refreshSource = false;       //!< recompress: copy the original file over the source copy first
+		bool refreshIfOriginalChanged = false; //!< recompress: copy it only when the original changed since the import (Reimport)
 		int crf = 32;
 		int height = 0;                   //!< 0 = keep the height of the source
 		bool changeVariants = false;      //!< generate the variants in `variants`

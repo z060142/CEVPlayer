@@ -91,8 +91,10 @@ namespace CEVEditor
 		void EnsureDetected();
 		//! Runs the detection on a job (again). A running detection is repeated once more afterwards.
 		void StartDetect(bool force);
-		//! Persists the configured path ("" clears it) and detects again.
+		//! Stores the configured path in the editor preferences ("" clears it) and detects again.
 		void SetPath(const std::string& path);
+		//! The preference changed (Preferences window, load, reset): takes it over and detects again when detection already ran.
+		void ReloadConfiguredPath();
 		std::string ConfiguredPath() const;
 
 		//! Reason why downloading our minimal build is disabled, "" when it is possible.
