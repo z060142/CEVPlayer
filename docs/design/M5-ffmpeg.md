@@ -244,7 +244,7 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 - 對話框的變體清單不事先探測來源高度（對話框時來源高度未知）：高度不低於影片者由 job 略過並記錄，不是灰掉（已存在資產的對話框則用已知高度灰掉）。
 - 失敗或取消後，匯入時新建的**空資料夾**會留下（檔案都已刪除）。
 - 社群樹只建置，沒有執行（其 Sandbox / GameLauncher 本身有已知問題，見 `docs/research/03-smoke-test.md` §5）。
-- 最小版 FFmpeg 未實測（測試用的是完整版 8.0.1）。
+- 最小版 FFmpeg 未實測（測試用的是完整版 8.0.1）。（2026-11-19 註記：已過時——發佈候選已以 release `ffmpeg-minimal-v8.0.3-cev1` 發佈並釘進 `FfmpegInstall.h`，真實下載、偵測與 MP4 → WebM 轉檔已實跑，見本節第一條；§7 的「本機，未發佈」同此。）
 - `Reimport source`（轉檔過的資產）的按鈕本身沒有單獨跑；`cev_editor_recompress ... refresh` 走同一個 job，只有 `refresh` 之外的路徑被實跑。
 
 ## 2026-11-19 修訂（E1；本節優先於上文的對應段落）
