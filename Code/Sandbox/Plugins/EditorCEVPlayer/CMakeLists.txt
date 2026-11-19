@@ -54,10 +54,14 @@ add_sources("NoUberFile"
 		"Editor/ImportOptionsDialog.h"
 		"Editor/TranscodeDialog.cpp"
 		"Editor/TranscodeDialog.h"
+		"Editor/PreviewAudio.cpp"
+		"Editor/PreviewAudio.h"
+		"Editor/PreviewMedia.cpp"
+		"Editor/PreviewMedia.h"
 		"Editor/PreviewSession.cpp"
 		"Editor/PreviewSession.h"
-		"Editor/VideoViewport.cpp"
-		"Editor/VideoViewport.h"
+		"Editor/VideoPreviewWidget.cpp"
+		"Editor/VideoPreviewWidget.h"
 		"Editor/PreviewPanel.cpp"
 		"Editor/PreviewPanel.h"
 		"Editor/InfoPanel.cpp"
@@ -71,7 +75,6 @@ CryEditorPlugin(EditorCEVPlayer PCH "StdAfx.cpp" SOLUTION_FOLDER "Sandbox/Plugin
 
 target_include_directories(${THIS_PROJECT} PRIVATE
 	"${CMAKE_CURRENT_SOURCE_DIR}"
-	"${CRYENGINE_DIR}/Code/CryPlugins/CEVPlayer/Interface"   # CEVPlayer/IVideoPlayer.h, IVideoPlugin.h
 )
 
 # CEVPlayerCore (static library, CE independent: used here for the stream info of a WebM file).
@@ -91,3 +94,13 @@ target_link_libraries(${THIS_PROJECT} PRIVATE CEVPlayerOffline)
 # plug-in links it. ffmpeg only ever runs as a child process: no libav* is linked, and the runtime plug-in does not link this.
 # (Core/offline/CMakeLists.txt creates the target next to CEVPlayerOffline.)
 target_link_libraries(${THIS_PROJECT} PRIVATE CEVPlayerFFmpeg)
+
+# The video preview plays its sound through Qt Multimedia (QAudioOutput, E2): the import library of the Sandbox's own Qt SDK
+# is linked the way EditorXTUI does it (Qt5Multimedia.dll and plugins/audio ship in bin/win_x64).
+set(CEV_QT_LIB "${CRYENGINE_DIR}/Code/SDKs/Qt/5.12.3_pyside2/Qt/lib")
+if (NOT EXISTS "${CEV_QT_LIB}/Qt5Multimedia.lib")
+	message(FATAL_ERROR "EditorCEVPlayer: ${CEV_QT_LIB}/Qt5Multimedia.lib not found (Qt Multimedia of the Sandbox Qt SDK)")
+endif()
+target_link_libraries(${THIS_PROJECT} PRIVATE
+	"$<$<CONFIG:Debug>:${CEV_QT_LIB}/Qt5Multimediad.lib>"
+	"$<$<NOT:$<CONFIG:Debug>>:${CEV_QT_LIB}/Qt5Multimedia.lib>")

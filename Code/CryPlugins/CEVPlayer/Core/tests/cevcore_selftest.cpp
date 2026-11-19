@@ -27,6 +27,7 @@
 #include "CEVCore/AudioDecoder.h"
 #include "CEVCore/ColorConvert.h"
 #include "CEVCore/DecodePool.h"
+#include "CEVCore/DescriptorPlan.h"
 #include "CEVCore/FrameRing.h"
 #include "CEVCore/IByteSource.h"
 #include "CEVCore/IClock.h"
@@ -461,6 +462,86 @@ namespace
 		CHECK(o601[1] != o709[1]);
 		// 601: R = 1.164*(120-16) + 1.596*(240-128) = 121.06+178.75 = 299.8 -> 255
 		CHECK(o601[0] == 255);
+	}
+
+	// ---- DescriptorPlan: variant / audio source decisions shared by the runtime module and the editor preview
+	bool PlanExists(const char* path, void* user)
+	{
+		const std::vector<std::string>& files = *static_cast<const std::vector<std::string>*>(user);
+		return std::find(files.begin(), files.end(), std::string(path)) != files.end();
+	}
+
+	void TestDescriptorPlan()
+	{
+		g_context = "descriptor";
+		std::vector<std::string> files = { "v/main.webm", "v/main_720.webm", "v/main.japanese.webm" };
+		VideoDescriptor d;
+		d.video = "v/main.webm";
+		d.route = VideoRoute::Mixed;
+		d.pauseTrigger = "Pause_Root";
+		VideoDescriptor::SLanguage en; en.name = "english"; en.embedded = true;
+		VideoDescriptor::SLanguage ja; ja.name = "Japanese"; ja.file = "v/main.japanese.webm";
+		VideoDescriptor::SLanguage de; de.name = "german"; de.file = "v/main.german.webm";
+		VideoDescriptor::SLanguage fr; fr.name = "french"; fr.trigger = "Play_FR";
+		d.languages = { en, ja, de, fr };
+		d.defaultLanguage = "english";
+		VideoDescriptor::SVariant v720; v720.file = "v/main_720.webm"; v720.width = 1280; v720.height = 720;
+		VideoDescriptor::SVariant v540; v540.file = "v/main_540.webm"; v540.width = 960; v540.height = 540;
+		d.variants = { v720, v540 };
+		VideoDescriptor::SMarker m1; m1.name = "b"; m1.time = 2.0;
+		VideoDescriptor::SMarker m2; m2.name = "a"; m2.time = 1.0;
+		VideoDescriptor::SMarker m3; m3.name = "c"; m3.time = 2.0;
+		d.markers = { m1, m2, m3 };
+		SortDescriptorMarkers(d);
+		CHECK(d.markers[0].name == "a" && d.markers[1].name == "b" && d.markers[2].name == "c"); // stable
+
+		CHECK(FindDescriptorLanguage(d, "JAPANESE") == 1);
+		CHECK(FindDescriptorLanguage(d, "") == -1);
+		CHECK(FindDescriptorLanguage(d, nullptr) == -1);
+		CHECK(std::strcmp(VideoRouteName(VideoRoute::Cue), "cue") == 0);
+
+		DescriptorAudioPlan a;
+		const char* const reqJa[3] = { "", "japanese", "english" };
+		ResolveDescriptorAudio(d, reqJa, 3, &PlanExists, &files, a);
+		CHECK(a.language == "Japanese" && a.externalPath == "v/main.japanese.webm" && !a.cue && a.missingExternal.empty());
+		const char* const reqDe[2] = { "unknown", "german" };
+		ResolveDescriptorAudio(d, reqDe, 2, &PlanExists, &files, a);
+		CHECK(a.language == "german" && a.externalPath.empty() && a.missingExternal == "v/main.german.webm");
+		const char* const reqFr[1] = { "french" };
+		ResolveDescriptorAudio(d, reqFr, 1, &PlanExists, &files, a);
+		CHECK(a.cue && a.trigger == "Play_FR" && a.pauseTrigger == "Pause_Root");
+		const char* const reqNone[1] = { "klingon" };
+		ResolveDescriptorAudio(d, reqNone, 1, &PlanExists, &files, a);
+		CHECK(a.language.empty() && a.externalPath.empty() && !a.cue);
+
+		VideoDescriptor e = d;
+		e.route = VideoRoute::Embedded;
+		ResolveDescriptorAudio(e, reqJa, 3, &PlanExists, &files, a);
+		CHECK(a.language == "Japanese" && a.externalPath.empty() && !a.cue);
+		e.route = VideoRoute::Cue;
+		e.trigger = "Play_Root";
+		ResolveDescriptorAudio(e, reqJa, 3, &PlanExists, &files, a);
+		CHECK(a.cue && a.trigger == "Play_Root" && a.language == "Japanese");
+		ResolveDescriptorAudio(e, reqFr, 1, &PlanExists, &files, a);
+		CHECK(a.cue && a.trigger == "Play_FR");
+
+		DescriptorVariantChoice c = PickDescriptorVariant(d, -1, false, 0, &PlanExists, &files);
+		CHECK(c.variant == -1 && c.videoPath == "v/main.webm");
+		c = PickDescriptorVariant(d, 1, false, 0, &PlanExists, &files);
+		CHECK(c.variant == 1 && c.videoPath == "v/main_720.webm" && c.height == 720);
+		c = PickDescriptorVariant(d, 2, false, 0, &PlanExists, &files);
+		CHECK(c.variant == -1 && c.missingFile == "v/main_540.webm" && c.videoPath == "v/main.webm");
+		c = PickDescriptorVariant(d, 5, false, 0, &PlanExists, &files);
+		CHECK(c.variant == -1 && c.forcedOutOfRange);
+		c = PickDescriptorVariant(d, 0, true, 100, &PlanExists, &files);
+		CHECK(c.variant == -1 && !c.forcedOutOfRange); // 0 = main video, wins over the automatic choice
+		c = PickDescriptorVariant(d, -1, true, 700, &PlanExists, &files);
+		CHECK(c.variant == 1); // smallest not below 700
+		c = PickDescriptorVariant(d, -1, true, 1080, &PlanExists, &files);
+		CHECK(c.variant == -1 && c.missingFile.empty()); // none big enough: the main video
+		c = PickDescriptorVariant(d, -1, true, 500, &PlanExists, &files);
+		CHECK(c.variant == -1 && c.missingFile == "v/main_540.webm"); // 540 chosen but missing
+		CHECK(DescriptorAvOffsetSeconds(d) == 0.0);
 	}
 
 	void TestStatusAndSources()
@@ -3441,6 +3522,7 @@ int main(int argc, char** argv)
 
 	if (wanted("color")) TestColor();
 	if (wanted("status")) TestStatusAndSources();
+	if (wanted("descriptor")) TestDescriptorPlan();
 
 	for (const Clip& c : kClips)
 	{

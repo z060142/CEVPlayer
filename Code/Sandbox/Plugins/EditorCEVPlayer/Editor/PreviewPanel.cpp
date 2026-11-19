@@ -10,133 +10,50 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QSlider>
-#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
-#include <QViewport.h>
-#include <CryRenderer/IRenderAuxGeom.h>
+#include <CrySystem/ISystem.h>
 
-#include "Editor/VideoViewport.h"
+#include "Editor/VideoPreviewWidget.h"
 
 namespace CEVEditor
 {
 	namespace
 	{
-		// ---- checkerboard texture (shared by all preview panels, created with the first, released with the last) ----
-		constexpr int kCheckerSize = 256;
-		constexpr int kCheckerCell = 16;
-		int g_checkerUsers = 0;
-		int g_checkerId = 0;
-		ITexture* g_pChecker = nullptr;
+		constexpr int kTickMs = 16;            // ~60 Hz: the Core presents the frame that is due
+		constexpr int kMinimizedPollMs = 250;  // main window minimized: only watch for the restore
+		std::vector<const CVideoPreviewPanel*> g_timerPanels;
 
-		void AcquireChecker()
+		void NoteTimer(const CVideoPreviewPanel* pPanel, bool running)
 		{
-			if (g_checkerUsers++ > 0 || gEnv == nullptr || gEnv->pRenderer == nullptr)
-				return;
-			std::vector<uint8> pixels(static_cast<size_t>(kCheckerSize) * kCheckerSize * 4);
-			for (int y = 0; y < kCheckerSize; ++y)
-			{
-				for (int x = 0; x < kCheckerSize; ++x)
-				{
-					const uint8 v = (((x / kCheckerCell) + (y / kCheckerCell)) & 1) ? 150 : 204;
-					uint8* const p = &pixels[(static_cast<size_t>(y) * kCheckerSize + x) * 4];
-					p[0] = v; p[1] = v; p[2] = v; p[3] = 255;
-				}
-			}
-			g_checkerId = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(pixels.data(), kCheckerSize, kCheckerSize, eTF_R8G8B8A8, eTF_R8G8B8A8, 0, false, FILTER_POINT, 0, "$cev_editor_checker", FT_NOMIPS));
-			g_pChecker = g_checkerId > 0 ? gEnv->pRenderer->EF_GetTextureByID(g_checkerId) : nullptr;
-			CryLogAlways("[CEVEditor] checkerboard texture id %d", g_checkerId);
-		}
-
-		void ReleaseChecker()
-		{
-			if (--g_checkerUsers > 0)
-				return;
-			g_checkerUsers = 0;
-			if (g_pChecker != nullptr && gEnv != nullptr && gEnv->pRenderer != nullptr) // the renderer owns the texture: nothing to release once it is gone
-				g_pChecker->Release();
-			g_pChecker = nullptr;
-			g_checkerId = 0;
-		}
-
-		bool g_editorReady = false;
-
-		struct SRectF { float x, y, w, h; };
-
-		void DrawChecker(IRenderAuxGeom* aux, const SRectF& r)
-		{
-			if (g_checkerId <= 0)
-				return;
-			SRender2DImageDescription img;
-			img.z = 1.0f;
-			img.textureId = static_cast<uint32>(g_checkerId);
-			img.color = ColorB(255, 255, 255, 255);
-			img.renderFlags = e_Mode2D | e_DepthTestOff | e_AlphaNone | e_CullModeNone | e_FillModeSolid;
-			for (float ty = 0.f; ty < r.h; ty += kCheckerSize)
-			{
-				for (float tx = 0.f; tx < r.w; tx += kCheckerSize)
-				{
-					const float tw = std::min(static_cast<float>(kCheckerSize), r.w - tx);
-					const float th = std::min(static_cast<float>(kCheckerSize), r.h - ty);
-					img.x = r.x + tx;
-					img.y = r.y + ty;
-					img.w = tw;
-					img.h = th;
-					// the aux quad is flipped vertically: t0 = 1 at the top (see FullscreenOutput.cpp of the runtime plug-in)
-					img.uv[0] = Vec2(0.f, 1.f);
-					img.uv[1] = Vec2(tw / kCheckerSize, 1.f - th / kCheckerSize);
-					aux->PushImage(img);
-				}
-			}
-		}
-
-		void DrawVideo(IRenderAuxGeom* aux, int textureId, const SRectF& r, bool hasAlpha)
-		{
-			SRender2DImageDescription img;
-			img.x = r.x; img.y = r.y; img.w = r.w; img.h = r.h; img.z = 1.0f;
-			img.textureId = static_cast<uint32>(textureId);
-			img.uv[0] = Vec2(0.f, 1.f);
-			img.uv[1] = Vec2(1.f, 0.f);
-			if (!hasAlpha)
-			{
-				img.color = ColorB(255, 255, 255, 255);
-				img.renderFlags = e_Mode2D | e_DepthTestOff | e_AlphaNone | e_CullModeNone | e_FillModeSolid;
-				aux->PushImage(img);
-				return;
-			}
-			// premultiplied "over" in two passes (the result is dst * (1 - a) + rgb)
-			img.color = ColorB(0, 0, 0, 255);
-			img.renderFlags = e_Mode2D | e_DepthTestOff | e_AlphaBlended | e_CullModeNone | e_FillModeSolid;
-			aux->PushImage(img);
-			img.color = ColorB(255, 255, 255, 255);
-			img.renderFlags = e_Mode2D | e_DepthTestOff | e_AlphaAdditive | e_CullModeNone | e_FillModeSolid;
-			aux->PushImage(img);
+			const auto it = std::find(g_timerPanels.begin(), g_timerPanels.end(), pPanel);
+			if (running && it == g_timerPanels.end())
+				g_timerPanels.push_back(pPanel);
+			else if (!running && it != g_timerPanels.end())
+				g_timerPanels.erase(it);
 		}
 	}
 
-	bool IsEditorReady() { return g_editorReady; }
-	void SetEditorReady(bool ready) { g_editorReady = ready; }
+	int CVideoPreviewPanel::ActiveTimers()
+	{
+		return static_cast<int>(g_timerPanels.size());
+	}
 
 	CVideoPreviewPanel::CVideoPreviewPanel(QWidget* pParent)
 		: QWidget(pParent)
 	{
 		setWindowTitle(tr("Preview"));
-		// the checkerboard texture needs the renderer: not while a restored pane is created before the main frame is up
-		if (IsEditorReady())
-		{
-			AcquireChecker();
-			m_checkerHeld = true;
-		}
+		m_timer.setTimerType(Qt::PreciseTimer);
+		m_timer.setInterval(kTickMs);
+		connect(&m_timer, &QTimer::timeout, this, &CVideoPreviewPanel::OnTimer);
 
 		QVBoxLayout* const pMain = new QVBoxLayout(this);
 		pMain->setContentsMargins(4, 4, 4, 4);
 
-		m_pViewportHost = new QWidget(this);
-		m_pViewportHost->setMinimumSize(160, 90);
-		QVBoxLayout* const pHostLayout = new QVBoxLayout(m_pViewportHost);
-		pHostLayout->setContentsMargins(0, 0, 0, 0);
-		pMain->addWidget(m_pViewportHost, 1);
+		m_pPicture = new CVideoPreviewWidget(this);
+		m_pPicture->SetSession(&m_session);
+		pMain->addWidget(m_pPicture, 1);
 
 		m_pStatus = new QLabel(this);
 		m_pStatus->setWordWrap(true);
@@ -165,9 +82,19 @@ namespace CEVEditor
 		m_pAudio->addItem(tr("Audio: as authored"), static_cast<int>(EPreviewAudio::AsAuthored));
 		m_pAudio->addItem(tr("Audio: embedded track"), static_cast<int>(EPreviewAudio::EmbeddedTrack));
 		m_pAudio->addItem(tr("Audio: muted"), static_cast<int>(EPreviewAudio::Muted));
+		m_pVolume = new QSlider(Qt::Horizontal, this);
+		m_pVolume->setRange(0, 100);
+		m_pVolume->setValue(100);
+		m_pVolume->setMaximumWidth(80);
+		m_pVolume->setToolTip(tr("Preview volume"));
 		m_pFit = new QComboBox(this);
 		m_pFit->addItem(tr("Fit"));
 		m_pFit->addItem(tr("100%"));
+		m_pBackground = new QComboBox(this);
+		m_pBackground->addItem(tr("Checker"), static_cast<int>(CVideoPreviewWidget::EBackground::Checker));
+		m_pBackground->addItem(tr("Black"), static_cast<int>(CVideoPreviewWidget::EBackground::Black));
+		m_pBackground->addItem(tr("White"), static_cast<int>(CVideoPreviewWidget::EBackground::White));
+		m_pBackground->setToolTip(tr("Background behind transparent pixels"));
 		pBar->addWidget(m_pStepBack);
 		pBar->addWidget(m_pPlay);
 		pBar->addWidget(m_pStop);
@@ -176,7 +103,9 @@ namespace CEVEditor
 		pBar->addWidget(m_pTime);
 		pBar->addStretch(1);
 		pBar->addWidget(m_pAudio);
+		pBar->addWidget(m_pVolume);
 		pBar->addWidget(m_pFit);
+		pBar->addWidget(m_pBackground);
 		pMain->addLayout(pBar);
 
 		connect(m_pPlay, &QToolButton::clicked, this, &CVideoPreviewPanel::OnPlayPause);
@@ -186,13 +115,15 @@ namespace CEVEditor
 		connect(m_pSlider, &QSlider::valueChanged, this, &CVideoPreviewPanel::OnSliderMoved);
 		connect(m_pLoop, &QCheckBox::toggled, this, &CVideoPreviewPanel::OnLoopToggled);
 		connect(m_pAudio, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &CVideoPreviewPanel::OnAudioModeChanged);
-		connect(m_pFit, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) { m_fit = index == 0; });
+		connect(m_pVolume, &QSlider::valueChanged, this, &CVideoPreviewPanel::OnVolumeChanged);
+		connect(m_pFit, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) { m_pPicture->SetFit(index == 0); });
+		connect(m_pBackground, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
+		{
+			m_pPicture->SetBackground(static_cast<CVideoPreviewWidget::EBackground>(m_pBackground->currentData().toInt()));
+		});
 
-		if (!CPreviewSession::RuntimeAvailable())
-			SetStatus(tr("The CEVPlayer runtime plug-in is not loaded: enable it in the .cryproject to preview. Assets can still be imported."));
-		else
-			SetStatus(tr("No video loaded."));
-
+		m_inGameMode = GetIEditor()->IsInGameMode();
+		SetStatus(tr("No video loaded."));
 		GetIEditor()->RegisterNotifyListener(this);
 		UpdateTransport();
 	}
@@ -200,118 +131,74 @@ namespace CEVEditor
 	CVideoPreviewPanel::~CVideoPreviewPanel()
 	{
 		GetIEditor()->UnregisterNotifyListener(this);
-		// order of docs/research/04 §4.7: player first, then the shared texture, then the viewport (its destructor flushes the render thread)
-		m_session.Release();
-		ReleaseCheckerOnce();
-		DestroyViewport();
-	}
-
-	void CVideoPreviewPanel::ReleaseCheckerOnce()
-	{
-		if (!m_checkerHeld)
-			return;
-		m_checkerHeld = false;
-		ReleaseChecker();
+		m_timer.stop();
+		NoteTimer(this, false);
+		m_pPicture->SetSession(nullptr);
+		m_session.Release(); // audio device first, then the cores and their decode threads
 	}
 
 	void CVideoPreviewPanel::showEvent(QShowEvent* pEvent)
 	{
 		QWidget::showEvent(pEvent);
-		if (!m_pViewport && !m_createScheduled && !m_shutdown)
-		{
-			// wait until the panel sits in its final window: the swap chain binds to the native window of the viewport
-			m_createScheduled = true;
-			QTimer::singleShot(0, this, [this]()
-			{
-				m_createScheduled = false;
-				if (m_pViewport || m_shutdown || !isVisible())
-					return;
-				if (!IsEditorReady())
-				{
-					m_waitingForMainFrame = true; // restored pane: wait for eNotify_OnMainFrameInitialized
-					return;
-				}
-				CreateViewport();
-			});
-		}
+		UpdateTimer();
 	}
 
-	void CVideoPreviewPanel::CreateViewport()
+	void CVideoPreviewPanel::hideEvent(QHideEvent* pEvent)
 	{
-		if (gEnv == nullptr || gEnv->pRenderer == nullptr || m_shutdown || !IsEditorReady())
-			return;
-		if (!m_checkerHeld)
-		{
-			AcquireChecker();
-			m_checkerHeld = true;
-		}
-		m_pViewport = new CVideoViewport(m_pViewportHost);
-		m_pViewportHost->layout()->addWidget(m_pViewport);
-		connect(m_pViewport, &QViewport::SignalRender, this, [this](const SRenderContext& rc) { Render(rc); });
-		// queued: the viewport must be deleted from the event loop, not from inside its own event
-		connect(m_pViewport, &CVideoViewport::signalNeedsRecreate, this, &CVideoPreviewPanel::OnViewportNeedsRecreate, Qt::QueuedConnection);
-		m_pViewport->show();
+		QWidget::hideEvent(pEvent);
+		UpdateTimer();
 	}
 
-	void CVideoPreviewPanel::DestroyViewport()
+	//! The timer runs while there is media and the panel is visible; otherwise the playback is suspended.
+	void CVideoPreviewPanel::UpdateTimer()
 	{
-		if (m_pViewport)
-		{
-			delete m_pViewport.data();
-			m_pViewport = nullptr;
-		}
-	}
-
-	void CVideoPreviewPanel::OnViewportNeedsRecreate()
-	{
-		if (m_shutdown || m_recreatePending)
-			return;
-		m_recreatePending = true;
-		// one more turn of the event loop so that Qt has finished re-creating the native windows of the dock
-		QTimer::singleShot(0, this, [this]()
-		{
-			m_recreatePending = false;
-			if (m_shutdown)
-				return;
-			DestroyViewport();
-			CreateViewport();
-		});
+		const bool visible = isVisible() && !m_shutdown;
+		const bool run = visible && m_session.HasMedia();
+		if (run && !m_timer.isActive())
+			m_timer.start();
+		else if (!run && m_timer.isActive())
+			m_timer.stop();
+		NoteTimer(this, m_timer.isActive());
+		m_session.Suspend(!run || m_inGameMode || m_minimized);
 	}
 
 	void CVideoPreviewPanel::OnEditorNotifyEvent(EEditorNotifyEvent event)
 	{
-		if (event == eNotify_OnMainFrameInitialized)
+		switch (event)
 		{
-			SetEditorReady(true);
-			if (m_waitingForMainFrame && !m_pViewport && !m_shutdown)
-			{
-				m_waitingForMainFrame = false;
-				QTimer::singleShot(0, this, [this]()
-				{
-					if (!m_pViewport && !m_shutdown && isVisible())
-						CreateViewport();
-				});
-			}
-			return;
-		}
-		if (event == eNotify_OnQuit)
-		{
-			// The engine shuts down after this (renderer and runtime plug-in go): release everything that needs them now,
-			// in the order player, shared texture, viewport. The panel itself may live on until Qt deletes it.
-			SetEditorReady(false);
+		case eNotify_OnBeginGameMode:
+			m_inGameMode = true;
+			m_session.Suspend(true);
+			SetStatus(tr("Game mode is running: the preview is paused."));
+			break;
+		case eNotify_OnEndGameMode:
+			m_inGameMode = false;
+			UpdateTimer();
+			if (m_session.IsReady())
+				SetStatus(ReadyStatus());
+			break;
+		case eNotify_OnQuit:
+			// the editor goes down after this: stop the sound and the decode threads now
 			m_shutdown = true;
+			m_timer.stop();
+			NoteTimer(this, false);
 			m_session.Release();
-			ReleaseCheckerOnce();
-			DestroyViewport();
-			return;
+			break;
+		default:
+			break;
 		}
-		if (event == eNotify_OnIdleUpdate)
-			Tick();
 	}
 
 	void CVideoPreviewPanel::SetStatus(const QString& text)
 	{
 		m_pStatus->setText(text);
+	}
+
+	double CVideoPreviewPanel::Fps() const
+	{
+		if (m_session.IsReady() && m_session.Info().frameRate > 1.0)
+			return m_session.Info().frameRate;
+		return m_source.fps > 1.0 ? m_source.fps : 30.0;
 	}
 
 	QString CVideoPreviewPanel::Timecode(double seconds) const
@@ -325,6 +212,22 @@ namespace CEVEditor
 			.arg(static_cast<int>((total / 60) % 60), 2, 10, QLatin1Char('0'))
 			.arg(static_cast<int>(total % 60), 2, 10, QLatin1Char('0'))
 			.arg(frames, 2, 10, QLatin1Char('0'));
+	}
+
+	QString CVideoPreviewPanel::ReadyStatus() const
+	{
+		const cev::MediaInfo& info = m_session.Info();
+		return tr("%1 x %2, %3 s, %4%5%6")
+			.arg(info.width).arg(info.height).arg(info.durationSeconds, 0, 'f', 2)
+			.arg(info.hasAlpha ? tr("alpha") : tr("opaque"))
+			.arg(m_session.HasAudio() ? tr(", audio") : tr(", no audio"))
+			.arg(QString::fromUtf8(m_session.Notes().c_str()));
+	}
+
+	float CVideoPreviewPanel::Volume() const
+	{
+		const EPreviewAudio audio = static_cast<EPreviewAudio>(m_pAudio->currentData().toInt());
+		return audio == EPreviewAudio::Muted ? 0.f : static_cast<float>(m_pVolume->value()) / 100.f;
 	}
 
 	void CVideoPreviewPanel::SetSource(const SSource& source)
@@ -343,20 +246,28 @@ namespace CEVEditor
 	{
 		if (!m_hasSource || m_shutdown)
 			return;
-		if (!CPreviewSession::RuntimeAvailable())
+		SPreviewRequest request;
+		request.descriptorRel = m_source.descriptorRel;
+		request.videoRel = m_source.videoRel;
+		request.avOffsetMs = m_source.avOffsetMs;
+		request.audio = static_cast<EPreviewAudio>(m_pAudio->currentData().toInt());
+		request.volume = Volume();
+		std::string error;
+		m_lastSerial = 0;
+		m_loggedFirstFrame = false;
+		if (!m_session.Load(request, error))
 		{
-			SetStatus(tr("The CEVPlayer runtime plug-in is not loaded: enable it in the .cryproject to preview."));
+			SetStatus(tr("Cannot preview %1: %2").arg(QString::fromUtf8(m_source.descriptorRel.c_str()), QString::fromUtf8(error.c_str())));
+			UpdateTimer();
+			UpdateTransport();
+			m_pPicture->update();
 			return;
 		}
-		const EPreviewAudio audio = static_cast<EPreviewAudio>(m_pAudio->currentData().toInt());
-		if (!m_session.Load(m_source.descriptorRel, audio, m_source.videoRel, m_source.avOffsetMs))
-		{
-			SetStatus(tr("The preview player rejected %1.").arg(QString::fromUtf8(m_source.descriptorRel.c_str())));
-			return;
-		}
-		m_session.Player()->SetLoop(m_pLoop->isChecked());
+		m_session.SetLoop(m_pLoop->isChecked());
 		SetStatus(tr("Loading %1 ...").arg(QString::fromUtf8(m_source.descriptorRel.c_str())));
+		UpdateTimer();
 		UpdateTransport();
+		m_pPicture->update();
 	}
 
 	void CVideoPreviewPanel::Clear()
@@ -364,63 +275,63 @@ namespace CEVEditor
 		m_hasSource = false;
 		m_source = SSource();
 		m_session.Release();
-		SetStatus(CPreviewSession::RuntimeAvailable() ? tr("No video loaded.") : tr("The CEVPlayer runtime plug-in is not loaded."));
+		SetStatus(tr("No video loaded."));
+		UpdateTimer();
 		UpdateTransport();
+		m_pPicture->update();
 	}
 
 	void CVideoPreviewPanel::ReleasePlayer()
 	{
 		m_session.Release();
+		UpdateTimer();
 		UpdateTransport();
+		m_pPicture->update();
 	}
 
 	void CVideoPreviewPanel::OnPlayPause()
 	{
-		CEVPlayer::IVideoPlayer* const p = m_session.Player();
-		if (p == nullptr || !p->IsLoaded())
+		if (!m_session.IsReady() && !m_session.IsLoading())
 			return;
-		switch (p->GetState())
+		switch (m_session.State())
 		{
-		case CEVPlayer::EVideoPlayerState::Playing: p->Pause(); break;
-		case CEVPlayer::EVideoPlayerState::Paused: p->Resume(); break;
-		default: p->Play(); break;
+		case cev::PlayerState::Playing: m_session.Pause(); break;
+		case cev::PlayerState::Paused: m_session.Resume(); break;
+		default: m_session.Play(); break;
 		}
+		UpdateTransport();
 	}
 
 	void CVideoPreviewPanel::OnStop()
 	{
-		if (CEVPlayer::IVideoPlayer* const p = m_session.Player())
-			p->Stop();
+		m_session.Stop();
+		UpdateTransport();
 	}
 
 	void CVideoPreviewPanel::OnStep(int direction)
 	{
-		CEVPlayer::IVideoPlayer* const p = m_session.Player();
-		if (p == nullptr || !p->IsLoaded())
+		if (!m_session.IsReady())
 			return;
-		if (p->GetState() == CEVPlayer::EVideoPlayerState::Playing)
-			p->Pause();
-		// the player has no frame step: pause and seek one frame period away (the seek shows the frame while paused)
-		const double duration = p->GetDuration();
-		double t = p->GetTime() + direction / Fps();
+		if (m_session.State() == cev::PlayerState::Playing)
+			m_session.Pause();
+		// pause and seek one frame period away (the seek presents the frame while paused)
+		const double duration = m_session.Duration();
+		double t = m_session.Time() + direction / Fps();
 		t = std::max(0.0, duration > 0.0 ? std::min(t, duration) : t);
-		p->Seek(t);
+		m_session.Seek(t);
+		UpdateTransport();
 	}
 
 	void CVideoPreviewPanel::OnSliderMoved(int value)
 	{
-		if (m_sliderUpdating)
+		if (m_sliderUpdating || !m_session.IsReady() || m_session.Duration() <= 0.0)
 			return;
-		CEVPlayer::IVideoPlayer* const p = m_session.Player();
-		if (p == nullptr || !p->IsLoaded() || p->GetDuration() <= 0.0)
-			return;
-		p->Seek(p->GetDuration() * (static_cast<double>(value) / 10000.0));
+		m_session.Seek(m_session.Duration() * (static_cast<double>(value) / 10000.0));
 	}
 
 	void CVideoPreviewPanel::OnLoopToggled(bool on)
 	{
-		if (CEVPlayer::IVideoPlayer* const p = m_session.Player())
-			p->SetLoop(on);
+		m_session.SetLoop(on);
 	}
 
 	void CVideoPreviewPanel::OnAudioModeChanged(int)
@@ -428,117 +339,81 @@ namespace CEVEditor
 		Reload();
 	}
 
+	void CVideoPreviewPanel::OnVolumeChanged(int)
+	{
+		m_session.SetVolume(Volume());
+	}
+
 	void CVideoPreviewPanel::UpdateTransport()
 	{
-		CEVPlayer::IVideoPlayer* const p = m_session.Player();
-		const bool loaded = p != nullptr && p->IsLoaded();
-		m_pPlay->setEnabled(loaded);
+		const bool loaded = m_session.IsReady();
+		m_pPlay->setEnabled(loaded || m_session.IsLoading());
 		m_pStop->setEnabled(loaded);
 		m_pStepBack->setEnabled(loaded);
 		m_pStepForward->setEnabled(loaded);
 		m_pSlider->setEnabled(loaded);
-		m_pPlay->setText(loaded && p->GetState() == CEVPlayer::EVideoPlayerState::Playing ? tr("Pause") : tr("Play"));
+		const bool playing = loaded && m_session.State() == cev::PlayerState::Playing;
+		const QString playText = playing ? tr("Pause") : tr("Play");
+		if (m_pPlay->text() != playText)
+			m_pPlay->setText(playText);
+		m_pPicture->SetSmooth(!playing); // fast scaling while playing, smooth while paused
 		if (!loaded)
 		{
 			m_sliderUpdating = true;
 			m_pSlider->setValue(0);
 			m_sliderUpdating = false;
 			m_pTime->setText(Timecode(0.0));
+			return;
+		}
+		const double duration = m_session.Duration();
+		const double t = m_session.Time();
+		const QString timeText = Timecode(t) + " / " + Timecode(duration);
+		if (m_pTime->text() != timeText)
+			m_pTime->setText(timeText);
+		if (duration > 0.0 && !m_pSlider->isSliderDown())
+		{
+			m_sliderUpdating = true;
+			m_pSlider->setValue(static_cast<int>(std::min(1.0, t / duration) * 10000.0));
+			m_sliderUpdating = false;
 		}
 	}
 
-	void CVideoPreviewPanel::Tick()
+	void CVideoPreviewPanel::OnTimer()
 	{
-		if (m_shutdown || !isVisible())
+		if (m_shutdown)
 			return;
-		if (GetIEditor()->IsInGameMode())
+		// minimized main window: pause and poll slowly for the restore (child widgets get no reliable hide event)
+		const bool minimized = window() != nullptr && window()->isMinimized();
+		if (minimized != m_minimized)
 		{
-			SetStatus(tr("Game mode is running: the preview is paused."));
-			return;
+			m_minimized = minimized;
+			m_timer.setInterval(minimized ? kMinimizedPollMs : kTickMs);
+			m_session.Suspend(m_minimized || m_inGameMode);
 		}
+		if (m_minimized || m_inGameMode)
+			return;
 
+		const bool fresh = m_session.Tick();
 		std::string error;
 		if (m_session.TakeError(error))
 			SetStatus(tr("Playback error: %1").arg(QString::fromUtf8(error.c_str())));
 		if (m_session.TakeReady())
 		{
-			if (CEVPlayer::IVideoPlayer* const p = m_session.Player())
-			{
-				p->SetLoop(m_pLoop->isChecked());
-				SetStatus(tr("%1 x %2, %3 s, %4%5")
-					.arg(p->GetWidth()).arg(p->GetHeight()).arg(p->GetDuration(), 0, 'f', 2)
-					.arg(p->HasAlpha() ? tr("alpha") : tr("opaque"))
-					.arg(p->HasAudio() ? tr(", audio") : tr(", no audio")));
-			}
+			SetStatus(ReadyStatus());
+			CryLogAlways("[CEVEditor] preview ready: %s", ReadyStatus().toUtf8().constData());
 		}
+		UpdateTransport();
 
-		if (CEVPlayer::IVideoPlayer* const p = m_session.Player())
+		const uint64_t serial = m_session.FrameSerial();
+		if (fresh || serial != m_lastSerial)
 		{
-			if (p->IsLoaded())
+			m_lastSerial = serial;
+			m_pPicture->update(); // only for a new frame (playing, or a seek while paused)
+			if (serial != 0 && !m_loggedFirstFrame)
 			{
-				const double duration = p->GetDuration();
-				const double t = p->GetTime();
-				m_pTime->setText(Timecode(t) + " / " + Timecode(duration));
-				if (duration > 0.0 && !m_pSlider->isSliderDown())
-				{
-					m_sliderUpdating = true;
-					m_pSlider->setValue(static_cast<int>(std::min(1.0, t / duration) * 10000.0));
-					m_sliderUpdating = false;
-				}
-				m_pPlay->setText(p->GetState() == CEVPlayer::EVideoPlayerState::Playing ? tr("Pause") : tr("Play"));
-				m_pPlay->setEnabled(true);
-				m_pStop->setEnabled(true);
-				m_pStepBack->setEnabled(true);
-				m_pStepForward->setEnabled(true);
-				m_pSlider->setEnabled(true);
-			}
-		}
-
-		if (m_pViewport && !m_recreatePending && !m_pViewport->IsStale() && m_pViewport->isVisible())
-			m_pViewport->Update(); // renders through Render() below (every idle: a swap chain that is not drawn goes stale)
-	}
-
-	void CVideoPreviewPanel::Render(const SRenderContext& rc)
-	{
-		IRenderAuxGeom* const aux = rc.pAuxGeom;
-		if (aux == nullptr || rc.viewport == nullptr)
-			return;
-		const float W = static_cast<float>(rc.viewport->Width());
-		const float H = static_cast<float>(rc.viewport->Height());
-		if (W < 2.f || H < 2.f)
-			return;
-
-		CEVPlayer::IVideoPlayer* const p = m_session.Player();
-		const bool loaded = p != nullptr && p->IsLoaded();
-		const int textureId = loaded ? p->GetTextureId() : 0; // every frame: Load / a variant change re-creates the texture
-		float vw = loaded ? static_cast<float>(p->GetWidth()) : 16.f;
-		float vh = loaded ? static_cast<float>(p->GetHeight()) : 9.f;
-		if (vw < 1.f || vh < 1.f)
-		{
-			vw = 16.f;
-			vh = 9.f;
-		}
-
-		// destination rectangle in device pixels: fit with a margin, or 1:1 centred
-		const float margin = 8.f;
-		float scale = std::min((W - 2.f * margin) / vw, (H - 2.f * margin) / vh);
-		if (!m_fit && loaded && vw <= W && vh <= H)
-			scale = 1.f; // 100% only while it fits; a larger video stays fitted (no panning yet)
-		scale = std::max(scale, 0.01f);
-		SRectF dst;
-		dst.w = std::floor(vw * scale);
-		dst.h = std::floor(vh * scale);
-		dst.x = std::floor(0.5f * (W - dst.w));
-		dst.y = std::floor(0.5f * (H - dst.h));
-
-		DrawChecker(aux, dst);
-		if (textureId > 0)
-		{
-			DrawVideo(aux, textureId, dst, p->HasAlpha());
-			if (!m_loggedFirstDraw)
-			{
-				m_loggedFirstDraw = true;
-				CryLogAlways("[CEVEditor] preview draws texture id %d (%dx%d, alpha %d), viewport %dx%d", textureId, p->GetWidth(), p->GetHeight(), p->HasAlpha() ? 1 : 0, static_cast<int>(W), static_cast<int>(H));
+				m_loggedFirstFrame = true;
+				CryLogAlways("[CEVEditor] preview shows its first frame (%dx%d, alpha %d, widget %dx%d)", m_session.Info().width, m_session.Info().height,
+					m_session.Info().hasAlpha ? 1 : 0, m_pPicture->width(), m_pPicture->height());
 			}
 		}
 	}

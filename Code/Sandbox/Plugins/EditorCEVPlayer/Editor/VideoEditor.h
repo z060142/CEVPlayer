@@ -73,6 +73,8 @@ namespace CEVEditor
 		void UpgradeToCue();
 		void RefreshAssetState();                              //!< re-reads Details, descriptor and the file list (unsaved edits are merged)
 		static CVideoEditor* Current();                        //!< the last window that opened an asset (console command, tests)
+		//! The preview panel of this window (null while it is not created / was closed).
+		CVideoPreviewPanel* PreviewPanel() const;
 
 		//! Opens the dropped / selected files (webm mp4 mov mkv avi, folders of PNG files): options dialog, then the import queue
 		//! (one file at a time on a job, merge on the main thread). Several files: one dialog, one batch.

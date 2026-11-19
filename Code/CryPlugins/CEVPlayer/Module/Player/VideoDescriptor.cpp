@@ -58,13 +58,7 @@ namespace CEVPlayer
 
 	const char* RouteName(EVideoRoute route)
 	{
-		switch (route)
-		{
-		case EVideoRoute::Embedded: return "embedded";
-		case EVideoRoute::Mixed:    return "mixed";
-		case EVideoRoute::Cue:      return "cue";
-		}
-		return "?";
+		return cev::VideoRouteName(route);
 	}
 
 	std::string ResolveSiblingPath(const char* basePath, const char* file)
@@ -84,14 +78,7 @@ namespace CEVPlayer
 
 	int FindLanguage(const SVideoDescriptor& desc, const char* name)
 	{
-		if (name == nullptr || name[0] == '\0')
-			return -1;
-		for (size_t i = 0; i < desc.languages.size(); ++i)
-		{
-			if (stricmp(desc.languages[i].name.c_str(), name) == 0)
-				return static_cast<int>(i);
-		}
-		return -1;
+		return cev::FindDescriptorLanguage(desc, name);
 	}
 
 	bool LoadVideoDescriptor(const char* path, SVideoDescriptor& out)
@@ -269,8 +256,7 @@ namespace CEVPlayer
 				LogDebug("descriptor <%s>: unknown element <%s> ignored", path, tag);
 			}
 		}
-		std::stable_sort(out.markers.begin(), out.markers.end(),
-			[](const SVideoDescriptor::SMarker& a, const SVideoDescriptor::SMarker& b) { return a.time < b.time; });
+		cev::SortDescriptorMarkers(out);
 
 		if (!out.defaultLanguage.empty() && FindLanguage(out, out.defaultLanguage.c_str()) < 0)
 		{
