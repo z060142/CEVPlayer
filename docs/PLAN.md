@@ -25,7 +25,7 @@
 | M3 規範路線（CryAudio 位置查詢，optional patch） | 完成 | optional patch 02（CryAudio 播放位置 + SDL_mixer 實作）；官方版套用後整樹 0 錯誤；cue 時鐘與 trigger 位置差 ±7 ms；未套 patch 退回影片時鐘 |
 | M4 資產與編輯器 | 完成（畫面待手動驗收） | EditorCEVPlayer：資產類型、WebM 匯入、三欄視窗、QViewport 預覽、離線處理（分離音軌／WAV／Ogg，對齊 ≤0.3 取樣）、ACE 註冊、資產圖示、打包工具；手動驗收清單 docs/manual-acceptance-M4.md |
 | M5 FFmpeg 轉碼 | 完成（UI 與 CI 待驗證） | 偵測／下載（等 release 才開放）／非 WebM 匯入／壓縮與解析度／多解析度子檔／批次；Sandbox 冒煙全過。未驗證：CI 實跑、精簡版 FFmpeg、實際網路下載、UI 手動操作（docs/manual-acceptance-M5.md） |
-| 階段 0＋M6～M10 經由 UI 播放 | 規劃定案 2026-11-19，未實作 | 設計在 docs/design/M6-ui-source.md：Surface ID 與登錄表、貼圖來源契約（不共用標頭）、舊節點刪除與兩個抽屜（M6）；可見性／變體／`open`（M7）；打包平面直通（M8）；Media Foundation 硬解，CPU 為 fallback，可選（M9）；關卡讀取期間推進等 XTFrame 主線的機制（M10） |
+| 階段 0＋M6～M10 經由 UI 播放 | 階段 0、M6 完成 2026-11-19（M6a 登錄表與契約、M6b 節點整併、M6c CryVS）；M7 以後待做 | 設計在 docs/design/M6-ui-source.md：Surface ID 與登錄表、貼圖來源契約（不共用標頭）、舊節點刪除與兩個抽屜（M6）；可見性／變體／`open`（M7）；打包平面直通（M8）；Media Foundation 硬解，CPU 為 fallback，可選（M9）；關卡讀取期間推進等 XTFrame 主線的機制（M10） |
 
 ## 決策紀錄
 
@@ -42,3 +42,4 @@
 - 2026-11-19 編輯器兩項待排（使用者提出，尚未定順序）：Info 欄回歸引擎機制（重新匯入、偏好設定頁、引擎對話框、屬性面板、音訊觸發器選擇器、通知中心）；預覽改為 Core 解碼＋一般 Qt 元件繪製，不經引擎渲染器（描述檔邏輯搬進 Core 共用）。調查結論見 2026-11-19 的對話記錄，動工前寫成設計文件。
 - 2026-11-19 使用者：建置中間檔放 RAM 碟 `T:`（32 GB，與 XTFrame 主線共用；重開機即清空），工作樹完成要清掉，成品不放 T:。本倉的用法：Core 獨立建置與自測、插件目標的中間檔、精簡版 FFmpeg 的工作目錄放 `T:/cev/<用途>/`（做完刪）；引擎整樹的建置目錄太大、放不進去，留在 SSD 並盡量只做增量建置；量測結果與要留的產物放 SSD。
 - 2026-11-19 社群版引擎：`E:\coding crycry\CryENGINE-5-7-community`（GitHub main e1326cf），`Code/SDKs` 以目錄連結指向使用者提供的 `E:\coding2\CryENGINE-5-7-community\Code\SDKs`（含 AssimpSDK、XT_13_4——使用者：「之前編不過應該是 SDK 的問題」）。使用者本機 `E:\coding2` 那份在較新的提交 e881698（CryVS 更新，未推上 GitHub），CryVS 節點對哪一份做待確認。開工等 XTFrame 主線通知（使用者 2026-11-19）。
+- 2026-11-19 M6 完成後的已知缺口：CryVS 腳本的實際執行未驗（腳本只能由 CryVS Designer 建立並在存檔時編譯；步驟在 M6c 的報告，待人工驗收）；社群版引擎每次關機在 `C3DEngine::UnloadLevel` 崩潰（不載入 CEVPlayer 也一樣）、`IFramework::RefreshEnv()` 會觸發 fork 自己的致命斷言；整合引擎樹的 CryXTUI Direct 模式不畫 `engine://`、關機偶發存取違規（已通知 XTFrame 主線）；引擎主控台 `exec` 四行以上含 `wait_seconds` 的 cfg 會觸發 `CryString.h:734` 斷言（引擎問題，測試改用 `cev_run_script`）。FlowGraph 未在執行期驗的：PlayOnMaterial 成功路徑、Autoplay、Skipped／Marker 輸出、Schematyc 元件、編輯器內的節點外觀。
