@@ -101,6 +101,16 @@ namespace cev
 			// The pinned package (url built from the constants). Empty fields when download is disabled.
 			FfmpegPackage PinnedFfmpegPackage();
 
+			// Connection-class WinHTTP errors (12002 timeout, 12007 name not resolved, 12029 cannot connect, 12030 / 12031
+			// connection aborted / reset, 12152 invalid response, 12157 / 12175 secure channel failure).
+			bool IsFfmpegConnectionError(unsigned long winHttpError);
+			// Turns a failed fetch message into the text the editor shows. When it carries "(error N)" with a connection-class
+			// N, the result says in plain English that the connection was blocked or unavailable (commonly a firewall or
+			// security software blocking the editor), names the URL and the expected SHA-256 and explains the manual route
+			// (download with a browser, unpack, set ffmpeg.exe in Preferences > CEVPlayer/FFmpeg); the raw message is kept at
+			// the end. Any other message is returned unchanged. Pure function (no network).
+			std::string ExplainFfmpegDownloadFailure(const std::string& fetchMessage, const FfmpegPackage& package);
+
 			// Verifies `zipPath` against `expectedSha256` and installs it into installDir (see the header comment).
 			// Status::InvalidData on a hash mismatch (nothing extracted, the zip is NOT deleted: the caller owns it).
 			// installedExe receives <installDir>\ffmpeg.exe (or ...\bin\ffmpeg.exe when the zip has that layout).

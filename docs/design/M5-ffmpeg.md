@@ -200,6 +200,7 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 
 - 偵測：設定路徑、下載副本、PATH（`Locate` 順序不變）。
 - 互動（匯入對話框按 OK、`Generate variants...`、`Re-compress...`）：`EnsureUsableModal`。下載可用時提供「Download minimal build」與「Choose ffmpeg.exe...」（含授權 / 來源 / 雜湊驗證說明，下載有進度與取消）；`FfmpegDownloadDisabledReason()` 非空（未釘住 Release 時）時視窗顯示原因，**只**提供手動選擇。選到的檔案再過一次能力檢查，不足就顯示缺少項目 / 被拒絕的原因。SHA-256 不符：庫拒絕並不解壓，訊息含實際與預期雜湊（視窗與 log 都會顯示）。
+- 下載連線失敗（WinHTTP 12002 逾時、12007 無法解析名稱、12029 無法連線、12030 / 12031 連線中斷 / 重設、12152 無效回應、12157 / 12175 安全通道失敗）：`ExplainFfmpegDownloadFailure()` 把訊息改寫成白話：連線被擋或無法使用（常見是防火牆或資安軟體擋住編輯器），列出下載 URL 與預期 SHA-256，並說明手動路徑：用瀏覽器下載 zip、解壓到任意位置、在 Edit > Preferences > CEVPlayer/FFmpeg 設定 `ffmpeg.exe`（資訊欄 FFmpeg 區段的 Preferences 按鈕在失敗狀態也可用）。原始訊息（含錯誤碼）保留在結尾，log / 通知 / 工作清單顯示同一段文字。其他錯誤不改寫。測試用環境變數 `CEV_EDITOR_FFMPEG_DOWNLOAD_URL` 可替換下載 URL（例如不可達的位址）以觸發此訊息。
 - 非互動（console）：Absent 時拒絕並印出原因與設定方式；偵測仍進行中則 job 等待結果（`WaitForExe`）。
 
 ## 11. Console 指令
@@ -238,7 +239,7 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 
 ## 13. 未驗證與限制
 
-- 真實下載（WinHTTP + GitHub Release）：已釘住 `8.0.3-cev1`（URL 與 zip 根目錄配置已對真實資產核對）；在測試機上由 Sandbox 透過 `cev_editor_ffmpeg_download` 觸發時 WinHTTP 立即失敗（error 12029，無法連線；同機 Windows `curl.exe` 可下載），端對端下載 / 安裝 / 匯入尚未驗證；對話框（`EnsureUsableModal`、`Set up FFmpeg...`、進度對話框、下載按鈕）**沒有人工點過**，見 `manual-acceptance-M5.md`。
+- 真實下載（WinHTTP + GitHub Release）：已驗證（2026-11-19，測試機）。Sandbox 外：`cevffmpeg_selftest --real-download <暫存資料夾> --real-download-mp4 <h264.mp4>` 走同一個 `DownloadAndInstallFfmpeg` + `WinHttpFetcher`（含 GitHub 轉址）、驗 SHA-256、安裝到暫存資料夾，定位結果為 `ffmpeg 8.0.3 (downloaded copy)`、匯入無缺項，MP4 → WebM 轉檔並播放 60 格；錯誤雜湊被拒且不留檔。Sandbox 內：`cev_editor_ffmpeg_download` 下載安裝到 `%LOCALAPPDATA%\CEVPlayer\ffmpeg\8.0.3-cev1`，`cev_editor_ffmpeg_status` 為 ready / 8.0.3 / downloaded copy，H.264 MP4 匯入成 WebM、預覽自測 PASS；暫時改錯的釘住雜湊被拒（`SHA-256 mismatch`）且沒有安裝。同一台機器曾因本機防火牆擋住 Sandbox.exe（與新建的測試 exe）的連線而得到 WinHTTP 12029：這是機器特定的限制，處理方式見下一條。對話框（`EnsureUsableModal`、`Set up FFmpeg...`、進度對話框、下載按鈕）仍**沒有人工點過**，見 `manual-acceptance-M5.md`。
 - 匯入對話框、編輯器視窗拖放（單檔 / 多檔 / PNG 資料夾）、`Generate variants...` / `Re-compress...` 對話框、資訊欄 FFmpeg 區段與 Variants 表只經編譯與 console 路徑（同一組後端）驗證，沒有 UI 自動化。
 - 對話框的變體清單不事先探測來源高度（對話框時來源高度未知）：高度不低於影片者由 job 略過並記錄，不是灰掉（已存在資產的對話框則用已知高度灰掉）。
 - 失敗或取消後，匯入時新建的**空資料夾**會留下（檔案都已刪除）。

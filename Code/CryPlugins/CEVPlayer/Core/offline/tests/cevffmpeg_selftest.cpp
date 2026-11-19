@@ -1,6 +1,7 @@
 // CEVPlayerFFmpeg selftest. Plain executable (no engine, no test framework).
 //
 //   cevffmpeg_selftest [--media <dir>] [--ffmpeg <ffmpeg.exe>] [--only <substring>] [--out <dir>] [--keep]
+//                      [--real-download <scratch dir> [--real-download-mp4 <h264.mp4>]]  (network: the pinned release)
 //                      [--fetch-url <url> --fetch-sha256 <hex>]
 //
 // Part 1 needs nothing but this executable: SHA-256 vectors, argument quoting (also through real child
@@ -1087,6 +1088,39 @@ namespace
 			CHECK(pinned.version == kFfmpegMinimalVersion && pinned.sha256 == kFfmpegMinimalSha256);
 			CHECK(pinned.url == "https://github.com/z060142/CEVPlayer/releases/download/ffmpeg-minimal-v8.0.3-cev1/ffmpeg-minimal-8.0.3-cev1-win64.zip");
 		}
+		// failure text of a blocked / unavailable connection (pure function)
+		{
+			FfmpegPackage pkg;
+			pkg.version = "8.0.3-cev1";
+			pkg.sha256 = std::string(64, 'b');
+			pkg.url = "https://github.com/z060142/CEVPlayer/releases/download/ffmpeg-minimal-v8.0.3-cev1/ffmpeg-minimal-8.0.3-cev1-win64.zip";
+			for (unsigned long code : {12002ul, 12007ul, 12029ul, 12030ul, 12031ul, 12152ul, 12157ul, 12175ul})
+			{
+				CHECK(IsFfmpegConnectionError(code));
+				const std::string raw = "request to " + pkg.url + " failed (error " + std::to_string(code) + ")";
+				const std::string t = ExplainFfmpegDownloadFailure(raw, pkg);
+				CHECKF(Contains(t, "blocked or is unavailable") && Contains(t, "firewall") && Contains(t, pkg.sha256) && Contains(t, "with a browser") &&
+					Contains(t, "Preferences > CEVPlayer/FFmpeg") && Contains(t, raw) && Contains(t, "download " + pkg.url), "%s", t.c_str());
+			}
+			CHECK(!IsFfmpegConnectionError(12038) && !IsFfmpegConnectionError(0));
+			CHECK(ExplainFfmpegDownloadFailure("the server answered HTTP 404 for x", pkg) == "the server answered HTTP 404 for x");
+			CHECK(ExplainFfmpegDownloadFailure("WinHttpOpen failed (error 5)", pkg) == "WinHttpOpen failed (error 5)");
+			CHECK(ExplainFfmpegDownloadFailure("", pkg).empty());
+			// through the production function: a fetcher failing with a connection-class message
+			struct FailingFetcher : IFfmpegFetcher
+			{
+				Result Fetch(const std::string& url, const std::string&, const Control&) override
+				{
+					Result r;
+					r.status = Status::IoError;
+					r.message = "request to " + url + " failed (error 12029)";
+					return r;
+				}
+			} failing;
+			const Result fr = DownloadAndInstallFfmpeg(pkg, failing, Out("inst_blocked"));
+			CHECK(ResultIs(fr, Status::IoError) && Contains(fr.message, "firewall") && Contains(fr.message, "(error 12029)"));
+			CHECK(!FileExists(Out("inst_blocked")) && !FileExists(Out("inst_blocked") + ".download"));
+		}
 		CHECK(FfmpegInstallDir("", "1.0").empty() && FfmpegInstallDir("C:/root", "../x").empty() && !FfmpegInstallDir("C:/root", "1.0").empty());
 #if defined(_WIN32)
 		CHECK(!DefaultFfmpegInstallRoot().empty());
@@ -1713,6 +1747,95 @@ namespace
 			CHECK(!FileExists(plan.tempOutput) && !FileExists(plan.finalOutput));
 		}
 	}
+	// --real-download <dir>: the pinned package through the production path (WinHTTP, GitHub redirect, SHA-256, unpack, install
+	// into <dir>), the plugin's capability detection on the result, one real MP4 -> WebM transcode with it, and the same
+	// function with a wrong hash (refused, nothing installed). Off by default: normal runs stay offline.
+	void TestRealDownload(const std::string& root, const std::string& mp4)
+	{
+		g_context = "real download";
+		const FfmpegPackage pkg = PinnedFfmpegPackage();
+		CHECK(!pkg.url.empty());
+		if (pkg.url.empty())
+			return;
+		std::error_code ec;
+		fs::remove_all(fs::u8path(root), ec);
+		const std::string dir = FfmpegInstallDir(root, pkg.version);
+		Log("   url %s\n   install %s\n", pkg.url.c_str(), dir.c_str());
+		WinHttpFetcher fetcher;
+		std::string exe;
+		double lastProgress = 0;
+		Control ctl;
+		ctl.progress = [&lastProgress](double f) { lastProgress = f; };
+		auto t = std::chrono::steady_clock::now();
+		const Result r = DownloadAndInstallFfmpeg(pkg, fetcher, dir, &exe, ctl);
+		const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+		CHECKF(r.Ok(), "%s", r.message.c_str());
+		Log("   download + verify + install: %s in %.2f s (progress %.2f) -> %s\n", r.Ok() ? "ok" : r.message.c_str(), secs, lastProgress, exe.c_str());
+		if (!r.Ok())
+			return;
+		CHECK(!FileExists(dir + ".download") && !FileExists(dir + ".staging"));
+		CHECK(FileExists(dir + "/LICENSE") && FileExists(dir + "/BUILD.txt") && FileExists(dir + "/licenses/FFmpeg-COPYING.LGPLv2.1"));
+		CHECK(Contains(ReadText(dir + "/cev-ffmpeg-install.txt"), std::string("sha256=") + pkg.sha256));
+		{
+			unsigned long long bytes = 0;
+			unsigned files = 0;
+			for (fs::recursive_directory_iterator it(fs::u8path(dir), ec), end; !ec && it != end; it.increment(ec))
+				if (it->is_regular_file(ec))
+				{
+					bytes += it->file_size(ec);
+					++files;
+				}
+			Log("   installed %u files, %llu bytes; ffmpeg.exe %llu bytes\n", files, bytes, (unsigned long long)fs::file_size(fs::u8path(exe), ec));
+		}
+
+		// the plugin's own detection, as the editor runs it (downloaded copy only, no PATH)
+		LocateOptions lo;
+		lo.downloadedDir = dir;
+		lo.searchSystemPath = false;
+		const LocateResult lr = Locate(lo);
+		Log("   locate: %s\n", lr.message.c_str());
+		CHECK(lr.found && lr.source == FfmpegSource::Downloaded);
+		CHECKF(Contains(lr.info.version, "8.0.3"), "version %s", lr.info.version.c_str());
+		CHECK(lr.info.report.sufficient && lr.info.report.importComplete());
+		Log("   version %s; import missing: %s; recommended missing: %s\n", lr.info.version.c_str(),
+			DescribeMissing(lr.info.report.missingImport).c_str(), DescribeMissing(lr.info.report.missingRecommended).c_str());
+
+		// one real transcode through the plugin's builder / runner
+		if (lr.found && !mp4.empty() && FileExists(mp4))
+		{
+			const std::string dst = root + "/h264_aac.webm";
+			PlanRunReport rep;
+			WebmTranscodeOptions o;
+			t = std::chrono::steady_clock::now();
+			const Result tr = TranscodeToWebm(lr.info.path, mp4, dst, o, Control(), &rep);
+			const double ts = std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+			CHECKF(tr.Ok(), "%s\n%s", tr.message.c_str(), rep.log.c_str());
+			MediaProbe mp;
+			CHECK(tr.Ok() && ProbeMedia(dst, mp).Ok());
+			CHECK(mp.hasVideo && mp.videoCodec == VideoCodec::VP9);
+			const Played pl = PlayThrough(dst);
+			CHECK(pl.loaded && pl.decodeErrors == 0 && pl.presented > 0);
+			Log("   transcode %s -> %s: %s in %.2f s, %llu bytes, %ux%u, %.2f s, %u frames, %u audio tracks, played %u frames\n", mp4.c_str(), dst.c_str(),
+				tr.Ok() ? "ok" : "FAILED", ts, (unsigned long long)fs::file_size(fs::u8path(dst), ec), (unsigned)mp.width, (unsigned)mp.height, mp.durationSeconds,
+				(unsigned)mp.videoFrameCount, (unsigned)mp.audioTracks.size(), (unsigned)pl.presented);
+		}
+		else
+		{
+			Log("   SKIP transcode: no --real-download-mp4 file\n");
+			++g_skipped;
+		}
+
+		// negative: wrong expected hash through the same production function
+		g_context = "real download (wrong hash)";
+		FfmpegPackage bad = pkg;
+		bad.sha256[0] = bad.sha256[0] == '0' ? '1' : '0';
+		const std::string badDir = FfmpegInstallDir(root + "/neg", pkg.version);
+		std::string badExe;
+		const Result br = DownloadAndInstallFfmpeg(bad, fetcher, badDir, &badExe);
+		CHECKF(ResultIs(br, Status::InvalidData) && Contains(br.message, "SHA-256 mismatch"), "%s", br.message.c_str());
+		CHECK(badExe.empty() && !FileExists(badDir) && !FileExists(badDir + ".download") && !FileExists(badDir + ".staging"));
+		Log("   wrong hash: %s\n", br.message.c_str());
+	}
 }
 
 int main(int argc, char** argv)
@@ -1728,7 +1851,7 @@ int main(int argc, char** argv)
 		"test_media";
 #endif
 	std::string only;
-	std::string fetchUrl, fetchSha;
+	std::string fetchUrl, fetchSha, realDownload, realMp4;
 	for (int i = 1; i < argc; ++i)
 	{
 		if (std::strcmp(argv[i], "--media") == 0 && i + 1 < argc)
@@ -1743,11 +1866,15 @@ int main(int argc, char** argv)
 			fetchUrl = argv[++i];
 		else if (std::strcmp(argv[i], "--fetch-sha256") == 0 && i + 1 < argc)
 			fetchSha = argv[++i];
+		else if (std::strcmp(argv[i], "--real-download") == 0 && i + 1 < argc)
+			realDownload = argv[++i];
+		else if (std::strcmp(argv[i], "--real-download-mp4") == 0 && i + 1 < argc)
+			realMp4 = argv[++i];
 		else if (std::strcmp(argv[i], "--keep") == 0)
 			g_keep = true;
 		else
 		{
-			std::printf("usage: cevffmpeg_selftest [--media <dir>] [--ffmpeg <ffmpeg.exe>] [--only <substring>] [--out <dir>] [--keep] [--fetch-url <url> --fetch-sha256 <hex>]\n");
+			std::printf("usage: cevffmpeg_selftest [--media <dir>] [--ffmpeg <ffmpeg.exe>] [--only <substring>] [--out <dir>] [--keep] [--fetch-url <url> --fetch-sha256 <hex>] [--real-download <scratch dir> [--real-download-mp4 <h264.mp4>]]\n");
 			return 2;
 		}
 	}
@@ -1783,6 +1910,7 @@ int main(int argc, char** argv)
 	if (sel("runner")) { Log("== runner (helper processes)\n"); TestRunner(); }
 	if (sel("installer")) { Log("== installer\n"); TestInstaller(); }
 	if (!fetchUrl.empty()) { Log("== winhttp %s\n", fetchUrl.c_str()); TestWinHttp(fetchUrl, fetchSha); }
+	if (!realDownload.empty()) { Log("== real download of the pinned package\n"); TestRealDownload(realDownload, realMp4); }
 
 	// Part 2: a real ffmpeg.
 	{
