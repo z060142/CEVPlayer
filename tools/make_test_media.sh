@@ -15,6 +15,10 @@
 #   opus_preskip.webm           Opus with its natural encoder pre-skip (CodecDelay), VP9 320x180
 #   audio_en.webm, audio_ja.webm  audio-only WebM (Opus), one per language tag, for "external audio"
 #   av_sync_flash_beep.webm     720p30: white flash frame + 1 kHz beep at the start of every second
+#   vp9_444.webm                VP9 profile 1 yuv444p 320x180 (not packable: the source keeps RGBA8, M8)
+#   vp9_320x181.webm            VP9 4:2:0 with even width and odd height (packed layout with ch = 91, M8)
+#   vp9_siting_left.webm        VP9 320x180 whose Matroska Colour carries ChromaSitingHorz/Vert (made from an H.264
+#                               intermediate tagged -chroma_sample_location left; needs libx264, M8)
 set -euo pipefail
 
 usage() {
@@ -82,6 +86,17 @@ ff -f lavfi -i "color=c=black:size=1280x720:rate=30:duration=$main" \
    -f lavfi -i "aevalsrc='0.8*sin(2*PI*1000*t)*lt(mod(t,1),0.05)':sample_rate=48000:channel_layout=stereo:duration=$main" \
    -vf "drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='eq(mod(n,30),0)',format=yuv420p" \
    "${VP9[@]}" -g 30 "${OPUS[@]}" -shortest "$out/av_sync_flash_beep.webm"
+
+echo "== vp9_444.webm (${short}s)"
+ff -f lavfi -i "testsrc2=size=320x180:rate=30:duration=$short" -pix_fmt yuv444p "${VP9[@]}" -an "$out/vp9_444.webm"
+
+echo "== vp9_320x181.webm (${short}s)"
+ff -f lavfi -i "testsrc2=size=320x182:rate=30:duration=$short" -vf "scale=320:181,format=yuv420p" "${VP9[@]}" -an "$out/vp9_320x181.webm"
+
+echo "== vp9_siting_left.webm (2s, via a tagged H.264 intermediate)"
+ff -f lavfi -i "testsrc2=size=320x180:rate=30:duration=2" -pix_fmt yuv420p -c:v libx264 -chroma_sample_location left "$out/siting_left_tmp.mp4"
+ff -i "$out/siting_left_tmp.mp4" "${VP9[@]}" -an "$out/vp9_siting_left.webm"
+rm -f "$out/siting_left_tmp.mp4"
 
 echo
 echo "Generated in $out:"

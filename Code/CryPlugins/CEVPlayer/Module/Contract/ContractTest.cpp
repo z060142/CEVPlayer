@@ -12,6 +12,9 @@
 #include <vector>
 
 #include <CryCore/Platform/CryWindows.h>
+#include <Cry3DEngine/I3DEngine.h>
+#include <Cry3DEngine/IMaterial.h>
+#include <CryRenderer/ITexture.h>
 
 #include "Contract/TexSource.h"
 #include "Player/PlayerManager.h"
@@ -104,7 +107,7 @@ namespace CEVPlayer
 				void OnError(IVideoPlayer&, int, const char*) override { ++errors; }
 			};
 
-			struct SSustain { std::string name; uint64_t consumer; uint32_t flags; int h; };
+			struct SSustain { std::string name; uint64_t consumer; uint32_t flags; int h; uint32_t accept; };
 
 			struct SM7
 			{
@@ -259,7 +262,7 @@ namespace CEVPlayer
 				}
 			}
 
-			void Sustain(const char* name, uint64_t consumer, uint32_t flags, int h)
+			void Sustain(const char* name, uint64_t consumer, uint32_t flags, int h, uint32_t accept = 0u)
 			{
 				for (SSustain& s : s_m7.sustain)
 				{
@@ -267,10 +270,11 @@ namespace CEVPlayer
 					{
 						s.flags = flags;
 						s.h = h;
+						s.accept = accept;
 						return;
 					}
 				}
-				s_m7.sustain.push_back(SSustain{ name, consumer, flags, h });
+				s_m7.sustain.push_back(SSustain{ name, consumer, flags, h, accept });
 			}
 
 			void Unsustain(const char* name, uint64_t consumer, bool release)
@@ -312,6 +316,426 @@ namespace CEVPlayer
 				return now - s_m7.wallMark >= seconds;
 			}
 
+
+			// ======================================================================================== M8 part
+			// Layout negotiation (docs/design/M6-ui-source.md section 3 rules 5-8, section 5.2): packed planes only while
+			// every live consumer accepts them, the stream is 4:2:0 with an even width, there is no fullscreen / material
+			// output and cev_allowPlanar is on. The test plays the role of the consumer and checks the uploaded bytes.
+			constexpr const char* kM8 = "CevM8";       // vp8_vorbis.webm 640x360 (audio: the clock is the audio clock)
+			constexpr const char* kM8A = "CevM8A";     // vp9_alpha.webm 640x360 alpha
+			constexpr const char* kM8X = "CevM8X";     // vp9_444.webm / vp9_odd_321x181.webm: never packed
+			constexpr uint64_t kM8ConsumerA = 0x8A;    // accepts packed YUV420 + YUVA420
+			constexpr uint64_t kM8ConsumerB = 0x8B;    // RGBA8 only
+			constexpr uint32_t kAcceptAll = 0x7u;      // RGBA8 | PACKED_YUV420 | PACKED_YUVA420
+			constexpr uint32_t kAccept420 = 0x3u;      // RGBA8 | PACKED_YUV420
+
+			struct SM8
+			{
+				IVideoPlayer* p = nullptr;
+				IVideoPlayer* pA = nullptr;
+				IVideoPlayer* pX = nullptr;
+				uint32_t generation = 0;
+				uint64_t serial = 0;
+				uint64_t switchTick = 0;      // player tick of the last observed switch
+				uint64_t loads = 0;
+				double wallMark = 0.0;        // wall clock / player time when the step began (audio continuity)
+				double timeMark = 0.0;
+				int savedAllowPlanar = 1;
+				int savedStats = 0;
+				bool active = false;
+				IMaterial* pMaterial = nullptr;
+			};
+			SM8 s_m8;
+
+			uint64_t Fnv(uint64_t h, const uint8_t* p, size_t n)
+			{
+				for (size_t i = 0; i < n; ++i)
+					h = (h ^ p[i]) * 0x100000001B3ull;
+				return h;
+			}
+
+			//! The packed picture rebuilt from the core's planes at the rectangles the snapshot reports (independent of the
+			//! module's upload code), hashed like CVideoPlayerImpl hashes what it uploads.
+			bool PackedHashFromCore(CVideoPlayerImpl* p, const CryTexSourceInfo& info, uint64_t& hash, uint64_t& serial)
+			{
+				cev::FrameView v;
+				if (!p->Core().GetFrame(v) || info.planeY.w != v.width || info.planeY.h != v.height)
+					return false;
+				const int texW = info.planeY.w;
+				const int texH = info.planeU.y + info.planeU.h + (info.planeA.w > 0 ? info.planeA.h : 0);
+				std::vector<uint8_t> img(static_cast<size_t>(texW) * texH, 0);
+				const CryTexSourceRect rects[4] = { info.planeY, info.planeU, info.planeV, info.planeA };
+				for (int plane = 0; plane < 4; ++plane)
+				{
+					const CryTexSourceRect& r = rects[plane];
+					if (r.w <= 0 || v.plane[plane] == nullptr)
+						continue;
+					for (int y = 0; y < r.h; ++y)
+						std::memcpy(img.data() + static_cast<size_t>(r.y + y) * texW + r.x, v.plane[plane] + static_cast<ptrdiff_t>(y) * v.stride[plane], static_cast<size_t>(r.w));
+				}
+				hash = Fnv(0xCBF29CE484222325ull, img.data(), img.size());
+				serial = v.serial;
+				return true;
+			}
+
+			ITexture* Tex(IVideoPlayer* p) { return p != nullptr ? p->GetTexture() : nullptr; }
+
+			//! Waits (up to `timeout` s of the step) until the snapshot's generation differs from s_m8.generation.
+			bool WaitGeneration(STest& t, const char* name, double now, double timeout, CryTexSourceInfo& info, const char* what)
+			{
+				t.Query(name, info);
+				if (info.generation != s_m8.generation)
+					return true;
+				if (Elapsed(now) > timeout)
+				{
+					t.Check(false, std::string(what) + ": no texture switch within " + std::to_string(timeout) + " s");
+					return true;
+				}
+				return false;
+			}
+
+			void CheckPacked(STest& t, IVideoPlayer* p, const CryTexSourceInfo& info, bool alpha, const char* what)
+			{
+				const int w = p->GetWidth(), h = p->GetHeight(), ch = (h + 1) / 2;
+				const uint32_t layout = alpha ? CTS_LAYOUT_PACKED_YUVA420 : CTS_LAYOUT_PACKED_YUV420;
+				t.Check(info.layout == layout && static_cast<uint32_t>(p->GetPixelLayout()) == layout, std::string(what) + ": layout " + Num(info.layout) + " (player " + Num(static_cast<long long>(p->GetPixelLayout())) + ")");
+				t.Check(info.planeY.x == 0 && info.planeY.y == 0 && info.planeY.w == w && info.planeY.h == h
+					&& info.planeU.x == 0 && info.planeU.y == h && info.planeU.w == w / 2 && info.planeU.h == ch
+					&& info.planeV.x == w / 2 && info.planeV.y == h && info.planeV.w == w / 2 && info.planeV.h == ch
+					&& (alpha ? (info.planeA.x == 0 && info.planeA.y == h + ch && info.planeA.w == w && info.planeA.h == h) : (info.planeA.w == 0 && info.planeA.h == 0)),
+					std::string(what) + ": plane rects Y(" + Num(info.planeY.w) + "x" + Num(info.planeY.h) + ") U(" + Num(info.planeU.x) + "," + Num(info.planeU.y) + ") V(" + Num(info.planeV.x) + "," + Num(info.planeV.y) + ") A(" + Num(info.planeA.y) + "," + Num(info.planeA.h) + ")");
+				ITexture* const pTex = Tex(p);
+				const int texH = h + ch + (alpha ? h : 0);
+				t.Check(pTex != nullptr && info.textureId == pTex->GetTextureID() && pTex->GetWidth() == w && pTex->GetHeight() == texH && pTex->GetTextureDstFormat() == eTF_R8 && pTex->GetNumMips() == 1,
+					std::string(what) + ": texture R8 " + Num(w) + "x" + Num(texH) + " (got " + (pTex ? Num(pTex->GetWidth()) + "x" + Num(pTex->GetHeight()) + " format " + Num(static_cast<long long>(pTex->GetTextureDstFormat())) : std::string("none")) + ")");
+				t.Check((info.flags & 1u) == 0 && (info.flags & 8u) == 0 && ((info.flags & 2u) != 0) == alpha && info.width == w && info.height == h, std::string(what) + ": flags 0x" + Num(info.flags) + ", width / height = picture");
+				t.Check(info.colorMatrix == 0 && info.colorRange == 0 && info.chromaSiting == CTS_SITING_LEFT && info.textureId2 == 0, std::string(what) + ": BT.601 limited, siting left (" + Num(info.colorMatrix) + "/" + Num(info.colorRange) + "/" + Num(info.chromaSiting) + ")");
+			}
+
+			void CheckRgba(STest& t, IVideoPlayer* p, const CryTexSourceInfo& info, const char* what)
+			{
+				ITexture* const pTex = Tex(p);
+				t.Check(info.layout == CTS_LAYOUT_RGBA8 && p->GetPixelLayout() == EVideoPixelLayout::RGBA8 && (info.flags & 1u) != 0 && info.planeY.w == 0,
+					std::string(what) + ": RGBA8, premultiplied, no plane rects (layout " + Num(info.layout) + ")");
+				t.Check(pTex != nullptr && info.textureId == pTex->GetTextureID() && pTex->GetWidth() == p->GetWidth() && pTex->GetHeight() == p->GetHeight() && pTex->GetTextureDstFormat() == eTF_R8G8B8A8,
+					std::string(what) + ": texture RGBA8 at the picture size");
+			}
+
+			//! The texture switch itself: generation +1, content in the same tick, no reload, the clock continuous.
+			void CheckSwitch(STest& t, IVideoPlayer* p, const CryTexSourceInfo& info, double now, const char* what, bool checkHysteresis)
+			{
+				CVideoPlayerImpl* const impl = Impl(p);
+				t.Check(info.generation == s_m8.generation + 1u, std::string(what) + ": generation +1 (" + Num(s_m8.generation) + " -> " + Num(info.generation) + ")");
+				t.Check(info.contentSerial > s_m8.serial, std::string(what) + ": contentSerial increased");
+				t.Check(impl->FirstUploadTick() == impl->TextureTick() && impl->TextureTick() != 0, std::string(what) + ": first upload in the tick the texture was made (tick " + Num(static_cast<long long>(impl->TextureTick())) + ", upload " + Num(static_cast<long long>(impl->FirstUploadTick())) + ")");
+				t.Check(impl->LoadCount() == s_m8.loads, std::string(what) + ": no reload (loads " + Num(static_cast<long long>(impl->LoadCount())) + ")");
+				const double wall = now - s_m8.wallMark;
+				const double media = info.timeSeconds - s_m8.timeMark;
+				t.Check(std::fabs(media - wall) <= 0.05 || media < 0.0 /* loop wrap */, std::string(what) + ": clock continuous (media " + std::to_string(media) + " s, wall " + std::to_string(wall) + " s, clock " + impl->ClockSourceName() + ")");
+				if (checkHysteresis)
+				{
+					const uint64_t ticks = impl->TextureTick() - s_m8.switchTick;
+					t.Check(ticks >= 30, std::string(what) + ": hysteresis, " + Num(static_cast<long long>(ticks)) + " ticks after the previous switch (>= 30)");
+				}
+				s_m8.generation = info.generation;
+				s_m8.serial = info.contentSerial;
+				s_m8.switchTick = impl->TextureTick();
+				s_m8.wallMark = now;
+				s_m8.timeMark = info.timeSeconds;
+			}
+
+			//! Marks the state before a condition change.
+			void Mark(STest& t, const char* name, double now)
+			{
+				CryTexSourceInfo info = {};
+				t.Query(name, info);
+				s_m8.generation = info.generation;
+				s_m8.serial = info.contentSerial;
+				s_m8.wallMark = now;
+				s_m8.timeMark = info.timeSeconds;
+			}
+
+			void AddM8Steps(std::vector<std::function<bool(STest&, double)>>& steps)
+			{
+				auto add = [&](std::function<bool(STest&, double)> s) { steps.push_back(s); };
+
+				add([](STest& t, double) {
+					SM8& m = s_m8;
+					m = SM8();
+					m.savedAllowPlanar = mEnv->m_cevAllowPlanar;
+					m.savedStats = mEnv->m_cevStats;
+					m.active = true;
+					mEnv->m_cevAllowPlanar = 1;
+					mEnv->m_cevStats = 1; // the core counts converted bytes only with stats on
+					m.p = mEnv->pManager->CreatePlayerForSurface(kM8);
+					t.Check(m.p != nullptr, "M8: CreatePlayerForSurface CevM8");
+					if (m.p == nullptr)
+						return true;
+					m.p->SetVolume(0.f);
+					m.p->SetLoop(true);
+					t.Check(m.p->Load("Videos/vp8_vorbis.webm"), "M8: Load vp8_vorbis.webm");
+					m.p->Play();
+					return true;
+				});
+				add([](STest& t, double now) {
+					if (!LoadedFor(t, s_m8.p, now, 0.5, "M8 video"))
+						return false;
+					CryTexSourceInfo info = {};
+					t.Query(kM8, info);
+					CheckRgba(t, s_m8.p, info, "no consumer");
+					s_m8.loads = Impl(s_m8.p)->LoadCount();
+					Impl(s_m8.p)->SetUploadChecksum(true);
+					Mark(t, kM8, now);
+					s_m8.switchTick = 0;
+					Sustain(kM8, kM8ConsumerA, 1u, 360, kAcceptAll);
+					return true;
+				});
+				// one consumer that accepts packed planes -> packed, at once (no switch for longer than the hold)
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8, now, 2.0, info, "accepting consumer"))
+						return false;
+					CheckSwitch(t, s_m8.p, info, now, "RGBA8 -> packed", false);
+					CheckPacked(t, s_m8.p, info, false, "accepting consumer");
+					// the same tick the consumer must not see RGBA: anonymous consumer arrives right now (hysteresis test)
+					Sustain(kM8, 0, 1u, 360, 0u);
+					return true;
+				});
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8, now, 3.0, info, "anonymous consumer"))
+						return false;
+					CheckSwitch(t, s_m8.p, info, now, "packed -> RGBA8 (anonymous consumer)", true);
+					CheckRgba(t, s_m8.p, info, "anonymous consumer");
+					Unsustain(kM8, 0, true); // release
+					return true;
+				});
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8, now, 3.0, info, "anonymous released"))
+						return false;
+					CheckSwitch(t, s_m8.p, info, now, "RGBA8 -> packed (anonymous released)", true);
+					CheckPacked(t, s_m8.p, info, false, "anonymous released");
+					return true;
+				});
+				// pixel check: the bytes uploaded into the R8 texture are the core's planes at the reported rects
+				add([](STest& t, double now) {
+					if (Elapsed(now) < 0.3)
+						return false;
+					s_m8.p->Pause();
+					return true;
+				});
+				add([](STest& t, double now) {
+					if (Elapsed(now) < 0.3)
+						return false;
+					CVideoPlayerImpl* const impl = Impl(s_m8.p);
+					CryTexSourceInfo info = {};
+					t.Query(kM8, info);
+					uint64_t hash = 0, serial = 0;
+					const bool ok = PackedHashFromCore(impl, info, hash, serial);
+					t.Check(ok && serial == impl->LastUploadSerial() && hash == impl->LastUploadChecksum() && impl->LastUploadBytes() == static_cast<uint64_t>(info.planeY.w) * (info.planeU.y + info.planeU.h),
+						"packed upload = core planes at the snapshot rects (serial " + Num(static_cast<long long>(serial)) + "/" + Num(static_cast<long long>(impl->LastUploadSerial())) + ", bytes " + Num(static_cast<long long>(impl->LastUploadBytes())) + ")");
+					t.Check(impl->Core().RgbaBufferCount() == 0, "packed: the core holds no RGBA buffer (" + Num(impl->Core().RgbaBufferCount()) + ")");
+					const cev::StatsSnapshot st = impl->Core().GetStats();
+					s_m8.serial = st.colorBytes; // reused as a mark
+					s_m8.p->Resume();
+					s_m8.wallMark = now;
+					return true;
+				});
+				add([](STest& t, double now) {
+					if (Elapsed(now) < 0.5)
+						return false;
+					CVideoPlayerImpl* const impl = Impl(s_m8.p);
+					t.Check(impl->Core().GetStats().colorBytes == s_m8.serial, "packed: no colour conversion while playing");
+					Mark(t, kM8, now);
+					Sustain(kM8, kM8ConsumerB, 1u, 360, 1u); // a v2 consumer that only takes RGBA8
+					return true;
+				});
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8, now, 3.0, info, "RGBA8-only consumer"))
+						return false;
+					CheckSwitch(t, s_m8.p, info, now, "packed -> RGBA8 (consumer B)", true);
+					CheckRgba(t, s_m8.p, info, "consumer B");
+					Unsustain(kM8, kM8ConsumerB, false); // stops hinting: expires after 120 updates
+					return true;
+				});
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8, now, 10.0, info, "consumer B expired"))
+						return false;
+					t.Check(Impl(s_m8.p)->HintConsumers() == 1, "B expired after 120 updates (" + Num(Impl(s_m8.p)->HintConsumers()) + " consumers)");
+					CheckSwitch(t, s_m8.p, info, now, "RGBA8 -> packed (B expired)", true);
+					CheckPacked(t, s_m8.p, info, false, "B expired");
+					mEnv->m_cevAllowPlanar = 0;
+					return true;
+				});
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8, now, 3.0, info, "cev_allowPlanar 0"))
+						return false;
+					CheckSwitch(t, s_m8.p, info, now, "cev_allowPlanar 0", true);
+					CheckRgba(t, s_m8.p, info, "cev_allowPlanar 0");
+					mEnv->m_cevAllowPlanar = 1;
+					return true;
+				});
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8, now, 3.0, info, "cev_allowPlanar 1"))
+						return false;
+					CheckSwitch(t, s_m8.p, info, now, "cev_allowPlanar 1", true);
+					CheckPacked(t, s_m8.p, info, false, "cev_allowPlanar 1");
+					// material output: RGBA8 while bound (a warning about the empty test material's slot is expected)
+					IMaterialManager* const pMm = gEnv->p3DEngine != nullptr ? gEnv->p3DEngine->GetMaterialManager() : nullptr;
+					s_m8.pMaterial = pMm != nullptr ? pMm->CreateMaterial("cev_m8_selftest") : nullptr;
+					if (s_m8.pMaterial != nullptr)
+						s_m8.pMaterial->AddRef();
+					t.Check(s_m8.pMaterial != nullptr && s_m8.p->BindMaterial(s_m8.pMaterial, -1, 0), "BindMaterial (test material)");
+					return true;
+				});
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8, now, 3.0, info, "material output"))
+						return false;
+					CheckSwitch(t, s_m8.p, info, now, "material output", true);
+					CheckRgba(t, s_m8.p, info, "material output");
+					s_m8.p->UnbindMaterial(s_m8.pMaterial);
+					return true;
+				});
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8, now, 3.0, info, "material unbound"))
+						return false;
+					CheckSwitch(t, s_m8.p, info, now, "material unbound", true);
+					CheckPacked(t, s_m8.p, info, false, "material unbound");
+					s_m8.p->SetFullscreen(true, EVideoFit::Letterbox);
+					return true;
+				});
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8, now, 3.0, info, "fullscreen"))
+						return false;
+					CheckSwitch(t, s_m8.p, info, now, "fullscreen", true);
+					CheckRgba(t, s_m8.p, info, "fullscreen");
+					s_m8.p->SetFullscreen(false, EVideoFit::Letterbox);
+					Unsustain(kM8, kM8ConsumerA, true);
+					return true;
+				});
+				add([](STest& t, double now) {
+					if (Elapsed(now) < 1.0)
+						return false;
+					CryTexSourceInfo info = {};
+					t.Query(kM8, info);
+					CheckRgba(t, s_m8.p, info, "fullscreen off, last consumer released");
+					mEnv->pManager->DestroyPlayer(s_m8.p);
+					s_m8.p = nullptr;
+					// alpha: a consumer that takes PACKED_YUV420 but not YUVA420 keeps RGBA8
+					s_m8.pA = mEnv->pManager->CreatePlayerForSurface(kM8A);
+					t.Check(s_m8.pA != nullptr && s_m8.pA->Load("Videos/vp9_alpha.webm"), "M8: alpha surface");
+					if (s_m8.pA != nullptr)
+					{
+						s_m8.pA->SetLoop(true);
+						s_m8.pA->Play();
+					}
+					Sustain(kM8A, kM8ConsumerA, 1u, 360, kAccept420);
+					return true;
+				});
+				add([](STest& t, double now) {
+					if (!LoadedFor(t, s_m8.pA, now, 1.0, "M8 alpha video"))
+						return false;
+					CryTexSourceInfo info = {};
+					t.Query(kM8A, info);
+					CheckRgba(t, s_m8.pA, info, "alpha, consumer without YUVA420");
+					t.Check(info.generation == 1u, "alpha: no switch (generation " + Num(info.generation) + ")");
+					Impl(s_m8.pA)->SetUploadChecksum(true);
+					s_m8.loads = Impl(s_m8.pA)->LoadCount();
+					Mark(t, kM8A, now);
+					s_m8.switchTick = 0;
+					Sustain(kM8A, kM8ConsumerA, 1u, 360, kAcceptAll);
+					return true;
+				});
+				add([](STest& t, double now) {
+					CryTexSourceInfo info = {};
+					if (!WaitGeneration(t, kM8A, now, 3.0, info, "alpha, consumer with YUVA420"))
+						return false;
+					CheckSwitch(t, s_m8.pA, info, now, "alpha RGBA8 -> PACKED_YUVA420", false);
+					CheckPacked(t, s_m8.pA, info, true, "alpha");
+					s_m8.pA->Pause();
+					return true;
+				});
+				add([](STest& t, double now) {
+					if (Elapsed(now) < 0.3)
+						return false;
+					CVideoPlayerImpl* const impl = Impl(s_m8.pA);
+					CryTexSourceInfo info = {};
+					t.Query(kM8A, info);
+					uint64_t hash = 0, serial = 0;
+					const bool ok = PackedHashFromCore(impl, info, hash, serial);
+					t.Check(ok && serial == impl->LastUploadSerial() && hash == impl->LastUploadChecksum(), "alpha: packed upload = core planes incl. A at the snapshot rects");
+					Unsustain(kM8A, kM8ConsumerA, true);
+					mEnv->pManager->DestroyPlayer(s_m8.pA);
+					s_m8.pA = nullptr;
+					// 4:4:4 and odd width: never packed, even when the consumer accepts everything
+					s_m8.pX = mEnv->pManager->CreatePlayerForSurface(kM8X);
+					t.Check(s_m8.pX != nullptr && s_m8.pX->Load("Videos/m8_444.webm"), "M8: 4:4:4 surface");
+					if (s_m8.pX != nullptr)
+						s_m8.pX->Play();
+					Sustain(kM8X, kM8ConsumerA, 1u, 180, kAcceptAll);
+					return true;
+				});
+				add([](STest& t, double now) {
+					if (!LoadedFor(t, s_m8.pX, now, 1.0, "M8 4:4:4 video"))
+						return false;
+					CryTexSourceInfo info = {};
+					t.Query(kM8X, info);
+					CheckRgba(t, s_m8.pX, info, "4:4:4 with an accepting consumer");
+					t.Check(info.generation == 1u && Impl(s_m8.pX)->Core().GetOutputRgba(), "4:4:4: no switch, the core converts");
+					t.Check(s_m8.pX->Load("Videos/vp9_odd_321x181.webm"), "M8: odd width on the same surface");
+					s_m8.pX->Play();
+					return true;
+				});
+				add([](STest& t, double now) {
+					if (!LoadedFor(t, s_m8.pX, now, 1.0, "M8 odd width video"))
+						return false;
+					CryTexSourceInfo info = {};
+					t.Query(kM8X, info);
+					CheckRgba(t, s_m8.pX, info, "odd width with an accepting consumer");
+					Unsustain(kM8X, kM8ConsumerA, true);
+					mEnv->pManager->DestroyPlayer(s_m8.pX);
+					s_m8.pX = nullptr;
+					if (s_m8.pMaterial != nullptr)
+						s_m8.pMaterial->Release();
+					s_m8.pMaterial = nullptr;
+					mEnv->m_cevAllowPlanar = s_m8.savedAllowPlanar;
+					mEnv->m_cevStats = s_m8.savedStats;
+					s_m8.active = false;
+					return true;
+				});
+			}
+
+			void CleanupM8()
+			{
+				SM8& m = s_m8;
+				if (mEnv != nullptr && mEnv->pManager != nullptr)
+				{
+					for (IVideoPlayer** pp : { &m.p, &m.pA, &m.pX })
+					{
+						if (*pp != nullptr)
+							mEnv->pManager->DestroyPlayer(*pp);
+						*pp = nullptr;
+					}
+					if (m.active)
+					{
+						mEnv->m_cevAllowPlanar = m.savedAllowPlanar;
+						mEnv->m_cevStats = m.savedStats;
+					}
+				}
+				m.active = false;
+				if (m.pMaterial != nullptr)
+					m.pMaterial->Release();
+				m.pMaterial = nullptr;
+			}
+
 			void BuildM7Steps(STest& t)
 			{
 				SM7& m = s_m7;
@@ -818,6 +1242,7 @@ namespace CEVPlayer
 					mEnv->m_cevHiddenStopSeconds = s_m7.savedStop;
 					return true;
 				});
+				AddM8Steps(m.steps); // M8: layout negotiation
 			}
 
 			//! false while steps remain.
@@ -825,7 +1250,7 @@ namespace CEVPlayer
 			{
 				SM7& m = s_m7;
 				for (const SSustain& s : m.sustain)
-					t.Hint(s.consumer, s.flags, s.h * 16 / 9, s.h, 0u, sizeof(CryTexSourceHint), s.name.c_str());
+					t.Hint(s.consumer, s.flags, s.h * 16 / 9, s.h, s.accept, sizeof(CryTexSourceHint), s.name.c_str());
 				while (m.index < m.steps.size())
 				{
 					if (!m.stepEntered)
@@ -862,6 +1287,7 @@ namespace CEVPlayer
 							mEnv->pManager->DestroyPlayer(q);
 					}
 				}
+				CleanupM8();
 				m.sustain.clear();
 				m.steps.clear();
 				m.index = 0;
