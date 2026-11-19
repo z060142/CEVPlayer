@@ -1056,7 +1056,7 @@ namespace
 	void TestInstaller()
 	{
 		g_context = "installer";
-		// Constants: no release yet -> download is off and says why.
+		// Constants: download is on exactly when a release is pinned; otherwise it is off and says why.
 		CHECK(FfmpegDownloadEnabled() == (std::string(kFfmpegMinimalVersion) != "unreleased" && std::strlen(kFfmpegMinimalSha256) == 64));
 		CHECK(FfmpegDownloadEnabled() == FfmpegDownloadDisabledReason().empty());
 		CHECK(!FfmpegDownloadEnabled("unreleased", std::string(64, 'a')));
@@ -1077,6 +1077,15 @@ namespace
 			pkg.url = "x";
 			CHECK(ResultIs(DownloadAndInstallFfmpeg(pkg, fetcher, Out("inst_disabled")), Status::Unsupported));
 			CHECK(!FileExists(Out("inst_disabled")));
+		}
+		else
+		{
+			// Pinned release ffmpeg-minimal-v8.0.3-cev1.
+			CHECK(std::string(kFfmpegMinimalVersion) == "8.0.3-cev1");
+			CHECK(std::string(kFfmpegMinimalSha256) == "b89f1dee75a7f19ed2fbcc80f72d718fe415515399bc7199a1a1e88cded64033");
+			const FfmpegPackage pinned = PinnedFfmpegPackage();
+			CHECK(pinned.version == kFfmpegMinimalVersion && pinned.sha256 == kFfmpegMinimalSha256);
+			CHECK(pinned.url == "https://github.com/z060142/CEVPlayer/releases/download/ffmpeg-minimal-v8.0.3-cev1/ffmpeg-minimal-8.0.3-cev1-win64.zip");
 		}
 		CHECK(FfmpegInstallDir("", "1.0").empty() && FfmpegInstallDir("C:/root", "../x").empty() && !FfmpegInstallDir("C:/root", "1.0").empty());
 #if defined(_WIN32)

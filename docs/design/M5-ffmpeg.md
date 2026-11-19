@@ -71,7 +71,7 @@ Core/offline/tests/cevffmpeg_selftest.cpp
 
 ## 6. 下載（FfmpegInstall）
 
-- 外掛寫死 `kFfmpegMinimalVersion` 與 `kFfmpegMinimalSha256`。目前為 `"unreleased"` 與空字串：下載停用，`FfmpegDownloadDisabledReason()` 回傳說明（「尚未發佈最小版，請手動選擇 ffmpeg」）。第一次 CI 發佈後把 workflow 摘要印出的兩個值貼進標頭。
+- 外掛寫死 `kFfmpegMinimalVersion` 與 `kFfmpegMinimalSha256`。目前釘住 Release `ffmpeg-minimal-v8.0.3-cev1`：版本 `"8.0.3-cev1"`、SHA-256 `b89f1dee75a7f19ed2fbcc80f72d718fe415515399bc7199a1a1e88cded64033`（資產 `ffmpeg-minimal-8.0.3-cev1-win64.zip`，5,936,960 位元組，檔案在 zip 根目錄：`ffmpeg.exe`、`LICENSE`、`licenses/`、`BUILD.txt`…），下載啟用。兩個值為 `"unreleased"` 與空字串時下載停用，`FfmpegDownloadDisabledReason()` 回傳說明（「尚未發佈最小版，請手動選擇 ffmpeg」）。每次發佈新的 `ffmpeg-minimal-v*` 都要把兩個值一起更新。
 - URL：`https://github.com/z060142/CEVPlayer/releases/download/ffmpeg-minimal-v<版本>/ffmpeg-minimal-<版本>-win64.zip`。版本字串只允許 `[A-Za-z0-9._-]`（會進入路徑與 URL）。
 - 抓取經 `IFfmpegFetcher` 介面：`WinHttpFetcher`（系統元件，零額外相依；跟隨重新導向——GitHub 發佈資產會 302 到 CDN；只允許 https，loopback 才允許 http）與 `LocalFileFetcher`（自測 / 離線安裝）。
 - **先驗雜湊再解壓**：自己實作的 SHA-256（FIPS 180-4，附標準向量測試）。**雜湊不符 → 拒絕**（`Status::InvalidData`，訊息含實際與預期值），不解壓、刪除下載檔、保留舊的安裝。期望雜湊為空或格式錯誤也拒絕（絕不安裝未驗證的檔案）。
@@ -199,7 +199,7 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 ### 10.5 FFmpeg 缺少時的流程
 
 - 偵測：設定路徑、下載副本、PATH（`Locate` 順序不變）。
-- 互動（匯入對話框按 OK、`Generate variants...`、`Re-compress...`）：`EnsureUsableModal`。下載可用時提供「Download minimal build」與「Choose ffmpeg.exe...」（含授權 / 來源 / 雜湊驗證說明，下載有進度與取消）；`FfmpegDownloadDisabledReason()` 非空（目前釘住 `unreleased`）時視窗顯示原因，**只**提供手動選擇。選到的檔案再過一次能力檢查，不足就顯示缺少項目 / 被拒絕的原因。SHA-256 不符：庫拒絕並不解壓，訊息含實際與預期雜湊（視窗與 log 都會顯示）。
+- 互動（匯入對話框按 OK、`Generate variants...`、`Re-compress...`）：`EnsureUsableModal`。下載可用時提供「Download minimal build」與「Choose ffmpeg.exe...」（含授權 / 來源 / 雜湊驗證說明，下載有進度與取消）；`FfmpegDownloadDisabledReason()` 非空（未釘住 Release 時）時視窗顯示原因，**只**提供手動選擇。選到的檔案再過一次能力檢查，不足就顯示缺少項目 / 被拒絕的原因。SHA-256 不符：庫拒絕並不解壓，訊息含實際與預期雜湊（視窗與 log 都會顯示）。
 - 非互動（console）：Absent 時拒絕並印出原因與設定方式；偵測仍進行中則 job 等待結果（`WaitForExe`）。
 
 ## 11. Console 指令
@@ -214,6 +214,7 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 | `cev_editor_variants <asset> <高度> [crf:N]` | 產生變體。 |
 | `cev_editor_recompress <asset> [crf:N] [height:PX] [variants:a,b 或 none] [refresh]` | 重新壓縮。 |
 | `cev_editor_ffmpeg_install_test <zip> <sha256> [版本]` | 測試用：下載流程用本機 zip（`LocalFileFetcher`），雜湊驗證 / staging / 安裝與真實下載相同。 |
+| `cev_editor_ffmpeg_download` | 測試用：資訊欄「Download minimal build」按鈕的同一個呼叫（`CFfmpegService::StartDownload`：WinHTTP 抓釘住的 Release、驗 SHA-256、安裝、重新偵測）。 |
 
 測試用環境變數：`CEV_EDITOR_SETTINGS`（設定檔位置）、`CEV_EDITOR_FFMPEG_NO_PATH=1`（偵測時不搜尋 PATH）。
 

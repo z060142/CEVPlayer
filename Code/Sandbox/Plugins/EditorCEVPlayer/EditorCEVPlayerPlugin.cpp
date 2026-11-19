@@ -359,6 +359,22 @@ namespace
 			CryLogAlways("[CEVEditor] cev_editor_ffmpeg_install_test: started");
 	}
 
+	// cev_editor_ffmpeg_download: test hook for the Info panel's "Download minimal build" button; calls the same
+	// CFfmpegService::StartDownload (WinHTTP fetch of the pinned GitHub release, SHA-256 check, install into
+	// %LOCALAPPDATA%\CEVPlayer\ffmpeg\<version>, then a new detection)
+	void CmdFfmpegDownload(IConsoleCmdArgs*)
+	{
+		using namespace CEVEditor;
+		CFfmpegService* const pService = CFfmpegService::Get();
+		if (pService == nullptr)
+			return;
+		std::string error;
+		if (pService->StartDownload(error) == 0)
+			CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_ERROR, "[CEVEditor] cev_editor_ffmpeg_download: %s", error.c_str());
+		else
+			CryLogAlways("[CEVEditor] cev_editor_ffmpeg_download: started");
+	}
+
 	// cev_editor_open [<asset.cevvideo>]   (path relative to Assets, or absolute); without an argument only the window opens
 	void CmdOpen(IConsoleCmdArgs* pArgs)
 	{
@@ -1261,6 +1277,7 @@ CEditorCEVPlayerPlugin::CEditorCEVPlayerPlugin()
 		REGISTER_COMMAND("cev_editor_ffmpeg_status", CmdFfmpegStatus, VF_NULL, "cev_editor_ffmpeg_status [redetect]: log the ffmpeg in use (path, version, missing features)");
 		REGISTER_COMMAND("cev_editor_ffmpeg_path", CmdFfmpegPath, VF_NULL, "cev_editor_ffmpeg_path <path|->: set (or clear with -) the persistent ffmpeg path and detect again");
 		REGISTER_COMMAND("cev_editor_ffmpeg_install_test", CmdFfmpegInstallTest, VF_NULL, "cev_editor_ffmpeg_install_test <zip> <sha256> [version]: run the download install path with a local zip (hash check, staging)");
+		REGISTER_COMMAND("cev_editor_ffmpeg_download", CmdFfmpegDownload, VF_NULL, "cev_editor_ffmpeg_download: what the info panel's Download minimal build button does (download the pinned release, verify the SHA-256, install, detect again)");
 		REGISTER_COMMAND("cev_editor_variants", CmdVariants, VF_NULL, "cev_editor_variants <asset.cevvideo> <heights> [crf:N]: generate variants with FFmpeg");
 		REGISTER_COMMAND("cev_editor_recompress", CmdRecompress, VF_NULL, "cev_editor_recompress <asset.cevvideo> [crf:N] [height:PX] [variants:a,b|none] [refresh]: re-encode the video from its source copy");
 		REGISTER_COMMAND("cev_editor_open", CmdOpen, VF_NULL, "cev_editor_open [<asset.cevvideo>]: open the CEV Video Editor (on that asset)");
@@ -1309,6 +1326,7 @@ CEditorCEVPlayerPlugin::~CEditorCEVPlayerPlugin()
 		pConsole->RemoveCommand("cev_editor_ffmpeg_status");
 		pConsole->RemoveCommand("cev_editor_ffmpeg_path");
 		pConsole->RemoveCommand("cev_editor_ffmpeg_install_test");
+		pConsole->RemoveCommand("cev_editor_ffmpeg_download");
 		pConsole->RemoveCommand("cev_editor_variants");
 		pConsole->RemoveCommand("cev_editor_recompress");
 		pConsole->RemoveCommand("cev_editor_open");

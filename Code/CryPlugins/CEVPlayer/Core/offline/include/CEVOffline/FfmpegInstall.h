@@ -1,8 +1,8 @@
 // FfmpegInstall: download + verify + extract our minimal ffmpeg build.
 //
 //   * The plugin hard-codes the version and the SHA-256 of the release zip (kFfmpegMinimalVersion /
-//     kFfmpegMinimalSha256). Until a release exists they are "unreleased" / "": downloading is disabled and
-//     FfmpegDownloadDisabledReason() says so.
+//     kFfmpegMinimalSha256), currently the release ffmpeg-minimal-v8.0.3-cev1. Without a pinned release they are
+//     "unreleased" / "": downloading is then disabled and FfmpegDownloadDisabledReason() says so.
 //   * The zip comes through an IFfmpegFetcher (WinHTTP in the editor, a local file in the selftest). Its SHA-256 is
 //     checked BEFORE anything is extracted; a mismatch deletes the download and refuses (Status::InvalidData).
 //   * Extraction uses the Windows 10 (1803+) bsdtar in %SystemRoot%\System32\tar.exe, which reads zip archives.
@@ -24,8 +24,8 @@ namespace cev
 		namespace ffmpeg
 		{
 			// ---- pinned release (update both together with every new ffmpeg-minimal-v* release) ------------------------
-			constexpr const char* kFfmpegMinimalVersion = "unreleased";
-			constexpr const char* kFfmpegMinimalSha256 = ""; // 64 lower case hex digits of the release zip
+			constexpr const char* kFfmpegMinimalVersion = "8.0.3-cev1";
+			constexpr const char* kFfmpegMinimalSha256 = "b89f1dee75a7f19ed2fbcc80f72d718fe415515399bc7199a1a1e88cded64033"; // 64 lower case hex digits of the release zip
 			constexpr const char* kFfmpegMinimalRepo = "z060142/CEVPlayer";
 
 			// "ffmpeg-minimal-<version>-win64.zip"
