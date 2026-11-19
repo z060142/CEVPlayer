@@ -1036,6 +1036,30 @@ namespace CEVPlayer
 		ReleaseTexture(false);
 	}
 
+	void CVideoPlayerImpl::TakeUploadTiming(float& avgMs, float& p99Ms, uint32_t& samples)
+	{
+		const uint32_t n = std::min(m_uploadMsCount, kUploadTimingWindow);
+		samples = m_uploadMsCount;
+		avgMs = 0.f;
+		p99Ms = 0.f;
+		if (n > 0)
+		{
+			float values[kUploadTimingWindow];
+			double sum = 0.0;
+			for (uint32_t i = 0; i < n; ++i)
+			{
+				values[i] = m_uploadMs[i];
+				sum += values[i];
+			}
+			uint32_t k = (n * 99u + 99u) / 100u;
+			k = k == 0 ? 0 : std::min(k - 1, n - 1);
+			std::nth_element(values, values + k, values + n);
+			avgMs = static_cast<float>(sum / n);
+			p99Ms = values[k];
+		}
+		m_uploadMsCount = 0;
+	}
+
 	void CVideoPlayerImpl::UploadFrame()
 	{
 		cev::FrameView view;
@@ -1053,8 +1077,15 @@ namespace CEVPlayer
 			}
 			return;
 		}
-		if (RenderBridge::UpdateTexture(m_pTexture, view.rgba, view.width, view.height))
+		const std::chrono::steady_clock::time_point uploadStart = std::chrono::steady_clock::now();
+		const bool uploaded = RenderBridge::UpdateTexture(m_pTexture, view.rgba, view.width, view.height);
+		if (uploaded)
 		{
+			// measurement (S0): main thread cost of the update call
+			const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - uploadStart).count();
+			m_uploadMs[m_uploadMsCount % kUploadTimingWindow] = ms;
+			++m_uploadMsCount;
+			m_lastUploadBytes = static_cast<uint64_t>(view.width) * static_cast<uint64_t>(view.height) * 4u;
 			++m_uploads;
 			m_frameSerial = view.serial;
 			m_core->NoteUpload(static_cast<uint64_t>(view.width) * static_cast<uint64_t>(view.height) * 4u);

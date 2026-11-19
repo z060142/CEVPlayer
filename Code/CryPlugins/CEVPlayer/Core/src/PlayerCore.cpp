@@ -457,7 +457,7 @@ namespace cev
 				if (Failed(demux->ReadVideoAdditional(idx, additionalBuf.data(), static_cast<uint32_t>(additionalBuf.size()))))
 					st = Status::IoError;
 			}
-			Steady::time_point t0, t1, t2;
+			Steady::time_point t0, t1, t2, tCopy;
 			if (timing)
 				t0 = Steady::now();
 			if (Succeeded(st))
@@ -485,11 +485,13 @@ namespace cev
 				FrameRing::Slot& s = ring.GetSlot(static_cast<uint32_t>(slot));
 				if (Succeeded(vdec->WriteFrame(format, s)))
 				{
+					if (timing)
+						tCopy = Steady::now();
 					ConvertSlot(s);
 					if (timing)
 						t2 = Steady::now();
 					if (ring.Commit(slot, epoch, demux->VideoPts(idx)) && timing)
-						stats.RecordDecoded(MsBetween(t0, t1), MsBetween(t1, t2), ring.InFlightCount());
+						stats.RecordDecoded(MsBetween(t0, t1), MsBetween(t1, tCopy), MsBetween(tCopy, t2), ring.InFlightCount());
 				}
 				else
 				{

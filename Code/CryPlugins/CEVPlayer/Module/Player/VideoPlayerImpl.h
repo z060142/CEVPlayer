@@ -86,6 +86,10 @@ namespace CEVPlayer
 		void ListState(char* buffer, size_t size) const;
 		uint64_t& StatsMark() { return m_statsMark; }
 		uint64_t UploadCount() const { return m_uploads; }
+		//! Measurement (S0): main thread time of the texture update call over the last uploads (avg / p99, ms) and
+		//! the bytes of the last upload. Clears the window.
+		void TakeUploadTiming(float& avgMs, float& p99Ms, uint32_t& samples);
+		uint64_t LastUploadBytes() const { return m_lastUploadBytes; }
 		EVideoFit Fit() const { return m_fit; }
 		cev::PlayerCore& Core() { return *m_core; }
 		//! "audio" while an audio voice drives the clock (AudioClock), "cue" while the playback position of the cue
@@ -229,6 +233,11 @@ namespace CEVPlayer
 		bool m_destroyed = false;
 		bool m_releasePending = false; // Unload() while renderer calls were not allowed
 		uint64_t m_statsMark = 0;
+		// measurement (S0): upload call timing, cleared by TakeUploadTiming
+		static constexpr uint32_t kUploadTimingWindow = 512;
+		float m_uploadMs[kUploadTimingWindow] = {};
+		uint32_t m_uploadMsCount = 0;
+		uint64_t m_lastUploadBytes = 0;
 
 		bool m_fullscreen = false;
 		bool m_fullscreenHidden = false; // set by Stop(), cleared by Play()
