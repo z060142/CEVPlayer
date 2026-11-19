@@ -3593,6 +3593,9 @@ namespace
 		// --- visible: catch up from the keyframe before the clock, then present at the clock
 		p.SetVisible(true, step);
 		CHECK(p.GetVisibility() == VideoVisibility::Visible);
+		// M9: let the catch-up reach the (held) clock before stepping on: the simulation does not wait for frames while
+		// stale ones are queued, so an asynchronous backend could otherwise lose a race against an unpaced clock.
+		CHECK(WaitFor([&] { return p.GetStats().catchUps == 1; }, 5000));
 		const uint64_t beforeB = sim.presented;
 		CHECK(sim.RunUntilPresented(beforeB + 1));
 		CHECK(WaitFor([&] { return p.GetStats().catchUps == 1; }, 5000));
@@ -3613,8 +3616,17 @@ namespace
 			HiddenStep(p, clk, step);
 		CHECK(p.GetVisibility() == VideoVisibility::Stopped);
 		p.SetVisible(true, step);
+		CHECK(WaitFor([&] { return p.GetStats().catchUps == 2; }, 5000)); // as in phase B
 		const uint64_t beforeC = sim.presented;
-		CHECK(sim.RunUntilPresented(beforeC + 1));
+		const bool presentedC = sim.RunUntilPresented(beforeC + 1);
+		CHECK(presentedC);
+		if (!presentedC)
+		{
+			const DecodeBackendInfo bi = p.GetDecodeBackend();
+			Log("  %-34s diagnostics: load state %d, decode errors %u, video at end %d, backend %d '%s', stats decoded %llu decode-only %llu\n",
+				g_context.c_str(), static_cast<int>(p.GetLoadState()), p.DecodeErrors(), p.VideoDecoderAtEnd() ? 1 : 0, static_cast<int>(bi.kind), bi.reason,
+				(unsigned long long)p.GetStats().framesDecoded, (unsigned long long)p.GetStats().framesDecodeOnly);
+		}
 		CHECK(WaitFor([&] { return p.GetStats().catchUps == 2; }, 5000));
 		CHECK(p.GetFrame(fv));
 		CHECKF(std::fabs(fv.pts - p.GetTime()) <= 2.0 * period + step, "frame after the short catch-up pts %.3f at clock %.3f", fv.pts, p.GetTime());
@@ -4083,7 +4095,8 @@ namespace
 			g_context.c_str(), exact == compared ? "ok" : "FAILED", info.width, info.height, info.hasAlpha ? " alpha" : "",
 			info.colorStandard == ColorStandard::BT709 ? "BT709" : "BT601", info.colorRange == ColorRange::Full ? "full" : "limited",
 			static_cast<int>(info.chromaSiting), compared, exact, compared, maxDiff, diffCount ? sumDiff / static_cast<double>(diffCount) : 0.0);
-	
+	}
+
 	// =================================================================================================================
 	// M9: decoder backends (libvpx / Media Foundation), Decode = Auto | GPU | CPU
 	// =================================================================================================================
@@ -4173,6 +4186,8 @@ namespace
 		if (!lb || !mb)
 			return;
 		CHECK(mb->Info().kind == DecodeBackendKind::MediaFoundation && mb->Info().hardware);
+		lb->SetOutputFormat(f);
+		mb->SetOutputFormat(f);
 		CHECK(mb->MaxInFlight() == 3 && lb->MaxInFlight() == 1);
 
 		const size_t packedBytes = static_cast<size_t>(ringL.PackedWidth()) * static_cast<size_t>(ringL.PackedHeight());
@@ -4559,7 +4574,6 @@ namespace
 		CHECK(MediaFoundationStartupCount() == 0);
 		Log("  %-34s ok: %d/%d ready, %d with hardware decode, destroyed in %.0f ms\n", g_context.c_str(), ready, kPlayers, hw, ms);
 	}
-}
 
 int main(int argc, char** argv)
 {

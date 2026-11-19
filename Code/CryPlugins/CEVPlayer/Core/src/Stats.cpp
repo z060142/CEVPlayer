@@ -45,6 +45,11 @@ namespace cev
 
 	void Stats::RecordDecoded(float decodeMs, float copyMs, float colorMs, uint32_t ringOccupancy)
 	{
+		RecordDecoded(decodeMs, copyMs, colorMs, ringOccupancy, 0.0f);
+	}
+
+	void Stats::RecordDecoded(float decodeMs, float copyMs, float colorMs, uint32_t ringOccupancy, float readbackMs)
+	{
 		const float convertMs = copyMs + colorMs;
 		if (!m_enabled.load(std::memory_order_relaxed))
 			return;
@@ -61,6 +66,7 @@ namespace cev
 		e.copyMs = copyMs;
 		e.colorMs = colorMs;
 		e.ringOccupancy = static_cast<float>(ringOccupancy);
+		e.readbackMs = readbackMs;
 		m_head = (m_head + 1) % kWindow;
 		if (m_count < kWindow)
 			++m_count;
@@ -132,6 +138,8 @@ namespace cev
 		out.colorMs = SummarizeValues(scratch, count);
 		for (uint32_t i = 0; i < count; ++i) scratch[i] = copy[i].ringOccupancy;
 		out.ringOccupancy = SummarizeValues(scratch, count);
+		for (uint32_t i = 0; i < count; ++i) scratch[i] = copy[i].readbackMs;
+		out.readbackMs = SummarizeValues(scratch, count);
 		out.framesPresented = m_presented.load(std::memory_order_relaxed);
 		out.framesDropped = m_dropped.load(std::memory_order_relaxed);
 		out.uploadBytes = m_uploadBytes.load(std::memory_order_relaxed);

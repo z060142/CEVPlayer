@@ -78,6 +78,9 @@ namespace cev
 	public:
 		virtual ~IVideoDecoderBackend() = default;
 
+		// The ring format the pictures are written in (before the first Submit with a slot, and after a ring change).
+		virtual void SetOutputFormat(const FrameFormat& format) = 0;
+
 		// Ok = consumed; Busy = try again later (nothing was consumed, the slot is still the caller's);
 		// DecodeError / Unsupported (libvpx: rejected / high bit depth or oversized) = consumed but failed, the ticket
 		// does not come back; BackendFailed = this backend is unusable (the ticket does not come back).
@@ -137,4 +140,7 @@ namespace cev
 	//! Media Foundation start-ups currently held by backend threads (MFStartup / MFShutdown are paired: 0 when no
 	//! backend exists).
 	uint32_t MediaFoundationStartupCount();
+	//! Backend threads that did not finish within the bounded join of the destructor (2 s) and were left running
+	//! detached (a defect to report; the module logs it).
+	uint32_t MediaFoundationShutdownTimeouts();
 }

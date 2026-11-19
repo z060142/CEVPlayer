@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <new>
@@ -15,6 +16,7 @@
 #include "CEVCore/FrameRing.h"
 #include "CEVCore/Resampler.h"
 #include "CEVCore/VideoDecoder.h"
+#include "CEVCore/VideoDecoderBackend.h"
 
 namespace cev
 {
@@ -69,7 +71,10 @@ namespace cev
 
 		// ---------------------------------------------------------------- media (built by the load step)
 		std::unique_ptr<WebmDemuxer> demux;
-		std::unique_ptr<VideoDecoder> vdec;
+		std::unique_ptr<IVideoDecoderBackend> vdec; // M9: libvpx or Media Foundation
+		uint32_t vThreads = 1;                      // libvpx threads (also for a fallback during playback)
+		mutable std::mutex backendMutex;
+		DecodeBackendInfo backendInfo;              // under backendMutex (GetDecodeBackend)
 		std::unique_ptr<AudioDecoder> adec;
 		FrameRing ring;
 		FrameFormat format;
@@ -84,6 +89,11 @@ namespace cev
 
 		// ---------------------------------------------------------------- worker side state
 		uint32_t vPos = 0;
+		uint32_t vInFlight = 0;                 // tickets with a slot submitted to vdec and not received yet
+		bool vDrained = false;                  // vdec->Drain() sent at the end of the packets
+		uint32_t vSkipUntil = 0;                // skip-decode packets before this index (backend fallback resume)
+		double lastCommittedPts = -1.0;
+		int abandoned[16];                      // Flush() output
 		bool vSeekActive = false;
 		double vSeekTarget = 0.0;
 		std::atomic<bool> vEof{false};
@@ -252,6 +262,321 @@ namespace cev
 			return true;
 		}
 
+		// Ring format / slot count shared by both backends (wantRgba as before M8: forced for non packable streams).
+		Status InitRing(int width, int height, int csx, int csy, bool alpha, uint32_t extraSlots)
+		{
+			format = FrameFormat();
+			format.width = width;
+			format.height = height;
+			format.chromaShiftX = csx;
+			format.chromaShiftY = csy;
+			format.hasAlpha = alpha;
+			const bool wantRgba = requestedRgba.load(std::memory_order_acquire) || !format.Packable();
+			rgbaWanted.store(wantRgba, std::memory_order_release);
+			format.withRgba = wantRgba;
+			info.width = width;
+			info.height = height;
+			return ring.Init(format, std::max(3u, cfg.ringSlots) + extraSlots);
+		}
+
+		// libvpx: decode until the first visible picture to learn the real format, then build the ring. `idx` = next
+		// packet. Returns Ok, or the status for Fail() (InvalidData: no picture, IoError, Cancelled, ring errors).
+		Status LoadFirstFrameLibvpx(const VideoStreamInfo& v, uint32_t& idx)
+		{
+			const uint32_t count = demux->VideoPacketCount();
+			const uint32_t limit = std::min<uint32_t>(count, 64);
+			bool got = false;
+			for (idx = 0; idx < limit && !got; ++idx)
+			{
+				if (cancel.load(std::memory_order_relaxed))
+					return Status::Cancelled;
+				const PacketRef& ref = demux->VideoPacket(idx);
+				if (Failed(demux->ReadVideoPacket(idx, videoBuf.data(), static_cast<uint32_t>(videoBuf.size()))))
+					return Status::IoError;
+				const bool alpha = v.hasAlpha && ref.additionalSize > 0;
+				if (alpha && Failed(demux->ReadVideoAdditional(idx, additionalBuf.data(), static_cast<uint32_t>(additionalBuf.size()))))
+					return Status::IoError;
+				const DecodePacket cp{videoBuf.data(), ref.size, ref.keyframe};
+				const DecodePacket ap{additionalBuf.data(), alpha ? ref.additionalSize : 0u, ref.keyframe};
+				bool picture = false;
+				if (Succeeded(LibvpxDecodeProbe(*vdec, cp, alpha ? &ap : nullptr, picture)) && picture)
+				{
+					got = true;
+					break;
+				}
+			}
+			if (!got)
+				return Status::InvalidData;
+			DecodedImageInfo di;
+			if (!vdec->LastFrameInfo(di))
+				return Status::InvalidData;
+			Status st = InitRing(di.width, di.height, di.chromaShiftX, di.chromaShiftY, v.hasAlpha, 0);
+			if (Failed(st))
+				return st; // Unsupported (too large) / OutOfMemory (budget)
+			vdec->SetOutputFormat(format);
+			uint64_t epoch = 0;
+			const int slot = ring.AcquireWrite(epoch);
+			if (slot < 0)
+				return Status::InvalidState;
+			if (Failed(LibvpxWriteLastFrame(*vdec, format, ring.GetSlot(static_cast<uint32_t>(slot)))))
+			{
+				ring.Abandon(slot);
+				return Status::InvalidData;
+			}
+			ConvertSlot(static_cast<uint32_t>(slot));
+			ring.Commit(slot, epoch, demux->VideoPts(idx));
+			lastCommittedPts = demux->VideoPts(idx);
+			++idx;
+			return Status::Ok;
+		}
+
+		static void WakeThunk(void* context) { static_cast<Impl*>(context)->WakeWorker(); }
+
+		// Media Foundation: the ring is built from the container size (4:2:0) before decoding; packets are submitted
+		// until the first picture came back. Any failure: everything is released (`got` false, `chosen.reason` says
+		// why) and the caller continues with libvpx from packet 0. Returns Cancelled only when Unload() interrupted.
+		Status LoadFirstFrameMf(const VideoStreamInfo& v, DecodeBackendInfo& chosen, uint32_t& idx, bool& got)
+		{
+			got = false;
+			idx = 0;
+			MediaFoundationConfig mc;
+			mc.stream = v;
+			mc.maxPacketSize = v.maxPacketSize;
+			mc.maxAdditionalSize = v.maxAdditionalSize;
+			mc.alphaThreads = std::max(1u, vThreads / 2);
+			mc.wake = &WakeThunk;
+			mc.wakeContext = this;
+			if (Failed(CreateMediaFoundationBackend(mc, vdec, chosen.reason, sizeof(chosen.reason))))
+			{
+				vdec.reset();
+				return Status::Ok;
+			}
+			const auto giveUp = [&](const char* why) {
+				const DecodeBackendInfo bi = vdec->Info();
+				std::snprintf(chosen.reason, sizeof(chosen.reason), "%s", bi.reason[0] != 0 ? bi.reason : why);
+				const uint32_t n = vdec->Flush(abandoned, 16);
+				for (uint32_t i = 0; i < n; ++i)
+					ring.Abandon(abandoned[i]);
+				vdec.reset();
+				ring.Shutdown();
+				vInFlight = 0;
+				vDrained = false;
+				idx = 0;
+			};
+			if (Failed(InitRing(v.width, v.height, 1, 1, v.hasAlpha, vdec->MaxInFlight() - 1)))
+			{
+				giveUp("Media Foundation: ring init failed");
+				return Status::Ok;
+			}
+			vdec->SetOutputFormat(format);
+			const uint32_t count = demux->VideoPacketCount();
+			const Steady::time_point deadline = Steady::now() + std::chrono::seconds(5);
+			for (;;)
+			{
+				if (cancel.load(std::memory_order_relaxed))
+				{
+					giveUp("cancelled");
+					return Status::Cancelled;
+				}
+				bool progressed = false;
+				DecodeTicket t;
+				Status r = Status::Ok;
+				while (!got && vdec->Receive(t, r))
+				{
+					progressed = true;
+					--vInFlight;
+					if (r == Status::Ok)
+					{
+						ConvertSlot(static_cast<uint32_t>(t.slotIndex));
+						ring.Commit(t.slotIndex, t.epoch, t.pts);
+						lastCommittedPts = t.pts;
+						got = true;
+					}
+					else
+					{
+						ring.Abandon(t.slotIndex);
+						if (r != Status::Cancelled)
+						{
+							giveUp(r == Status::InvalidData ? "Media Foundation: picture size differs from the container" : "Media Foundation: first picture failed");
+							return Status::Ok;
+						}
+					}
+				}
+				if (got)
+					break;
+				if (idx < count && vInFlight < vdec->MaxInFlight() && idx < 64)
+				{
+					uint64_t epoch = 0;
+					const int slot = ring.AcquireWrite(epoch);
+					if (slot >= 0)
+					{
+						const PacketRef& ref = demux->VideoPacket(idx);
+						const bool alpha = v.hasAlpha && ref.additionalSize > 0;
+						if (Failed(demux->ReadVideoPacket(idx, videoBuf.data(), static_cast<uint32_t>(videoBuf.size()))) ||
+							(alpha && Failed(demux->ReadVideoAdditional(idx, additionalBuf.data(), static_cast<uint32_t>(additionalBuf.size())))))
+						{
+							ring.Abandon(slot);
+							giveUp("read error");
+							return Status::Ok;
+						}
+						DecodeTicket nt;
+						nt.epoch = epoch;
+						nt.pts = demux->VideoPts(idx);
+						nt.slotIndex = slot;
+						nt.slot = &ring.GetSlot(static_cast<uint32_t>(slot));
+						const DecodePacket cp{videoBuf.data(), ref.size, ref.keyframe};
+						const DecodePacket ap{additionalBuf.data(), alpha ? ref.additionalSize : 0u, ref.keyframe};
+						const Status st = vdec->Submit(cp, alpha ? &ap : nullptr, nt);
+						if (st == Status::Ok)
+						{
+							++vInFlight;
+							++idx;
+							progressed = true;
+						}
+						else
+						{
+							ring.Abandon(slot);
+							if (st != Status::Busy)
+							{
+								giveUp("Media Foundation: submit failed");
+								return Status::Ok;
+							}
+						}
+					}
+				}
+				else if (vInFlight > 0 && !vDrained && (idx >= count || idx >= 64))
+				{
+					vdec->Drain();
+					vDrained = true;
+				}
+				else if (vInFlight == 0)
+				{
+					giveUp("Media Foundation: no picture in the first packets");
+					return Status::Ok;
+				}
+				if (Steady::now() > deadline)
+				{
+					giveUp("Media Foundation: first picture timed out (5 s)");
+					return Status::Ok;
+				}
+				if (!progressed)
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
+			vDrained = false;
+			return Status::Ok;
+		}
+
+		// Media Foundation stopped working during playback (device removed, ...): continue on libvpx from the frame
+		// after the last committed one (or the pending seek target), warn once through the backend reason.
+		bool SwitchToLibvpx()
+		{
+			const VideoStreamInfo& v = demux->Video();
+			DecodeBackendInfo lb;
+			{
+				const DecodeBackendInfo bi = vdec->Info();
+				std::snprintf(lb.reason, sizeof(lb.reason), "%s", bi.reason[0] != 0 ? bi.reason : "Media Foundation failed during playback");
+			}
+			const uint32_t n = vdec->Flush(abandoned, 16);
+			for (uint32_t i = 0; i < n; ++i)
+				ring.Abandon(abandoned[i]);
+			vInFlight = 0;
+			vDrained = false;
+			vdec.reset();
+			if (Failed(CreateLibvpxBackend(v, vThreads, vdec)))
+			{
+				vdec.reset();
+				FailStream(Status::Unsupported, StatusDetail::VideoDecoderInit);
+				return false;
+			}
+			vdec->SetOutputFormat(format);
+			{
+				std::lock_guard<std::mutex> lock(backendMutex);
+				backendInfo = lb;
+			}
+			const uint32_t count = demux->VideoPacketCount();
+			if (vSeekActive)
+				vPos = demux->FindVideoKeyframe(vSeekTarget);
+			else
+			{
+				uint32_t next = 0;
+				while (next < count && demux->VideoPts(next) <= lastCommittedPts + 1e-9)
+					++next;
+				vSkipUntil = next;
+				vPos = demux->FindVideoKeyframe(next < count ? demux->VideoPts(next) : lastCommittedPts);
+				if (vPos > next)
+					vPos = next;
+			}
+			vEof.store(vPos >= count, std::memory_order_relaxed);
+			return true;
+		}
+
+		// Commits the completed tickets in submission order (stale epochs are freed by Commit). Returns true when a
+		// ticket came back; `failover` when the backend asks to be replaced.
+		bool ReceiveCompleted(bool& failover)
+		{
+			bool any = false;
+			DecodeTicket t;
+			Status r = Status::Ok;
+			const bool timing = stats.IsEnabled();
+			while (vdec->Receive(t, r))
+			{
+				any = true;
+				if (vInFlight > 0)
+					--vInFlight;
+				if (r == Status::Ok)
+				{
+					Steady::time_point c0, c1;
+					if (timing)
+						c0 = Steady::now();
+					const bool converted = ConvertSlot(static_cast<uint32_t>(t.slotIndex));
+					if (timing)
+					{
+						c1 = Steady::now();
+						const uint64_t luma = static_cast<uint64_t>(format.width) * static_cast<uint64_t>(format.height);
+						const uint64_t chroma = 2ull * static_cast<uint64_t>(format.ChromaWidth()) * static_cast<uint64_t>(format.ChromaHeight());
+						stats.NoteCopy(luma + chroma + (format.hasAlpha ? luma : 0ull), converted ? luma * 4ull : 0ull);
+					}
+					if (ring.Commit(t.slotIndex, t.epoch, t.pts))
+					{
+						lastCommittedPts = t.pts;
+						if (timing)
+							stats.RecordDecoded(t.decodeMs, t.copyMs, MsBetween(c0, c1), ring.InFlightCount(), t.readbackMs);
+					}
+					continue;
+				}
+				ring.Abandon(t.slotIndex);
+				if (r == Status::BackendFailed)
+					failover = true;
+				else if (r == Status::DecodeError)
+					decodeErrors.fetch_add(1, std::memory_order_relaxed);
+				else if (r == Status::InvalidData)
+				{
+					decodeErrors.fetch_add(1, std::memory_order_relaxed);
+					// Resolution / chroma format switched mid-stream: the ring is sized for the first frame, so stop
+					// cleanly instead of freezing on the last frame.
+					DecodedImageInfo di;
+					if (vdec->LastFrameInfo(di) && (di.width != format.width || di.height != format.height ||
+						di.chromaShiftX != format.chromaShiftX || di.chromaShiftY != format.chromaShiftY))
+					{
+						FailStream(Status::Unsupported, StatusDetail::StreamChanged);
+						return any;
+					}
+				}
+			}
+			return any;
+		}
+
+		void FlushBackend()
+		{
+			if (!vdec)
+				return;
+			const uint32_t n = vdec->Flush(abandoned, 16);
+			for (uint32_t i = 0; i < n; ++i)
+				ring.Abandon(abandoned[i]);
+			vInFlight = 0;
+			vDrained = false;
+		}
+
 		bool DoLoad()
 		{
 			std::unique_ptr<IByteSource> source = std::move(pendingSource);
@@ -282,9 +607,7 @@ namespace cev
 					threads = v.height >= 1000 ? 4u : (v.height >= 700 ? 2u : 1u);
 					threads = std::min(threads, std::max(1u, std::thread::hardware_concurrency()));
 				}
-				st = VideoDecoder::Create(v, threads, vdec);
-				if (Failed(st))
-					return Fail(st, StatusDetail::VideoDecoderInit);
+				vThreads = threads;
 
 				videoBuf.assign(std::max<uint32_t>(v.maxPacketSize, 1u), 0);
 				additionalBuf.assign(std::max<uint32_t>(v.maxAdditionalSize, 1u), 0);
@@ -294,68 +617,47 @@ namespace cev
 				info.videoPacketCount = v.packetCount;
 				info.colorStandard = ResolveColorStandard(cfg.colorStandard, v.matrixCoefficients, v.width, v.height);
 				info.colorRange = ResolveColorRange(v.colorRange);
+				info.chromaSiting = ResolveChromaSiting(v.chromaSitingHorz, v.chromaSitingVert);
 
-				// Decode until the first visible frame to learn the real format, then build the ring.
-				const uint32_t count = demux->VideoPacketCount();
-				const uint32_t limit = std::min<uint32_t>(count, 64);
+				// M9: backend choice. Gpu / Auto try Media Foundation; every failure falls back to libvpx with a reason.
+				DecodeBackendInfo chosen;
+				bool tryMf = false;
+				if (cfg.decodeMode != DecodeMode::Cpu)
+				{
+					if (v.codec != VideoCodec::VP9)
+						std::snprintf(chosen.reason, sizeof(chosen.reason), "%s", "VP8 has no hardware decode: libvpx");
+					else if (cfg.decodeMode == DecodeMode::Gpu || static_cast<uint32_t>(std::max(0, v.height)) >= cfg.autoMinHeight)
+						tryMf = true;
+				}
 				uint32_t idx = 0;
 				bool got = false;
-				for (; idx < limit && !got; ++idx)
+				if (tryMf)
 				{
-					if (cancel.load(std::memory_order_relaxed))
+					const Status mf = LoadFirstFrameMf(v, chosen, idx, got);
+					if (mf == Status::Cancelled)
 						return Fail(Status::Cancelled, StatusDetail::FirstFrame);
-					const PacketRef& ref = demux->VideoPacket(idx);
-					if (Failed(demux->ReadVideoPacket(idx, videoBuf.data(), static_cast<uint32_t>(videoBuf.size()))))
-						return Fail(Status::IoError, StatusDetail::FirstFrame);
-					const bool alpha = v.hasAlpha && ref.additionalSize > 0;
-					if (alpha && Failed(demux->ReadVideoAdditional(idx, additionalBuf.data(), static_cast<uint32_t>(additionalBuf.size()))))
-						return Fail(Status::IoError, StatusDetail::FirstFrame);
-					if (Succeeded(vdec->Decode(videoBuf.data(), ref.size, alpha ? additionalBuf.data() : nullptr,
-						alpha ? ref.additionalSize : 0)) && vdec->HasFrame())
-					{
-						got = true;
-						break;
-					}
+					if (got)
+						chosen = vdec->Info();
 				}
 				if (!got)
-					return Fail(Status::InvalidData, StatusDetail::FirstFrame);
-
-				DecodedImageInfo di;
-				if (Failed(vdec->GetFrameInfo(di)))
-					return Fail(Status::InvalidData, StatusDetail::FirstFrame);
-				format = FrameFormat();
-				format.width = di.width;
-				format.height = di.height;
-				format.chromaShiftX = di.chromaShiftX;
-				format.chromaShiftY = di.chromaShiftY;
-				format.hasAlpha = v.hasAlpha;
-				// RGBA buffers at Init only when RGBA is wanted; a stream that cannot be packed always converts (M8).
-				const bool wantRgba = requestedRgba.load(std::memory_order_acquire) || !format.Packable();
-				rgbaWanted.store(wantRgba, std::memory_order_release);
-				format.withRgba = wantRgba;
-				info.chromaSiting = ResolveChromaSiting(v.chromaSitingHorz, v.chromaSitingVert);
-				info.width = di.width;
-				info.height = di.height;
-
-				const uint32_t slots = std::max(3u, cfg.ringSlots);
-				st = ring.Init(format, slots);
-				if (Failed(st))
-					return Fail(st, StatusDetail::RingInit); // Unsupported (too large) / OutOfMemory (budget)
-
-				uint64_t epoch = 0;
-				const int slot = ring.AcquireWrite(epoch);
-				if (slot < 0)
-					return Fail(Status::InvalidState, StatusDetail::RingInit);
-				if (Failed(vdec->WriteFrame(format, ring.GetSlot(static_cast<uint32_t>(slot)))))
 				{
-					ring.Abandon(slot);
-					return Fail(Status::InvalidData, StatusDetail::FirstFrame);
+					st = CreateLibvpxBackend(v, threads, vdec);
+					if (Failed(st))
+						return Fail(st, StatusDetail::VideoDecoderInit);
+					const Status lv = LoadFirstFrameLibvpx(v, idx);
+					if (lv != Status::Ok)
+						return Fail(lv, lv == Status::InvalidState ? StatusDetail::RingInit : (lv == Status::Unsupported || lv == Status::OutOfMemory ? StatusDetail::RingInit : StatusDetail::FirstFrame));
+					DecodeBackendInfo lb = vdec->Info();
+					std::snprintf(lb.reason, sizeof(lb.reason), "%s", chosen.reason);
+					chosen = lb;
+				}
+				{
+					std::lock_guard<std::mutex> lock(backendMutex);
+					backendInfo = chosen;
 				}
 				info.packedLayout = ring.IsPacked();
-				ConvertSlot(static_cast<uint32_t>(slot));
-				ring.Commit(slot, epoch, demux->VideoPts(idx));
-				vPos = idx + 1;
-				vEof.store(vPos >= count, std::memory_order_relaxed);
+				vPos = idx;
+				vEof.store(vPos >= demux->VideoPacketCount() && vInFlight == 0, std::memory_order_relaxed);
 			}
 			else
 			{
@@ -459,6 +761,8 @@ namespace cev
 			}
 			if (hasVideo)
 			{
+				FlushBackend();
+				vSkipUntil = 0;
 				vPos = demux->FindVideoKeyframe(t);
 				vSeekActive = true;
 				vSeekTarget = t;
@@ -480,6 +784,8 @@ namespace cev
 				const uint32_t k = demux->FindVideoKeyframe(decodeUntil.load(std::memory_order_relaxed));
 				if (k > vPos)
 				{
+					FlushBackend();
+					vSkipUntil = 0;
 					vPos = k;
 					vEof.store(false, std::memory_order_relaxed);
 					ring.FlushReady(); // frames before the jump are stale (the consumer does not present meanwhile)
@@ -494,11 +800,31 @@ namespace cev
 		// ================================================================ decode steps (worker)
 		bool VideoStep()
 		{
+			// (1) completed pictures first, in submission order
+			bool failover = false;
+			bool more = ReceiveCompleted(failover);
+			if (faulted.load(std::memory_order_relaxed))
+				return false;
+			if (failover)
+			{
+				if (!SwitchToLibvpx())
+					return false;
+				more = true;
+			}
 			if (vEof.load(std::memory_order_relaxed))
 				return false;
 			const uint32_t count = demux->VideoPacketCount();
 			if (vPos >= count)
 			{
+				if (vInFlight > 0)
+				{
+					if (!vDrained)
+					{
+						vdec->Drain();
+						vDrained = true;
+					}
+					return more; // the backend wakes us when the rest comes back
+				}
 				vEof.store(true, std::memory_order_release);
 				return false;
 			}
@@ -506,16 +832,17 @@ namespace cev
 			const uint32_t idx = vPos;
 			const uint8_t mode = vMode.load(std::memory_order_acquire);
 			if (mode == kModeStopped)
-				return false; // hidden for long: no video decoding at all (SetVisible wakes us)
+				return more; // hidden for long: no video decoding at all (SetVisible wakes us)
 			const bool hasNext = idx + 1 < count;
 			const double until = decodeUntil.load(std::memory_order_relaxed);
 			// Hidden: decode only the packets the clock has passed (the covering frame is left for the output when
 			// the picture becomes visible again), no ring slot. Catch-up: the same up to the moving clock.
 			const bool hiddenSkip = mode == kModeDecodeOnly;
 			if (hiddenSkip && (!hasNext || demux->VideoPts(idx + 1) > until + 1e-9))
-				return false; // caught up with the clock: Update() wakes us every frame
+				return more; // caught up with the clock: Update() wakes us every frame
 			const bool catchSkip = !hiddenSkip && vCatchUp && hasNext && demux->VideoPts(idx + 1) <= until + 1e-9;
-			const bool skipping = hiddenSkip || catchSkip || (vSeekActive && hasNext && demux->VideoPts(idx + 1) <= vSeekTarget + 1e-9);
+			const bool skipping = hiddenSkip || catchSkip || idx < vSkipUntil ||
+				(vSeekActive && hasNext && demux->VideoPts(idx + 1) <= vSeekTarget + 1e-9);
 			if (!skipping && vCatchUp)
 			{
 				// The catch-up reached the clock: the next frame is for output. Frames still queued from before are
@@ -529,13 +856,16 @@ namespace cev
 				catchUpPending.store(false, std::memory_order_release); // the consumer presents again
 			}
 
+			// (2) the next packet: a slot unless skipping (ring full or too many in flight: wait)
 			int slot = -1;
 			uint64_t epoch = 0;
 			if (!skipping)
 			{
+				if (vInFlight >= vdec->MaxInFlight())
+					return more;
 				slot = ring.AcquireWrite(epoch);
 				if (slot < 0)
-					return false; // ring full: idle until the consumer frees a slot and wakes us
+					return more; // ring full: idle until the consumer frees a slot and wakes us
 				if (seekGen.load(std::memory_order_acquire) != appliedSeekGen.load(std::memory_order_relaxed))
 				{
 					ring.Abandon(slot);
@@ -552,13 +882,34 @@ namespace cev
 				if (Failed(demux->ReadVideoAdditional(idx, additionalBuf.data(), static_cast<uint32_t>(additionalBuf.size()))))
 					st = Status::IoError;
 			}
-			Steady::time_point t0, t1, t2, tCopy;
+			Steady::time_point t0, t1;
 			if (timing)
 				t0 = Steady::now();
 			if (Succeeded(st))
-				st = vdec->Decode(videoBuf.data(), ref.size, alpha ? additionalBuf.data() : nullptr, alpha ? ref.additionalSize : 0);
+			{
+				DecodeTicket ticket;
+				ticket.epoch = epoch;
+				ticket.pts = demux->VideoPts(idx);
+				ticket.slotIndex = slot;
+				ticket.slot = slot >= 0 ? &ring.GetSlot(static_cast<uint32_t>(slot)) : nullptr;
+				const DecodePacket cp{videoBuf.data(), ref.size, ref.keyframe};
+				const DecodePacket ap{additionalBuf.data(), alpha ? ref.additionalSize : 0u, ref.keyframe};
+				st = vdec->Submit(cp, alpha ? &ap : nullptr, ticket);
+			}
 			if (timing)
 				t1 = Steady::now();
+			if (st == Status::Busy)
+			{
+				if (slot >= 0)
+					ring.Abandon(slot);
+				return more; // the backend wakes us when it has room
+			}
+			if (st == Status::BackendFailed)
+			{
+				if (slot >= 0)
+					ring.Abandon(slot);
+				return SwitchToLibvpx();
+			}
 			if (Failed(st))
 				decodeErrors.fetch_add(1, std::memory_order_relaxed);
 			if (st == Status::Unsupported) // e.g. the stream switched to high bit depth
@@ -583,44 +934,12 @@ namespace cev
 			}
 			vSeekActive = false;
 
-			if (Succeeded(st) && vdec->HasFrame())
-			{
-				FrameRing::Slot& s = ring.GetSlot(static_cast<uint32_t>(slot));
-				if (Succeeded(vdec->WriteFrame(format, s)))
-				{
-					if (timing)
-						tCopy = Steady::now();
-					const bool converted = ConvertSlot(static_cast<uint32_t>(slot));
-					if (timing)
-					{
-						t2 = Steady::now();
-						const uint64_t luma = static_cast<uint64_t>(format.width) * static_cast<uint64_t>(format.height);
-						const uint64_t chroma = 2ull * static_cast<uint64_t>(format.ChromaWidth()) * static_cast<uint64_t>(format.ChromaHeight());
-						stats.NoteCopy(luma + chroma + (format.hasAlpha ? luma : 0ull), converted ? luma * 4ull : 0ull);
-					}
-					if (ring.Commit(slot, epoch, demux->VideoPts(idx)) && timing)
-						stats.RecordDecoded(MsBetween(t0, t1), MsBetween(t1, tCopy), MsBetween(tCopy, t2), ring.InFlightCount());
-				}
-				else
-				{
-					decodeErrors.fetch_add(1, std::memory_order_relaxed);
-					ring.Abandon(slot);
-					// Resolution / chroma format switched mid-stream: the ring is sized for the first frame, so
-					// stop cleanly instead of freezing on the last frame.
-					DecodedImageInfo di;
-					if (Succeeded(vdec->GetFrameInfo(di)) && (di.width != format.width || di.height != format.height ||
-						di.chromaShiftX != format.chromaShiftX || di.chromaShiftY != format.chromaShiftY))
-						return FailStream(Status::Unsupported, StatusDetail::StreamChanged);
-				}
-			}
+			if (Succeeded(st))
+				++vInFlight; // comes back through Receive (libvpx: at once)
 			else
-			{
 				ring.Abandon(slot);
-			}
 
 			++vPos;
-			if (vPos >= count)
-				vEof.store(true, std::memory_order_release);
 			return true;
 		}
 
@@ -730,6 +1049,8 @@ namespace cev
 			cancel.store(true, std::memory_order_release);
 			if (pool && handle != DecodePool::kInvalidHandle)
 				pool->Unregister(handle);
+			// The backend may call WakeWorker() from its own thread until it is gone (Media Foundation: joins it).
+			vdec.reset();
 			handle = DecodePool::kInvalidHandle;
 			pool.reset();
 			{
@@ -740,7 +1061,6 @@ namespace cev
 				std::vector<float>().swap(resIn);
 			}
 
-			vdec.reset();
 			adec.reset();
 			demux.reset();
 			ring.Shutdown();
@@ -755,6 +1075,14 @@ namespace cev
 			loadError = LoadError();
 			hasVideo = hasAudio = false;
 			vPos = aPos = 0;
+			vInFlight = 0;
+			vDrained = false;
+			vSkipUntil = 0;
+			lastCommittedPts = -1.0;
+			{
+				std::lock_guard<std::mutex> lock(backendMutex);
+				backendInfo = DecodeBackendInfo();
+			}
 			vSeekActive = false;
 			vSeekTarget = 0.0;
 			vEof.store(false);
@@ -1232,6 +1560,12 @@ namespace cev
 	{
 		const Impl& d = *m_impl;
 		return d.loadState.load(std::memory_order_acquire) == LoadState::Ready && d.VideoAtEnd() && d.AudioAtEnd();
+	}
+
+	DecodeBackendInfo PlayerCore::GetDecodeBackend() const
+	{
+		std::lock_guard<std::mutex> lock(m_impl->backendMutex);
+		return m_impl->backendInfo;
 	}
 
 	bool PlayerCore::VideoDecoderAtEnd() const
