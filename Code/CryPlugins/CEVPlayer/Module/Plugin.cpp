@@ -1,5 +1,6 @@
 // Copyright (C) 2017-2020 Ilya Chernetsov. All rights reserved. Contacts: <chernecoff@gmail.com>
 // License: https://github.com/afrostalin/CEVPlayer/blob/master/LICENSE
+// This version (2026 rewrite) is maintained by z060142: https://github.com/z060142/CEVPlayer - not by the original author.
 
 #include "StdAfx.h"
 #include "PluginEnv.h"
@@ -207,8 +208,8 @@ namespace CEVPlayer
 					stl::make_unique<Schematyc::CEnvPackage>(
 						CVideoPlugin::GetCID(),
 						"EntityComponents",
-						"Ilya Chernetsov",
-						"CEVNetwork components",
+						"CEVPlayer contributors",
+						"CEVPlayer components",
 						[this](Schematyc::IEnvRegistrar& registrar) { RegisterComponents(registrar); }
 						)
 				);

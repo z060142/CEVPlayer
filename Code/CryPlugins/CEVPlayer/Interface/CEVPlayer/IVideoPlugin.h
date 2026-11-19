@@ -1,5 +1,6 @@
 // Copyright (C) 2017-2019 Ilya Chernetsov. All rights reserved. Contacts: <chernecoff@gmail.com>
 // License: https://github.com/afrostalin/CEVPlayer/blob/master/LICENSE
+// This version (2026 rewrite) is maintained by z060142: https://github.com/z060142/CEVPlayer - not by the original author.
 
 #pragma once
 
