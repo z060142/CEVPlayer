@@ -45,13 +45,13 @@ namespace CEVEditor
 		}
 		pForm->addRow(tr("Asset name"), m_pName);
 
-		m_pLanguage = new QLineEdit(QString::fromUtf8(initial.language.c_str()), this);
-		m_pLanguage->setToolTip(tr("Name of the language of the audio track inside the video."));
-		pForm->addRow(tr("Audio language"), m_pLanguage);
+		m_pAudioTrack = new QLineEdit(QString::fromUtf8(initial.audioTrack.c_str()), this);
+		m_pAudioTrack->setToolTip(tr("Name of the audio track of the sound inside the video (1 to 63 of A-Z a-z 0-9 _ . -). Scripts choose tracks by this name; a language tag can be added later in the info panel."));
+		pForm->addRow(tr("Audio track name"), m_pAudioTrack);
 
 		m_pRoute = new QComboBox(this);
 		m_pRoute->addItem(tr("embedded (the video plays its own audio)"), "embedded");
-		m_pRoute->addItem(tr("mixed (external audio files per language)"), "mixed");
+		m_pRoute->addItem(tr("mixed (external audio files per audio track)"), "mixed");
 		m_pRoute->addItem(tr("cue (CryAudio trigger, needs a WAV / Ogg)"), "cue");
 		m_pRoute->setCurrentIndex(std::max(0, m_pRoute->findData(QString::fromUtf8(initial.route.c_str()))));
 		pForm->addRow(tr("Audio route"), m_pRoute);
@@ -196,7 +196,7 @@ namespace CEVEditor
 	{
 		SImportOptions o;
 		o.assetName = m_pName->text().trimmed().toUtf8().constData();
-		o.language = m_pLanguage->text().trimmed().toUtf8().constData();
+		o.audioTrack = m_pAudioTrack->text().trimmed().toUtf8().constData();
 		o.route = m_pRoute->currentData().toString().toUtf8().constData();
 		o.trigger = m_pTrigger->text().trimmed().toUtf8().constData();
 		o.split = static_cast<ESplitAudio>(m_pSplit->currentData().toInt());

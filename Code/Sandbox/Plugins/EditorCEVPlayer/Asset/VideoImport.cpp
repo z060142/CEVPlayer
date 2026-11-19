@@ -22,6 +22,7 @@
 #include <PathUtils.h>
 
 #include "Asset/Sha256.h"
+#include "CEVCore/DescriptorPlan.h"
 #include "Audio/AceRegistrar.h"
 #include "FFmpeg/FfmpegService.h"
 #include "Jobs/JobRunner.h"
@@ -29,6 +30,19 @@
 
 namespace CEVEditor
 {
+	namespace
+	{
+		//! An import option / operation track name the runtime accepts (A1: 1 to 63 of A-Z a-z 0-9 _ . -), else "main".
+		std::string ValidTrackName(const std::string& name)
+		{
+			if (cev::IsValidAudioTrackName(name.c_str()))
+				return name;
+			if (!name.empty())
+				CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_WARNING, "[CEVEditor] audio track name '%s' is invalid (1 to 63 of A-Z a-z 0-9 _ . -), using 'main'", name.c_str());
+			return "main";
+		}
+	}
+
 	namespace fs = std::filesystem;
 
 	namespace
@@ -129,7 +143,7 @@ namespace CEVEditor
 		for (int h : variants)
 			variantText += (variantText.empty() ? "" : ",") + std::to_string(h);
 		return JoinSettings({
-			{ "language", language }, { "route", route }, { "trigger", trigger }, { "split", splitName },
+			{ "audioTrack", audioTrack }, { "route", route }, { "trigger", trigger }, { "split", splitName },
 			{ "wav", wav ? "1" : "0" }, { "ogg", ogg ? "1" : "0" }, { "oggQuality", quality },
 			{ "recompress", recompress ? "1" : "0" }, { "crf", std::to_string(crf) }, { "height", std::to_string(height) },
 			{ "variants", variantText }, { "fps", fpsText } });
@@ -140,7 +154,7 @@ namespace CEVEditor
 		SImportOptions o;
 		for (const auto& kv : SplitSettings(text))
 		{
-			if (kv.first == "language") o.language = kv.second;
+			if (kv.first == "audioTrack") o.audioTrack = kv.second;
 			else if (kv.first == "route") o.route = kv.second;
 			else if (kv.first == "trigger") o.trigger = kv.second;
 			else if (kv.first == "split") o.split = kv.second == "keep" ? ESplitAudio::KeepEmbedded : kv.second == "strip" ? ESplitAudio::StripEmbedded : ESplitAudio::None;
@@ -748,11 +762,11 @@ namespace CEVEditor
 		desc.video = videoName;
 		if (!info.audioTracks.empty())
 		{
-			SDescriptor::SLanguage lang;
-			lang.name = options.language.empty() ? "english" : options.language;
-			lang.embedded = true;
-			desc.languages.push_back(lang);
-			desc.defaultLanguage = lang.name;
+			SDescriptor::SAudioTrack embedded;
+			embedded.name = ValidTrackName(options.audioTrack);
+			embedded.source = SDescriptor::SAudioTrack::ESource::Embedded;
+			desc.audioTracks.push_back(embedded);
+			desc.defaultTrack = embedded.name;
 		}
 		std::sort(madeVariants.begin(), madeVariants.end(), [](const SDescriptor::SVariant& a, const SDescriptor::SVariant& b) { return a.height < b.height; });
 		desc.variants = madeVariants;
@@ -780,10 +794,7 @@ namespace CEVEditor
 		details.Set(DetailKey::kImportState, "ready");
 		FillMediaDetails(details, info);
 		details.Set(DetailKey::kRoute, desc.route);
-		std::vector<std::string> languageNames;
-		for (const SDescriptor::SLanguage& l : desc.languages)
-			languageNames.push_back(l.name);
-		details.Set(DetailKey::kLanguages, JoinList(languageNames, ','));
+		details.Set(DetailKey::kTrackNames, AudioTrackNameList(desc));
 
 		// Overwriting: the new CAsset carries the GUID of the existing one; MergeAssets (main thread, FinishImport) then
 		// updates the existing asset in place. The asset manager's own objects are never touched from this thread.
@@ -858,7 +869,7 @@ namespace CEVEditor
 		ops.wav = options.wav;
 		ops.ogg = options.ogg;
 		ops.oggQuality = options.oggQuality;
-		ops.language = options.language.empty() ? "english" : options.language;
+		ops.audioTrack = ValidTrackName(options.audioTrack);
 		ops.upgradeToCue = options.route == "cue";
 		if (ops.upgradeToCue && !ops.wav && !ops.ogg)
 			ops.wav = true; // the cue route needs a sound to point at
@@ -1105,18 +1116,19 @@ namespace CEVEditor
 					const std::string file = FileNameOf(p.rel);
 					if (p.kind == "split")
 					{
-						int index = desc.FindLanguage(ops.language);
+						const std::string trackName = ValidTrackName(ops.audioTrack);
+						int index = desc.FindAudioTrack(trackName);
 						if (index < 0)
 						{
-							SDescriptor::SLanguage lang;
-							lang.name = ops.language;
-							desc.languages.push_back(lang);
-							index = static_cast<int>(desc.languages.size()) - 1;
+							SDescriptor::SAudioTrack added;
+							added.name = trackName;
+							desc.audioTracks.push_back(added);
+							index = static_cast<int>(desc.audioTracks.size()) - 1;
 						}
-						desc.languages[static_cast<size_t>(index)].file = file;
-						desc.languages[static_cast<size_t>(index)].embedded = false;
-						if (desc.defaultLanguage.empty())
-							desc.defaultLanguage = ops.language;
+						desc.audioTracks[static_cast<size_t>(index)].file = file;
+						desc.audioTracks[static_cast<size_t>(index)].source = SDescriptor::SAudioTrack::ESource::File;
+						if (desc.defaultTrack.empty())
+							desc.defaultTrack = trackName;
 						if (desc.route == "embedded")
 							desc.route = "mixed";
 						changed = true;
@@ -1137,10 +1149,7 @@ namespace CEVEditor
 
 			CDetails details(asset);
 			details.Set(DetailKey::kRoute, desc.route);
-			std::vector<std::string> languageNames;
-			for (const SDescriptor::SLanguage& l : desc.languages)
-				languageNames.push_back(l.name);
-			details.Set(DetailKey::kLanguages, JoinList(languageNames, ','));
+			details.Set(DetailKey::kTrackNames, AudioTrackNameList(desc));
 			WriteAssetFilesAndDetails(asset, &files, &details);
 		}
 	}
@@ -1171,11 +1180,11 @@ namespace CEVEditor
 				copyRel = details.Get(DetailKey::kSourcePath);
 		}
 		const std::string srcAbs = AssetsAbsolute(copyRel);
-		const std::string lang = ops.language.empty() ? "english" : ops.language;
+		const std::string trackName = ValidTrackName(ops.audioTrack);
 
-		const std::string splitRel = folder + name + "_" + lang + ".webm";
-		const std::string wavRel = folder + name + "_" + lang + ".wav";
-		const std::string oggRel = folder + name + "_" + lang + ".ogg";
+		const std::string splitRel = folder + name + "_" + trackName + ".webm";
+		const std::string wavRel = folder + name + "_" + trackName + ".wav";
+		const std::string oggRel = folder + name + "_" + trackName + ".ogg";
 		const std::string stripRel = folder + name + "_silent.webm";
 
 		auto produced = std::make_shared<std::vector<SProduced>>();
@@ -1781,8 +1790,8 @@ namespace CEVEditor
 		const std::string name = asset.GetName().c_str();
 		const std::string folder = FolderOf(asset.GetMetadataFile().c_str());
 
-		// WAV / Ogg files of the asset: <name>.ext -> no language, <name>_<language>.ext -> language. WAV wins over Ogg.
-		std::map<std::string, std::string> byLanguage; // language -> relative path
+		// WAV / Ogg files of the asset: <name>.ext -> no track, <name>_<track>.ext -> that audio track. WAV wins over Ogg.
+		std::map<std::string, std::string> byTrack; // track name -> relative path
 		for (const std::string& rel : AssetFileList(asset))
 		{
 			const bool wav = HasExt(rel, "wav");
@@ -1790,23 +1799,23 @@ namespace CEVEditor
 			if (!wav && !ogg)
 				continue;
 			const std::string stem = StemOf(rel);
-			std::string language;
+			std::string trackName;
 			if (stem.size() > name.size() && _strnicmp(stem.c_str(), name.c_str(), name.size()) == 0 && stem[name.size()] == '_')
-				language = stem.substr(name.size() + 1);
+				trackName = stem.substr(name.size() + 1);
 			else if (_stricmp(stem.c_str(), name.c_str()) != 0)
 				continue;
-			auto it = byLanguage.find(language);
-			if (it == byLanguage.end() || (wav && !HasExt(it->second, "wav")))
-				byLanguage[language] = rel;
+			auto it = byTrack.find(trackName);
+			if (it == byTrack.end() || (wav && !HasExt(it->second, "wav")))
+				byTrack[trackName] = rel;
 		}
-		if (byLanguage.empty())
+		if (byTrack.empty())
 		{
 			error = "the asset has no WAV or Ogg file: export one first";
 			return false;
 		}
 
 		std::vector<SAceSound> sounds;
-		for (const auto& kv : byLanguage)
+		for (const auto& kv : byTrack)
 			sounds.push_back({ kv.first, AssetsAbsolute(kv.second) });
 		const SAceResult ace = RegisterAssetSounds(name, sounds);
 		if (!ace.ok)
@@ -1820,42 +1829,43 @@ namespace CEVEditor
 		if (!LoadDescriptor(descAbs, desc, error))
 			return false;
 		desc.route = "cue";
-		std::string defaultLanguage = desc.defaultLanguage;
+		std::string defaultTrack = desc.defaultTrack;
 		for (const SAceTriggers& t : ace.triggers)
 		{
-			if (t.language.empty())
+			if (t.track.empty())
 			{
 				desc.trigger = t.play;
 				desc.pauseTrigger = t.pause;
 				desc.resumeTrigger = t.resume;
 				continue;
 			}
-			int index = desc.FindLanguage(t.language);
+			int index = desc.FindAudioTrack(t.track);
 			if (index < 0)
 			{
-				SDescriptor::SLanguage lang;
-				lang.name = t.language;
-				desc.languages.push_back(lang);
-				index = static_cast<int>(desc.languages.size()) - 1;
+				SDescriptor::SAudioTrack added;
+				added.name = t.track;
+				desc.audioTracks.push_back(added);
+				index = static_cast<int>(desc.audioTracks.size()) - 1;
 			}
-			SDescriptor::SLanguage& lang = desc.languages[static_cast<size_t>(index)];
-			lang.trigger = t.play;
-			lang.pauseTrigger = t.pause;
-			lang.resumeTrigger = t.resume;
-			if (defaultLanguage.empty())
-				defaultLanguage = t.language;
+			SDescriptor::SAudioTrack& cueTrack = desc.audioTracks[static_cast<size_t>(index)];
+			cueTrack.source = SDescriptor::SAudioTrack::ESource::Trigger;
+			cueTrack.trigger = t.play;
+			cueTrack.pauseTrigger = t.pause;
+			cueTrack.resumeTrigger = t.resume;
+			if (defaultTrack.empty())
+				defaultTrack = t.track;
 		}
-		desc.defaultLanguage = defaultLanguage;
+		desc.defaultTrack = defaultTrack;
 		bool hasUnnamedSound = false;
 		for (const SAceTriggers& t : ace.triggers)
-			hasUnnamedSound = hasUnnamedSound || t.language.empty();
+			hasUnnamedSound = hasUnnamedSound || t.track.empty();
 		if (!hasUnnamedSound && !ace.triggers.empty())
 		{
-			// default triggers of the languages without their own: those of the default language. Always renewed:
+			// default triggers of the tracks without their own: those of the default track. Always renewed:
 			// after a rename the old asset name must not stay in them.
 			for (const SAceTriggers& t : ace.triggers)
 			{
-				if (t.language.empty() || _stricmp(t.language.c_str(), defaultLanguage.c_str()) == 0)
+				if (t.track.empty() || _stricmp(t.track.c_str(), defaultTrack.c_str()) == 0)
 				{
 					desc.trigger = t.play;
 					desc.pauseTrigger = t.pause;
@@ -1871,10 +1881,7 @@ namespace CEVEditor
 		details.Set(DetailKey::kRoute, desc.route);
 		details.Set(DetailKey::kSdlFiles, JoinList(ace.copiedRel, ';'));
 		details.Set(DetailKey::kAceLibrary, ace.libraryRel);
-		std::vector<std::string> languageNames;
-		for (const SDescriptor::SLanguage& l : desc.languages)
-			languageNames.push_back(l.name);
-		details.Set(DetailKey::kLanguages, JoinList(languageNames, ','));
+		details.Set(DetailKey::kTrackNames, AudioTrackNameList(desc));
 		if (!WriteAssetFilesAndDetails(asset, nullptr, &details))
 		{
 			error = "cannot write the .cryasset";

@@ -40,7 +40,7 @@ namespace CEVEditor
 
 	//! The editor descriptor (file names relative to the descriptor's folder) as the runtime module would see it after
 	//! reading `descriptorRel` (game relative): file names resolved like ResolveSiblingPath of the module, the same
-	//! languages skipped (unnamed, listed twice, without embedded / file / trigger), an unlisted default language
+	//! audio tracks skipped (invalid or duplicate name, without embedded / file / trigger), an unlisted default track
 	//! cleared, markers sorted. Limits of the module's reader (counts, sizes) are not repeated here.
 	cev::VideoDescriptor ToCoreDescriptor(const SDescriptor& desc, const std::string& descriptorRel);
 }

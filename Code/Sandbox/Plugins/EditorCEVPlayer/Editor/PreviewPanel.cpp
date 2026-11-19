@@ -82,6 +82,10 @@ namespace CEVEditor
 		m_pAudio->addItem(tr("Audio: as authored"), static_cast<int>(EPreviewAudio::AsAuthored));
 		m_pAudio->addItem(tr("Audio: embedded track"), static_cast<int>(EPreviewAudio::EmbeddedTrack));
 		m_pAudio->addItem(tr("Audio: muted"), static_cast<int>(EPreviewAudio::Muted));
+		m_pTrack = new QComboBox(this);
+		m_pTrack->setToolTip(tr("Audio track to audition (switches in place while playing). The game language is not followed in the preview."));
+		m_pTrack->addItem(tr("Track: automatic"), QString());
+		m_pTrack->setEnabled(false);
 		m_pVolume = new QSlider(Qt::Horizontal, this);
 		m_pVolume->setRange(0, 100);
 		m_pVolume->setValue(100);
@@ -103,6 +107,7 @@ namespace CEVEditor
 		pBar->addWidget(m_pTime);
 		pBar->addStretch(1);
 		pBar->addWidget(m_pAudio);
+		pBar->addWidget(m_pTrack);
 		pBar->addWidget(m_pVolume);
 		pBar->addWidget(m_pFit);
 		pBar->addWidget(m_pBackground);
@@ -115,6 +120,7 @@ namespace CEVEditor
 		connect(m_pSlider, &QSlider::valueChanged, this, &CVideoPreviewPanel::OnSliderMoved);
 		connect(m_pLoop, &QCheckBox::toggled, this, &CVideoPreviewPanel::OnLoopToggled);
 		connect(m_pAudio, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &CVideoPreviewPanel::OnAudioModeChanged);
+		connect(m_pTrack, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &CVideoPreviewPanel::OnAudioTrackChanged);
 		connect(m_pVolume, &QSlider::valueChanged, this, &CVideoPreviewPanel::OnVolumeChanged);
 		connect(m_pFit, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) { m_pPicture->SetFit(index == 0); });
 		connect(m_pBackground, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
@@ -232,6 +238,8 @@ namespace CEVEditor
 
 	void CVideoPreviewPanel::SetSource(const SSource& source)
 	{
+		if (source.descriptorRel != m_source.descriptorRel)
+			m_trackChoice.clear(); // another asset: back to the automatic choice
 		m_source = source;
 		m_hasSource = !source.descriptorRel.empty();
 		if (!m_hasSource)
@@ -251,12 +259,14 @@ namespace CEVEditor
 		request.videoRel = m_source.videoRel;
 		request.avOffsetMs = m_source.avOffsetMs;
 		request.audio = static_cast<EPreviewAudio>(m_pAudio->currentData().toInt());
+		request.audioTrack = m_trackChoice;
 		request.volume = Volume();
 		std::string error;
 		m_lastSerial = 0;
 		m_loggedFirstFrame = false;
 		if (!m_session.Load(request, error))
 		{
+			FillTrackList();
 			SetStatus(tr("Cannot preview %1: %2").arg(QString::fromUtf8(m_source.descriptorRel.c_str()), QString::fromUtf8(error.c_str())));
 			UpdateTimer();
 			UpdateTransport();
@@ -264,6 +274,7 @@ namespace CEVEditor
 			return;
 		}
 		m_session.SetLoop(m_pLoop->isChecked());
+		FillTrackList();
 		SetStatus(tr("Loading %1 ...").arg(QString::fromUtf8(m_source.descriptorRel.c_str())));
 		UpdateTimer();
 		UpdateTransport();
@@ -337,6 +348,55 @@ namespace CEVEditor
 	void CVideoPreviewPanel::OnAudioModeChanged(int)
 	{
 		Reload();
+	}
+
+	void CVideoPreviewPanel::FillTrackList()
+	{
+		m_trackListUpdating = true;
+		m_pTrack->clear();
+		m_pTrack->addItem(tr("Track: automatic"), QString());
+		const bool embeddedMode = static_cast<EPreviewAudio>(m_pAudio->currentData().toInt()) == EPreviewAudio::EmbeddedTrack;
+		for (const std::string& name : m_session.AudioTrackNames())
+		{
+			m_pTrack->addItem(tr("Track: %1").arg(QString::fromUtf8(name.c_str())), QString::fromUtf8(name.c_str()));
+			if (!m_trackChoice.empty() && _stricmp(name.c_str(), m_trackChoice.c_str()) == 0)
+				m_pTrack->setCurrentIndex(m_pTrack->count() - 1);
+		}
+		m_pTrack->setEnabled(!embeddedMode && !m_session.AudioTrackNames().empty());
+		m_trackListUpdating = false;
+	}
+
+	bool CVideoPreviewPanel::SelectAudioTrack(const std::string& name)
+	{
+		for (int i = 1; i < m_pTrack->count(); ++i)
+		{
+			if (_stricmp(m_pTrack->itemData(i).toString().toUtf8().constData(), name.c_str()) == 0)
+			{
+				if (m_pTrack->currentIndex() == i)
+					return true;
+				m_pTrack->setCurrentIndex(i); // OnAudioTrackChanged
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void CVideoPreviewPanel::OnAudioTrackChanged(int index)
+	{
+		if (m_trackListUpdating || index < 0)
+			return;
+		m_trackChoice = m_pTrack->itemData(index).toString().toUtf8().constData();
+		// switch in place, like the runtime's ReloadInPlace: same position, same transport state
+		const bool ready = m_session.IsReady();
+		const double time = ready ? m_session.Time() : 0.0;
+		const bool playing = ready && m_session.State() == cev::PlayerState::Playing;
+		Reload();
+		if (!ready || !m_session.HasMedia())
+			return;
+		m_session.Seek(time); // queued while loading
+		if (playing)
+			m_session.Play();
+		UpdateTransport();
 	}
 
 	void CVideoPreviewPanel::OnVolumeChanged(int)

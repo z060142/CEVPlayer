@@ -28,7 +28,7 @@ namespace CEVEditor
 	CItemModelAttribute CVideoAssetType::s_alphaAttribute("Alpha", &Attributes::s_stringAttributeType, CItemModelAttribute::StartHidden);
 	CItemModelAttribute CVideoAssetType::s_audioAttribute("Audio", &Attributes::s_stringAttributeType, CItemModelAttribute::StartHidden);
 	CItemModelAttribute CVideoAssetType::s_routeAttribute("Audio route", &Attributes::s_stringAttributeType, CItemModelAttribute::StartHidden);
-	CItemModelAttribute CVideoAssetType::s_languagesAttribute("Languages", &Attributes::s_stringAttributeType, CItemModelAttribute::StartHidden);
+	CItemModelAttribute CVideoAssetType::s_trackNamesAttribute("Audio track names", &Attributes::s_stringAttributeType, CItemModelAttribute::StartHidden);
 	CItemModelAttribute CVideoAssetType::s_stateAttribute("Import state", &Attributes::s_stringAttributeType, CItemModelAttribute::StartHidden);
 
 	CAssetEditor* CVideoAssetType::Edit(CAsset* pAsset) const
@@ -46,7 +46,7 @@ namespace CEVEditor
 	{
 		return {
 			&s_widthAttribute, &s_heightAttribute, &s_durationAttribute, &s_codecAttribute, &s_alphaAttribute,
-			&s_audioAttribute, &s_routeAttribute, &s_languagesAttribute, &s_stateAttribute };
+			&s_audioAttribute, &s_routeAttribute, &s_trackNamesAttribute, &s_stateAttribute };
 	}
 
 	QVariant CVideoAssetType::GetDetailValue(const CAsset* pAsset, const CItemModelAttribute* pDetail) const
@@ -60,7 +60,7 @@ namespace CEVEditor
 		else if (pDetail == &s_codecAttribute) key = DetailKey::kCodec;
 		else if (pDetail == &s_audioAttribute) key = DetailKey::kAudioTracks;
 		else if (pDetail == &s_routeAttribute) key = DetailKey::kRoute;
-		else if (pDetail == &s_languagesAttribute) key = DetailKey::kLanguages;
+		else if (pDetail == &s_trackNamesAttribute) key = DetailKey::kTrackNames;
 		else if (pDetail == &s_stateAttribute) key = DetailKey::kImportState;
 		else if (pDetail == &s_alphaAttribute)
 			return QVariant(QString(pAsset->GetDetailValue(DetailKey::kAlpha) == "1" ? "yes" : "no"));

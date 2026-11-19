@@ -96,27 +96,37 @@ namespace CEVEditor
 		const int forced = pVariantVar != nullptr ? pVariantVar->GetIVal() : -1;
 		const cev::DescriptorVariantChoice variant = cev::PickDescriptorVariant(desc, forced, false, 0, &PreviewFileExists, nullptr);
 
+		m_trackNames.clear();
+		for (const cev::VideoDescriptor::SAudioTrack& track : desc.audioTracks)
+			m_trackNames.push_back(track.name);
+		m_followGameLanguage = desc.followGameLanguage;
+		m_audioTrack.clear();
 		std::string videoPath = variant.videoPath;
 		double avOffsetSeconds = cev::DescriptorAvOffsetSeconds(desc);
 		cev::DescriptorAudioPlan audio;
 		std::string notes;
 		if (request.audio == EPreviewAudio::EmbeddedTrack)
 		{
-			// the audio track inside the video: no language, no external file (the main video, as the earlier
+			// the audio track inside the video: no track choice, no external file (the main video, as the earlier
 			// temporary descriptor did)
 			videoPath = request.videoRel;
 			avOffsetSeconds = request.avOffsetMs / 1000.0;
 		}
 		else
 		{
-			const char* const requests[3] = { CVarString("g_languageAudio"), CVarString("g_language"), desc.defaultLanguage.c_str() };
-			cev::ResolveDescriptorAudio(desc, requests, 3, &PreviewFileExists, nullptr, audio);
+			// the chosen track, else default / first; the game language is not followed in the preview (A1)
+			cev::ResolveDescriptorAudio(desc, request.audioTrack.c_str(), nullptr, 0, &PreviewFileExists, nullptr, audio);
+			m_audioTrack = audio.track;
 			if (variant.variant > 0)
 				notes += ", variant " + std::to_string(variant.variant) + " (" + std::to_string(variant.height) + "p)";
 			if (variant.forcedOutOfRange || !variant.missingFile.empty())
 				notes += ", requested variant not available: main video";
-			if (!audio.language.empty())
-				notes += ", language " + audio.language;
+			if (!audio.track.empty())
+				notes += ", audio track " + audio.track;
+			if (audio.unknownRequest)
+				notes += ", audio track " + request.audioTrack + " not listed";
+			if (desc.followGameLanguage)
+				notes += ", follows the game language in the game (not in the preview)";
 			if (!audio.externalPath.empty())
 				notes += ", audio file " + audio.externalPath;
 			if (!audio.missingExternal.empty())

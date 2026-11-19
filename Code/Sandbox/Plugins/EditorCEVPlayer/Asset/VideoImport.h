@@ -50,7 +50,7 @@ namespace CEVEditor
 	struct SImportOptions
 	{
 		std::string assetName;               //!< "" = sanitised stem of the file name
-		std::string language = "english";    //!< name of the (embedded) audio language
+		std::string audioTrack = "main";     //!< name of the audio track of the embedded audio (A1; not a language)
 		std::string route = "embedded";      //!< embedded | mixed | cue (cue is applied once a WAV / Ogg exists)
 		std::string trigger;                 //!< base of the ACE trigger names, "" = the asset name
 		ESplitAudio split = ESplitAudio::None;
@@ -208,7 +208,7 @@ namespace CEVEditor
 		bool wav = false;
 		bool ogg = false;
 		float oggQuality = 0.4f;
-		std::string language = "english";
+		std::string audioTrack = "main";     //!< track the produced files are named after (<name>_<track>.ext) and listed as
 		int trackIndex = 0;
 		bool upgradeToCue = false;           //!< after the exports: UpgradeToCueRoute (needs a produced or existing WAV / Ogg)
 	};

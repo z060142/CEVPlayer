@@ -36,7 +36,7 @@ namespace CEVEditor
 		static CItemModelAttribute s_alphaAttribute;
 		static CItemModelAttribute s_audioAttribute;
 		static CItemModelAttribute s_routeAttribute;
-		static CItemModelAttribute s_languagesAttribute;
+		static CItemModelAttribute s_trackNamesAttribute;
 		static CItemModelAttribute s_stateAttribute;
 	};
 }

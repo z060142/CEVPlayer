@@ -101,7 +101,7 @@ namespace
 	CQuitListener* g_pQuitListener = nullptr;
 
 	// Options of the import commands. Scripts and ExecuteString treat `a=b` as a cvar assignment, so every option also exists as
-	// `key:value`:  name:<asset> lang:<language> crf:<0..63> height:<px> variants:<h,h,...> fps:<n>   and the words
+	// `key:value`:  name:<asset> track:<audio track name> crf:<0..63> height:<px> variants:<h,h,...> fps:<n>   and the words
 	// wav ogg split strip cue mixed overwrite recompress. crf / height imply recompress (re-encode of a WebM).
 	bool ParseImportOptions(IConsoleCmdArgs* pArgs, int first, CEVEditor::SImportOptions& options, const char* szCommand, bool* pSequences = nullptr)
 	{
@@ -114,7 +114,7 @@ namespace
 			const std::string key = sep == std::string::npos ? arg : arg.substr(0, sep);
 			const std::string value = sep == std::string::npos ? std::string() : arg.substr(sep + 1);
 			if (sep != std::string::npos && key == "name") options.assetName = value;
-			else if (sep != std::string::npos && key == "lang") options.language = value;
+			else if (sep != std::string::npos && key == "track") options.audioTrack = value;
 			else if (sep != std::string::npos && key == "crf")
 			{
 				options.crf = std::atoi(value.c_str());
@@ -161,7 +161,7 @@ namespace
 		using namespace CEVEditor;
 		if (pArgs->GetArgCount() < 3)
 		{
-			CryLogAlways("[CEVEditor] usage: cev_editor_import <absSrcPath|absPngFolder> <assetFolderRelativeToAssets> [name:<asset>] [lang:<language>] [wav] [ogg] [split|strip] [cue|mixed] [overwrite] [crf:N] [height:PX] [variants:540,360] [fps:N] [recompress]");
+			CryLogAlways("[CEVEditor] usage: cev_editor_import <absSrcPath|absPngFolder> <assetFolderRelativeToAssets> [name:<asset>] [track:<audio track>] [wav] [ogg] [split|strip] [cue|mixed] [overwrite] [crf:N] [height:PX] [variants:540,360] [fps:N] [recompress]");
 			return;
 		}
 		const std::string source = pArgs->GetArg(1);
@@ -1383,7 +1383,7 @@ CEditorCEVPlayerPlugin::CEditorCEVPlayerPlugin()
 	CEVEditor::SetOfflineOps(CEVEditor::GetRealOfflineOps());
 	if (gEnv != nullptr && gEnv->pConsole != nullptr)
 	{
-		REGISTER_COMMAND("cev_editor_import", CmdImport, VF_NULL, "cev_editor_import <absSrcPath|absPngFolder> <assetFolder> [name:..] [lang:..] [wav] [ogg] [split|strip] [cue|mixed] [overwrite] [crf:N] [height:PX] [variants:540,360] [fps:N] [recompress]: import a video (webm mp4 mov mkv avi) or a folder of PNG files as a video asset without UI");
+		REGISTER_COMMAND("cev_editor_import", CmdImport, VF_NULL, "cev_editor_import <absSrcPath|absPngFolder> <assetFolder> [name:..] [track:..] [wav] [ogg] [split|strip] [cue|mixed] [overwrite] [crf:N] [height:PX] [variants:540,360] [fps:N] [recompress]: import a video (webm mp4 mov mkv avi) or a folder of PNG files as a video asset without UI");
 		REGISTER_COMMAND("cev_editor_import_batch", CmdImportBatch, VF_NULL, "cev_editor_import_batch <absFolderOrListFile> <assetFolder> [options] [sequences]: import many files on one queue (one ffmpeg at a time) with a summary");
 		REGISTER_COMMAND("cev_editor_import_cancel", CmdImportCancel, VF_NULL, "cev_editor_import_cancel: cancel the running import and drop the queued ones");
 		REGISTER_COMMAND("cev_editor_ffmpeg_status", CmdFfmpegStatus, VF_NULL, "cev_editor_ffmpeg_status [redetect]: log the ffmpeg in use (path, version, missing features)");

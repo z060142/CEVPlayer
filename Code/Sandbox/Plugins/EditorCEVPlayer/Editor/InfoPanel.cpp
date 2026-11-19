@@ -218,37 +218,38 @@ namespace CEVEditor
 			pOps->addWidget(b, row, col);
 			return b;
 		};
-		auto language = [this]() -> std::string
+		// the produced files are named after (and listed as) the default audio track, else the first one, else "main"
+		auto trackName = [this]() -> std::string
 		{
 			if (!m_pEditor)
-				return "english";
+				return "main";
 			const SDescriptor& d = m_pEditor->State().descriptor;
-			if (!d.defaultLanguage.empty())
-				return d.defaultLanguage;
-			return d.languages.empty() ? std::string("english") : d.languages.front().name;
+			if (!d.defaultTrack.empty())
+				return d.defaultTrack;
+			return d.audioTracks.empty() ? std::string("main") : d.audioTracks.front().name;
 		};
-		addButton(tr("Split audio to WebM"), tr("Writes the audio track as <name>_<language>.webm (no re-encoding) and lists it as a language file."), 0, 0, [this, language]()
+		addButton(tr("Split audio to WebM"), tr("Writes the embedded audio as <name>_<track>.webm (no re-encoding) and makes that audio track play the file."), 0, 0, [this, trackName]()
 		{
 			if (!m_pEditor) return;
-			SAudioOps ops; ops.split = true; ops.language = language();
+			SAudioOps ops; ops.split = true; ops.audioTrack = trackName();
 			m_pEditor->RunAudioOps(ops);
 		});
-		addButton(tr("Export WAV"), tr("48 kHz / 16 bit WAV whose first sample is video second 0, stored as an asset file."), 0, 1, [this, language]()
+		addButton(tr("Export WAV"), tr("48 kHz / 16 bit WAV whose first sample is video second 0, stored as an asset file."), 0, 1, [this, trackName]()
 		{
 			if (!m_pEditor) return;
-			SAudioOps ops; ops.wav = true; ops.language = language();
+			SAudioOps ops; ops.wav = true; ops.audioTrack = trackName();
 			m_pEditor->RunAudioOps(ops);
 		});
-		addButton(tr("Export Ogg"), tr("Ogg Vorbis of the audio track, stored as an asset file."), 1, 0, [this, language]()
+		addButton(tr("Export Ogg"), tr("Ogg Vorbis of the audio track, stored as an asset file."), 1, 0, [this, trackName]()
 		{
 			if (!m_pEditor) return;
-			SAudioOps ops; ops.ogg = true; ops.language = language();
+			SAudioOps ops; ops.ogg = true; ops.audioTrack = trackName();
 			m_pEditor->RunAudioOps(ops);
 		});
-		addButton(tr("Strip audio"), tr("Writes <name>_silent.webm (picture only) and makes the descriptor play it."), 1, 1, [this, language]()
+		addButton(tr("Strip audio"), tr("Writes <name>_silent.webm (picture only) and makes the descriptor play it."), 1, 1, [this, trackName]()
 		{
 			if (!m_pEditor) return;
-			SAudioOps ops; ops.strip = true; ops.language = language();
+			SAudioOps ops; ops.strip = true; ops.audioTrack = trackName();
 			m_pEditor->RunAudioOps(ops);
 		});
 		addButton(tr("Upgrade to cue route"), tr("Needs a WAV / Ogg of the asset: registers it with SDL_mixer / ACE and switches the descriptor to the cue route."), 2, 0, [this]()
@@ -383,7 +384,7 @@ namespace CEVEditor
 		const std::string ace = st.details.Get(DetailKey::kAceLibrary);
 		if (!ace.empty())
 		{
-			m_pAce->setText(tr("SDL_mixer / ACE: library %1, copies %2\nWwise / FMOD: this plug-in only writes the SDL_mixer registration. Manual steps: import the WAV / Ogg of this asset into your middleware project, create one start / pause / resume event per language, and pick the triggers in the Languages of the descriptor above.")
+			m_pAce->setText(tr("SDL_mixer / ACE: library %1, copies %2\nWwise / FMOD: this plug-in only writes the SDL_mixer registration. Manual steps: import the WAV / Ogg of this asset into your middleware project, create one start / pause / resume event per audio track, and pick the triggers in the Audio tracks of the descriptor above (Source: Trigger).")
 				.arg(Q(ace)).arg(Q(st.details.Get(DetailKey::kSdlFiles))));
 		}
 		else
@@ -561,21 +562,22 @@ namespace CEVEditor
 		SDescriptor d = m_pEditor->State().descriptor; // keeps the video, the variants and the root triggers
 		d.route = m_edit.route;
 		d.avOffsetMs = m_edit.avOffsetMs;
-		d.languages.clear();
-		for (const SDescriptor::SLanguage& l : m_edit.languages)
+		d.audioTracks.clear();
+		for (const SDescriptor::SAudioTrack& a : m_edit.audioTracks)
 		{
-			if (!l.name.empty())
-				d.languages.push_back(l);
+			if (!a.name.empty())
+				d.audioTracks.push_back(a);
 		}
-		d.defaultLanguage = m_edit.defaultLanguage;
-		if (d.FindLanguage(d.defaultLanguage) < 0)
-			d.defaultLanguage.clear();
+		d.followGameLanguage = m_edit.followGameLanguage;
+		d.defaultTrack = m_edit.defaultTrack;
+		if (d.FindAudioTrack(d.defaultTrack) < 0)
+			d.defaultTrack.clear();
 		d.markers = m_edit.markers;
 		std::stable_sort(d.markers.begin(), d.markers.end(), [](const SDescriptor::SMarker& a, const SDescriptor::SMarker& b) { return a.time < b.time; });
 		m_pEditor->SetDescriptor(d); // marks the asset modified; Save writes the file
 		if (!DescriptorsEqual(d, m_edit))
 		{
-			m_edit = d; // markers sorted, empty language rows dropped, default language checked
+			m_edit = d; // markers sorted, unnamed track rows dropped, default track checked
 			m_pTree->revert();
 		}
 	}
