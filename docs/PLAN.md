@@ -25,8 +25,8 @@
 | M3 規範路線（CryAudio 位置查詢，optional patch） | 完成 | optional patch 02（CryAudio 播放位置 + SDL_mixer 實作）；官方版套用後整樹 0 錯誤；cue 時鐘與 trigger 位置差 ±7 ms；未套 patch 退回影片時鐘 |
 | M4 資產與編輯器 | 完成（畫面待手動驗收） | EditorCEVPlayer：資產類型、WebM 匯入、三欄視窗、QViewport 預覽、離線處理（分離音軌／WAV／Ogg，對齊 ≤0.3 取樣）、ACE 註冊、資產圖示、打包工具；手動驗收清單 docs/manual-acceptance-M4.md |
 | M5 FFmpeg 轉碼 | 完成（UI 與 CI 待驗證） | 偵測／下載（等 release 才開放）／非 WebM 匯入／壓縮與解析度／多解析度子檔／批次；Sandbox 冒煙全過。未驗證：CI 實跑、精簡版 FFmpeg、實際網路下載、UI 手動操作（docs/manual-acceptance-M5.md） |
-
 | 階段 0＋M6～M10 經由 UI 播放 | 規劃定案 2026-11-19，未實作 | 設計在 docs/design/M6-ui-source.md：Surface ID 與登錄表、貼圖來源契約（不共用標頭）、舊節點刪除與兩個抽屜（M6）；可見性／變體／`open`（M7）；打包平面直通（M8）；Media Foundation 硬解，CPU 為 fallback，可選（M9）；關卡讀取期間推進等 XTFrame 主線的機制（M10） |
+
 ## 決策紀錄
 
 - 2026-11-16 分支名用 `rebuild`。
