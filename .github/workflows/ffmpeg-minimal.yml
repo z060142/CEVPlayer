@@ -9,8 +9,10 @@
 # After a release exists, pin it in Core/offline/include/CEVOffline/FfmpegInstall.h: kFfmpegMinimalVersion and
 # kFfmpegMinimalSha256 (the job summary prints both). The plugin refuses any download whose SHA-256 differs.
 #
-# NOTE: this workflow has not been run yet (it was written in a session without access to Actions / MSYS2); expect
-# to fix small things on the first run.
+# NOTE: this workflow itself has not been run on GitHub Actions yet. Its steps (build_minimal.sh, then the reference
+# mingw-w64-x86_64-ffmpeg, then smoke_test_minimal.sh) were run locally on 2026-11-19 in a scoop-installed MSYS2
+# MINGW64 shell on Windows 11, which led to the fixes now in the scripts (perl, zlib, no --disable-postproc, CRLF
+# handling); see the Status note in tools/ffmpeg/build_minimal.sh.
 name: ffmpeg-minimal
 
 on:
@@ -72,12 +74,14 @@ jobs:
             curl
             tar
             xz
+            perl
             zip
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-nasm
             mingw-w64-x86_64-meson
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-zlib
 
       - name: Build
         shell: msys2 {0}

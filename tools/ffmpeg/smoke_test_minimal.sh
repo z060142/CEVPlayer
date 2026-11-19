@@ -8,8 +8,10 @@
 # its ffprobe, because the minimal build has neither those encoders nor ffprobe:
 #   REF_FFMPEG / REF_FFPROBE   default: ffmpeg / ffprobe from PATH (CI: pacman -S mingw-w64-x86_64-ffmpeg)
 #
-# Status: written without being able to run it in the development session that added it; the checks mirror
-# Core/offline/tests/cevffmpeg_selftest.cpp (which was run against a full ffmpeg 8.0).
+# Status: first run 2026-11-19 (local Windows 11, MSYS2 MINGW64) against the minimal 8.0.3-cev1 build: PASS with
+# REF = scoop ffmpeg 7.1.1 and REF = mingw-w64-x86_64-ffmpeg 9.0.2. Fixes from that run: CR stripped from ffprobe's
+# output, alpha_mode matched case-insensitively and with the TAG: prefix (a re-encoded alpha WebM carries ALPHA_MODE).
+# The checks mirror Core/offline/tests/cevffmpeg_selftest.cpp.
 set -euo pipefail
 
 MIN="${1:?usage: smoke_test_minimal.sh <minimal ffmpeg.exe>}"
@@ -21,7 +23,7 @@ mkdir -p "${WORK}"
 fail() { printf 'SMOKE FAIL: %s\n' "$*" >&2; exit 1; }
 ok() { printf 'ok: %s\n' "$*"; }
 probe() { # file entries -> ffprobe text of the first video stream
-	"${REF_FFPROBE}" -v error -select_streams "$2" -show_entries "$3" -of default=nw=1 "$1"
+	"${REF_FFPROBE}" -v error -select_streams "$2" -show_entries "$3" -of default=nw=1 "$1" | tr -d '\r' # Windows exe: CRLF
 }
 
 command -v "${REF_FFMPEG}" >/dev/null || fail "no reference ffmpeg (${REF_FFMPEG})"
@@ -65,20 +67,20 @@ ok "mp4 (h264 + aac) -> webm (vp9 + opus), two pass, scaled"
 # 3b. PNG sequence with alpha -> WebM with alpha (yuva420p, -auto-alt-ref 0)
 "${MIN}" "${COMMON[@]}" -framerate 10 -i "${WORK}/seq_%03d.png" -map 0:v:0 -vf "scale=out_color_matrix=bt709,format=yuva420p" \
 	"${VIDEO_OPTS[@]}" -auto-alt-ref 0 -an -f webm "${WORK}/png_alpha.webm.tmp" >/dev/null
-probe "${WORK}/png_alpha.webm.tmp" v:0 stream=codec_name,width,height:stream_tags=alpha_mode | tr '\n' ' ' | grep -q 'alpha_mode=1' \
+probe "${WORK}/png_alpha.webm.tmp" v:0 stream=codec_name,width,height:stream_tags=alpha_mode | tr '\n' ' ' | grep -qi 'alpha_mode=1' \
 	|| fail "png sequence -> webm lost its alpha flag"
 ok "png sequence (rgba) -> webm with alpha"
 
 # 3c. ProRes 4444 with alpha -> WebM with alpha
 "${MIN}" "${COMMON[@]}" -i "${WORK}/prores4444.mov" -map 0:v:0 -vf "scale=out_color_matrix=bt709,format=yuva420p" \
 	"${VIDEO_OPTS[@]}" -auto-alt-ref 0 -an -f webm "${WORK}/prores_alpha.webm.tmp" >/dev/null
-probe "${WORK}/prores_alpha.webm.tmp" v:0 stream_tags=alpha_mode | grep -q 'alpha_mode=1' || fail "prores 4444 -> webm lost its alpha flag"
+probe "${WORK}/prores_alpha.webm.tmp" v:0 stream_tags=alpha_mode | grep -qi 'alpha_mode=1' || fail "prores 4444 -> webm lost its alpha flag"
 ok "prores 4444 -> webm with alpha"
 
 # 3d. variant: the alpha WebM again, decoded with libvpx (the native vp9 decoder drops the alpha channel)
 "${MIN}" "${COMMON[@]}" -c:v libvpx-vp9 -i "${WORK}/png_alpha.webm.tmp" -map 0:v:0 \
 	-vf "scale=-2:45:flags=lanczos:out_color_matrix=bt709,format=yuva420p" "${VIDEO_OPTS[@]}" -auto-alt-ref 0 -an -f webm "${WORK}/variant.webm.tmp" >/dev/null
-probe "${WORK}/variant.webm.tmp" v:0 stream=height:stream_tags=alpha_mode | tr '\n' ' ' | grep -q 'height=45 alpha_mode=1' \
+probe "${WORK}/variant.webm.tmp" v:0 stream=height:stream_tags=alpha_mode | tr '\n' ' ' | grep -Eqi 'height=45 (TAG:)?alpha_mode=1' \
 	|| fail "variant lost its alpha / size: $(probe "${WORK}/variant.webm.tmp" v:0 stream=height:stream_tags=alpha_mode | tr '\n' ' ')"
 ok "variant of an alpha webm (libvpx decoder)"
 

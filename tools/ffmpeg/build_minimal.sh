@@ -5,7 +5,7 @@
 # Runs in an MSYS2 MINGW64 shell (the GitHub workflow .github/workflows/ffmpeg-minimal.yml does exactly this on
 # windows-latest). Locally: install MSYS2, open the "MSYS2 MINGW64" shell and
 #   pacman -S --needed base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-nasm mingw-w64-x86_64-meson \
-#             mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf zip curl xz tar
+#             mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf mingw-w64-x86_64-zlib zip curl xz tar perl
 #   tools/ffmpeg/build_minimal.sh [--work <dir>] [--out <dir>] [--jobs <n>]
 #
 # Scope (docs/design/M5-ffmpeg.md): --disable-everything, then only
@@ -15,11 +15,19 @@
 #   encoders  libvpx-vp9, libopus, libvorbis, pcm_s16le
 #   muxers    webm, ogg, wav
 #   filters   scale, format, aresample (+ what ffmpeg.c itself selects: aformat, null, anull, trim, ...)
-# No GPL and no nonfree component (--disable-gpl --disable-nonfree --disable-version3): every library is BSD licensed,
+# No GPL and no nonfree component (--disable-gpl --disable-nonfree --disable-version3): every library is BSD licensed
+# (zlib, needed by the png decoder, is under the zlib licence and comes statically from the MinGW toolchain),
 # FFmpeg itself is LGPL-2.1-or-later. The script refuses to package a binary whose configuration says otherwise.
 #
-# Status: written without being able to run it in this repository's development session (no MSYS2 there). The
-# component names were checked against the FFmpeg 8.0.3 sources; the first CI run may still need small fixes.
+# Status: first real run 2026-11-19 on a local Windows 11 machine (not CI): MSYS2 2026-09-27 base installed with scoop
+# (user profile), gcc 16.2.0, nasm 3.02, meson 1.12.1, --jobs 6, work dir on a RAM disk (peak ~300 MB), about 20 min
+# per full run. Fixes from that run: perl added to the package list (libvpx configure needs it), --disable-postproc
+# removed (libpostproc no longer exists in FFmpeg 8.0), --enable-zlib (otherwise png is dropped silently), CR stripped
+# from the exe's output before matching. smoke_test_minimal.sh passed against references ffmpeg 7.1.1 (scoop) and
+# mingw-w64-x86_64-ffmpeg 9.0.2. The GitHub workflow itself has still not been run.
+#   Local note for that machine: its security software blocks MSYS2's own curl, so pacman ran with
+#   XferCommand = Windows curl.exe (official MSYS2 mirrors only) and the six tarballs were fetched beforehand with
+#   Windows curl into <work>/downloads, where fetch() below re-verifies them against versions.env.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,7 +60,7 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 if [[ "${MSYSTEM:-}" != "MINGW64" ]]; then
 	die "run this in an MSYS2 MINGW64 shell (MSYSTEM=${MSYSTEM:-unset})"
 fi
-for tool in gcc g++ make nasm meson ninja pkg-config curl tar xz sha256sum zip cygpath; do
+for tool in gcc g++ make nasm meson ninja perl pkg-config curl tar xz sha256sum zip cygpath; do
 	command -v "${tool}" >/dev/null 2>&1 || die "missing tool: ${tool} (see the pacman line at the top of this script)"
 done
 
@@ -156,10 +164,13 @@ FFMPEG_CONFIGURE_ARGS=(
 	# nothing the plugin does not need
 	--disable-everything --disable-autodetect
 	--disable-doc --disable-debug --disable-network
-	--disable-ffplay --disable-ffprobe --disable-avdevice --disable-postproc
+	--disable-ffplay --disable-ffprobe --disable-avdevice  # (libpostproc was removed from FFmpeg in 8.0)
 	--enable-ffmpeg
 	# external libraries (all BSD)
 	--enable-libvpx --enable-libopus --enable-libvorbis --enable-libdav1d
+	# zlib (zlib licence) from the MinGW toolchain (mingw-w64-x86_64-zlib, linked statically): the png decoder needs
+	# it (png_decoder_select=inflate_wrapper -> zlib) and --disable-autodetect would otherwise drop png silently.
+	--enable-zlib
 	# import: containers
 	--enable-demuxer=mov,matroska,avi,image2
 	# import: video / audio decoders
@@ -192,12 +203,13 @@ strip --strip-unneeded "${FFMPEG_EXE}"
 # verification of the result (license + scope)
 # ---------------------------------------------------------------------------------------------------------------
 log "verify"
-VERSION_TEXT="$("${FFMPEG_EXE}" -hide_banner -version)"
+# The exe writes CRLF line ends: strip the CR before matching (a phrase wrapped over two lines would not match otherwise).
+VERSION_TEXT="$("${FFMPEG_EXE}" -hide_banner -version | tr -d '\r')"
 printf '%s\n' "${VERSION_TEXT}"
 if grep -Eq -- '--enable-(gpl|nonfree|version3)' <<<"${VERSION_TEXT}"; then
 	die "the binary reports a GPL / nonfree / version3 configuration"
 fi
-LICENSE_LINE="$("${FFMPEG_EXE}" -hide_banner -L | head -n 3 | tr '\n' ' ')"
+LICENSE_LINE="$("${FFMPEG_EXE}" -hide_banner -L | tr -d '\r' | head -n 3 | tr '\n' ' ')"
 case "${LICENSE_LINE}" in
 	*"GNU Lesser General Public License"*) ;;
 	*) die "unexpected license text: ${LICENSE_LINE}" ;;
@@ -206,7 +218,7 @@ esac
 need_list() { # kind pattern...
 	local kind="$1"; shift
 	local listing
-	listing="$("${FFMPEG_EXE}" -hide_banner "-${kind}")"
+	listing="$("${FFMPEG_EXE}" -hide_banner "-${kind}" | tr -d '\r')"
 	for item in "$@"; do
 		grep -Eq "^ [A-Z. ]+ +(${item})( |,|\$)" <<<"${listing}" || die "missing ${kind}: ${item}"
 	done
@@ -233,6 +245,7 @@ cp "${SRC}/opus/COPYING" "${STAGE}/licenses/opus-COPYING"
 cp "${SRC}/libogg/COPYING" "${STAGE}/licenses/libogg-COPYING"
 cp "${SRC}/libvorbis/COPYING" "${STAGE}/licenses/libvorbis-COPYING"
 cp "${SRC}/dav1d/COPYING" "${STAGE}/licenses/dav1d-COPYING"
+cp "$(cygpath -u "${MINGW_PREFIX:-/mingw64}")/share/licenses/zlib/LICENSE" "${STAGE}/licenses/zlib-LICENSE"
 cp "${HERE}/build_minimal.sh" "${HERE}/versions.env" "${HERE}/smoke_test_minimal.sh" "${STAGE}/"
 
 {
@@ -250,6 +263,7 @@ cp "${HERE}/build_minimal.sh" "${HERE}/versions.env" "${HERE}/smoke_test_minimal
 	echo "Toolchain:"
 	gcc --version | head -n 1 | sed 's/^/  /'
 	nasm --version | head -n 1 | sed 's/^/  /'
+	echo "  zlib (static, MinGW toolchain): $(pacman -Q mingw-w64-x86_64-zlib 2>/dev/null || echo unknown)"
 	meson --version | sed 's/^/  meson /'
 	echo
 	echo "ffmpeg -version:"

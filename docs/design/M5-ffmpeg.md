@@ -93,7 +93,7 @@ Core/offline/tests/cevffmpeg_selftest.cpp
 | filter | scale、format、aresample（另有 ffmpeg.c 自己 select 的 aformat、null、anull、trim、atrim 等框架濾鏡，由 configure 自動帶入） |
 | 其他 | parser h264/hevc/aac/aac_latm/mpegaudio/vp8/vp9/av1/opus/vorbis/flac/png；bsf null、vp9_superframe(_split)、extract_extradata；protocol file、pipe（`-progress pipe:1` 需要） |
 
-- 授權：`--disable-gpl --disable-nonfree --disable-version3`；FFmpeg 本體 LGPL-2.1+，外部函式庫 libvpx / libopus / libogg / libvorbis / dav1d 皆為 BSD。建置腳本在打包前檢查 `ffmpeg -version` 的 configuration 不含 gpl/nonfree/version3、`-L` 為 LGPL，並檢查範圍內的編解碼器確實存在。
+- 授權：`--disable-gpl --disable-nonfree --disable-version3`；FFmpeg 本體 LGPL-2.1+，外部函式庫 libvpx / libopus / libogg / libvorbis / dav1d 皆為 BSD；png 解碼器需要的 zlib（zlib 授權）取自 MinGW 工具鏈（`mingw-w64-x86_64-zlib`，靜態連結，授權檔放進 `licenses/zlib-LICENSE`）。建置腳本在打包前檢查 `ffmpeg -version` 的 configuration 不含 gpl/nonfree/version3、`-L` 為 LGPL，並檢查範圍內的編解碼器確實存在。
 - 建置腳本 `tools/ffmpeg/build_minimal.sh`（可在本機 MSYS2 MINGW64 執行）+ `tools/ffmpeg/versions.env`（所有來源的版本、URL、SHA-256 釘死：FFmpeg 8.0.3、libvpx 1.15.0、opus 1.5.2、libogg 1.3.5、libvorbis 1.3.7、dav1d 1.5.3；來源下載後先驗雜湊再解開）。
 - 組件名稱已對照 FFmpeg 8.0.3 原始碼確認存在（`allcodecs.c`、`allformats.c`、`allfilters.c`、`parsers.c`、`bitstream_filters.c`、`protocols.c`、`configure` 的 `ffmpeg_select`）；libvpx / dav1d / opus / libvorbis 的 configure 選項也對照過原始碼。
 - 打包內容（zip 根目錄平放）：`ffmpeg.exe`、`LICENSE`（LGPL-2.1）、`licenses/`（各元件授權）、`BUILD.txt`（來源 URL + SHA-256、工具鏈版本、configure 引數）、建置腳本與 `versions.env`。**建置腳本與來源版本隨二進位一起發佈**（LGPL 要求與可重現性）。
@@ -105,9 +105,24 @@ Core/offline/tests/cevffmpeg_selftest.cpp
 - build 工作（windows-latest + MSYS2 MINGW64，`msys2/setup-msys2@v2`）：解析版本 → 快取下載 → 安裝工具鏈（toolchain、nasm、meson、ninja、pkgconf、zip）→ `build_minimal.sh` → **之後**才安裝參考用的完整 ffmpeg（避免其函式庫混入建置）→ `smoke_test_minimal.sh`（用與外掛相同的引數轉 MP4/PNG alpha/ProRes 4444/alpha 變體，用 ffprobe 驗證；並確認最小版不能編 H.264）→ 計算 SHA-256 寫入工作摘要（附可直接貼進標頭的常數）→ 上傳 artifact。
 - publish 工作（ubuntu-latest，只在 tag 或勾選 publish 時）：驗證 `.sha256` → `gh release create/upload` 到本 fork（`z060142/CEVPlayer`）的 Releases。
 
-### 未驗證（誠實聲明）
+### 實際執行紀錄（2026-11-19，本機）
 
-CI 工作流程與建置腳本**沒有在實際的 MSYS2 / GitHub Actions 上執行過**（開發環境沒有 MSYS2 與 Actions）。已做的只有：YAML 以 python `yaml` 解析、內嵌 shell 與兩支腳本以 `bash -n` 檢查語法、組件與選項名稱對照原始碼、下載來源的 SHA-256 實際下載後計算。第一次執行可能需要小修（例如 libvpx 的 `--target`、靜態連結旗標、msys 路徑轉換）。`smoke_test_minimal.sh` 的檢查與自測 `cevffmpeg_selftest` 的真實執行部分對應（後者已對完整版 ffmpeg 8.0 執行過）。
+- **建置腳本與 smoke test 已在本機實跑過；GitHub Actions 工作流程本身仍未跑過。** 環境：Windows 11；MSYS2 2026-09-27 基底用 scoop 裝在使用者目錄；MINGW64：gcc 16.2.0、binutils 2.47、nasm 3.02、meson 1.12.1、ninja 1.13.2、pkgconf 3.0.11、zlib 1.4；`--jobs 6`；工作目錄在 RAM 碟，峰值約 300 MB；完整跑一次約 14～20 分鐘。
+- 第一次實跑需要的修正（範圍、授權旗標與釘死的版本都沒變）：
+  - 套件清單加 `perl`（libvpx 的 configure 需要）。
+  - 拿掉 `--disable-postproc`（FFmpeg 8.0 已移除 libpostproc，該選項不存在）。
+  - 加 `--enable-zlib`：png 解碼器需要 zlib，而 `--disable-autodetect` 會讓 png 被**靜默**拿掉。
+  - 比對 exe 輸出前先去掉 CR（Windows 輸出 CRLF，跨行的「GNU Lesser General Public License」原本比對不到）。
+  - smoke test：ffprobe 輸出同樣去 CR；`alpha_mode` 改為不分大小寫並容許 `TAG:` 前綴（重編碼的 alpha WebM 帶的是 `ALPHA_MODE`）。
+- 結果：
+  - `-version` 的 configuration 不含 gpl/nonfree/version3；`-L` 為 LGPL 2.1+。
+  - 編解碼器、muxer、demuxer、filter 清單與上表一致。
+  - DLL 相依只有 bcrypt、KERNEL32、msvcrt、SHELL32。
+  - `smoke_test_minimal.sh` 對參考 ffmpeg 7.1.1（scoop）與 `mingw-w64-x86_64-ffmpeg` 9.0.2 都 PASS。
+  - 另外手動轉檔（帶 `-g 15`）：H.264 MP4、PNG 序列各轉成 VP9(+Opus) WebM，60 幀中 4 個關鍵幀；ProRes 4444 轉成 VP9 alpha，以 libvpx 解碼確認 alpha 正確。
+  - 產物：`ffmpeg-minimal-8.0.3-cev1-win64.zip`（本機，未發佈）。兩次建置的 ffmpeg.exe 雜湊不同（未做位元級可重現）。
+- `cevffmpeg_selftest`（MSVC 建置）對最小版：523 項檢查中 8 項失敗。失敗的全是它**用受測 ffmpeg 自己產生測試來源**的步驟（lavfi、libx264、prores_ks 都不在最小版範圍內），不是最小版的缺陷；這支自測仍需要完整版 ffmpeg。
+- 本機注意事項（只限那台機器，與 CI 無關）：本機安全軟體擋掉 MSYS2 自帶的 curl。因此 pacman 改用 `XferCommand` = Windows `curl.exe`，來源仍只有官方 MSYS2 鏡像；六個來源 tarball 先用 Windows curl 下載到 `<work>/downloads`，由腳本的 `fetch()` 依 `versions.env` 重新驗證 SHA-256。
 
 ## 8. 自測 `cevffmpeg_selftest`
 
