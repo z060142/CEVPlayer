@@ -238,7 +238,7 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 
 ## 13. 未驗證與限制
 
-- 真實下載（WinHTTP + GitHub Release）：釘住版本仍是 `unreleased`，UI 只驗到「停用 + 原因 + 只能手動選擇」的邏輯與本機 zip 的雜湊 / 安裝路徑；對話框（`EnsureUsableModal`、`Set up FFmpeg...`、進度對話框、下載按鈕）**沒有人工點過**，見 `manual-acceptance-M5.md`。
+- 真實下載（WinHTTP + GitHub Release）：已釘住 `8.0.3-cev1`（URL 與 zip 根目錄配置已對真實資產核對）；在測試機上由 Sandbox 透過 `cev_editor_ffmpeg_download` 觸發時 WinHTTP 立即失敗（error 12029，無法連線；同機 Windows `curl.exe` 可下載），端對端下載 / 安裝 / 匯入尚未驗證；對話框（`EnsureUsableModal`、`Set up FFmpeg...`、進度對話框、下載按鈕）**沒有人工點過**，見 `manual-acceptance-M5.md`。
 - 匯入對話框、編輯器視窗拖放（單檔 / 多檔 / PNG 資料夾）、`Generate variants...` / `Re-compress...` 對話框、資訊欄 FFmpeg 區段與 Variants 表只經編譯與 console 路徑（同一組後端）驗證，沒有 UI 自動化。
 - 對話框的變體清單不事先探測來源高度（對話框時來源高度未知）：高度不低於影片者由 job 略過並記錄，不是灰掉（已存在資產的對話框則用已知高度灰掉）。
 - 失敗或取消後，匯入時新建的**空資料夾**會留下（檔案都已刪除）。
