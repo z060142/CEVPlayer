@@ -51,3 +51,9 @@ Code/Sandbox/Plugins/EditorCEVPlayer/      編輯器插件
 
 - 預覽不再是引擎的 `QViewport`：`CVideoPreviewWidget`（一般 `QWidget`）直接畫 `CEVPlayerCore` 解出的畫面，聲音走 `QAudioOutput`；不經引擎渲染器、不需要執行期插件（任務單 `docs/tasks/E2.md`）。描述檔的判斷邏輯在 Core 的 `DescriptorPlan.h`，執行期與預覽共用。
 - 資產是「匯入而來」：`IsImported()`＝true，資產資料夾內的來源複本登記為來源檔，重新匯入走引擎的 `CAsset::Reimport`（`CVideoAssetImporter::ReimportAsset` 沿用存下來的匯入設定）；來源狀態平常只比大小與修改時間。描述檔以 property tree 編輯（語言的 trigger 用引擎的音訊觸發器選擇器），沒有 Apply 鍵；對話框用引擎的 `CSystemFileDialog`／`CQuestionDialog`；使用者觸發的工作有 `CProgressNotification`；「Open folder」鍵已移除（任務單 `docs/tasks/E1.md`）。
+
+## 2026-11-19 修訂（A1；音軌就是音軌，本節優先於上文的對應段落）
+
+- Info 欄的描述檔區塊改為「Audio tracks」：上方「Default track」下拉與「Follow game language」核取方塊（說明：勾選後依遊戲的語音語言比對各音軌的 Language 標記），每列 Name、Source（Embedded／File／Trigger）、對應欄位（File：外部音檔；Trigger：start／pause／resume trigger）、Language（選用）。存檔只寫該 Source 的欄位。
+- 預覽：多一個「Audio track」下拉，切換時在原位置、原播放狀態重載（與執行期 `ReloadInPlace` 相同）；預覽不跟隨遊戲語言 cvar，`followGameLanguage` 只在狀態列註明。
+- 匯入與離線操作：匯入選項「Audio track name」（預設 `main`，取代「Audio language」，主控台 `track:`）；分離／WAV／Ogg 依音軌名命名 `<name>_<track>.ext`，升級 cue route 依檔名的音軌名建立 Trigger 音軌。Details 的 `languages` 改為 `audioTrackNames`。開啟舊 `<Languages>` 描述檔：記錯誤、讀成沒有音軌。

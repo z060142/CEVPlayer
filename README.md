@@ -21,9 +21,25 @@ Runtime (`Code/CryPlugins/CEVPlayer`)
 * Players on screen (fullscreen, letterbox / fill), on a material slot or in a named **surface** that UIs show by its
   surface id, several at a time, shared decode pool.
 * Three audio routes per video (`.cevvideo` descriptor): `embedded` (audio track inside the WebM, SDL audio device),
-  `mixed` (external per-language audio WebM files) and `cue` (a CryAudio trigger plays the sound, the picture follows
+  `mixed` (external audio WebM files per audio track) and `cue` (a CryAudio trigger plays the sound, the picture follows
   its playback position; needs the optional engine patch for exact sync, otherwise it falls back to a clock).
-* Languages, markers, A/V offset and variants (resolution steps) in the descriptor.
+* Named audio tracks, markers, A/V offset and variants (resolution steps) in the descriptor. Tracks are chosen by
+  name (`SetAudioTrack`); a track may carry an optional `language` tag, and following the game language is opt-in:
+
+  ```xml
+  <CEVVideo version="1" route="mixed" video="intro.webm">
+    <AudioTracks default="dialogue" followGameLanguage="0">
+      <Track name="dialogue" embedded="1" language="english"/>
+      <Track name="commentary" file="intro_commentary.webm"/>
+      <Track name="music" trigger="Play_Intro_Music" pauseTrigger="Pause_Intro_Music" resumeTrigger="Resume_Intro_Music"/>
+    </AudioTracks>
+  </CEVVideo>
+  ```
+
+  Choice: the track set by `SetAudioTrack`, then - only with `followGameLanguage="1"` - the track whose `language`
+  matches `g_languageAudio` / `g_language`, then `default`, then the first track; without `<AudioTracks>` the embedded
+  audio plays. Track names: 1 to 63 of `A-Z a-z 0-9 _ . -`, case insensitive, unique. The pre-A1 `<Languages>` element
+  is not read (an error in the log; the video plays its embedded audio).
 * FlowGraph nodes in one top-level folder `CEVPlayer` (PlayOnScreen, PlayOnMaterial) with the sub-folders `UI`
   (PlayToSurface, SurfaceInfo, SurfaceEvents) and `Advanced` (Open, Transport, Settings, Info, Events); a Schematyc component `Video Player`; a
   script API table (`Module/Bindings/ApiTable.cpp`, one function per entry); the C++ player API (`IVideoPlugin`,
@@ -36,10 +52,10 @@ Editor (`Code/Sandbox/Plugins/EditorCEVPlayer`)
 * Importer for `.webm` (drop on the Asset Browser or on the tool window, or console): options dialog, source copied into
   Assets, SHA-256 of the source, "source updated, reimport needed" detection.
 * Tool window **Tools > CEV Video Editor**: asset browser, preview (checkerboard, alpha, play / pause / scrub / frame
-  step / loop / timecode, audio mode), info panel (streams, files, descriptor editing with languages and markers), job list.
+  step / loop / timecode, audio mode), info panel (streams, files, descriptor editing with audio tracks and markers), job list.
 * Operations (background jobs, cancellable): split audio to WebM, strip audio, export WAV (sample 0 = video second 0),
   export Ogg Vorbis, upgrade to the cue route (SDL_mixer copy + Audio Controls Editor library with Play / Pause / Resume
-  triggers per language).
+  triggers per audio track).
 
 ## Repository layout
 
@@ -99,7 +115,8 @@ Runtime plug-in
 
 | Name | Meaning |
 |---|---|
-| `cev_play <path> [loop]` / `cev_stop` / `cev_pause` / `cev_resume` / `cev_seek <s>` / `cev_lang <name>` | play and control a fullscreen test video (`.webm` or `.cevvideo`) |
+| `cev_play <path> [loop]` / `cev_stop` / `cev_pause` / `cev_resume` / `cev_seek <s>` | play and control a fullscreen test video (`.webm` or `.cevvideo`) |
+| `cev_audiotrack <handle\|surface> [name]` | choose the audio track of a player (script handle or surface id) by its descriptor name; without a name: list the tracks and the one in use |
 | `cev_list` | list all players (state, time, uploads) |
 | `cev_play_surface <id> <path> [loop]`, `cev_surfaces` | play into a surface player; list the surfaces of the texture source contract |
 | `cev_info` | interface version, capability bits, contract version, number of surfaces and players |
@@ -116,7 +133,7 @@ Sandbox plug-in (automation and tests; the commands run on the main thread)
 
 | Command | Meaning |
 |---|---|
-| `cev_editor_import <absSrc> <folder> [name:<asset>] [lang:<language>] [wav] [ogg] [split\|strip] [cue\|mixed] [overwrite]` | import without UI. Refuses (log line, nothing touched) when an asset of that name exists, unless `overwrite` is given. `name=` also works when typed in the console; scripts need `name:` because the console treats `a=b` as a variable assignment |
+| `cev_editor_import <absSrc> <folder> [name:<asset>] [track:<audio track>] [wav] [ogg] [split\|strip] [cue\|mixed] [overwrite]` | import without UI. Refuses (log line, nothing touched) when an asset of that name exists, unless `overwrite` is given. `name=` also works when typed in the console; scripts need `name:` because the console treats `a=b` as a variable assignment |
 | `cev_editor_open [<asset.cevvideo>]` | open the tool window (on that asset) |
 | `cev_editor_close` | close the tool windows |
 | `cev_editor_rename <asset.cevvideo> <newName>`, `cev_editor_move <asset.cevvideo> <folder>`, `cev_editor_delete <asset.cevvideo>` | asset manager operations (same code path as the Asset Browser) |
@@ -126,20 +143,20 @@ Sandbox plug-in (automation and tests; the commands run on the main thread)
 ## Asset workflow
 
 1. **Import**: drop a `.webm` on the Asset Browser (or on the tool window, which imports into the folder of the open
-   asset), or `cev_editor_import`. The options dialog asks for the asset name, language of the embedded audio, audio
+   asset), or `cev_editor_import`. The options dialog asks for the asset name, the audio track name of the embedded audio (default `main`), audio
    route, trigger name, "split audio" (keep the embedded track / play a picture-only copy) and WAV / Ogg exports. If an
    asset of that name already exists you are asked before it is replaced (and sent back to the dialog if you decline).
 2. The asset folder then holds `<name>.cevvideo` (runtime descriptor), `<name>.webm` (copy of the imported file, the video
    the descriptor plays), `<name>.cevvideo.cryasset` (editor metadata: source path, SHA-256, import settings, stream
-   details) and the files the operations make (`<name>_<language>.webm|.wav|.ogg`, `<name>_silent.webm`). All files are
+   details) and the files the operations make (`<name>_<track>.webm|.wav|.ogg`, `<name>_silent.webm`). All files are
    flat in one folder and start with the asset name, so rename / move / delete take them along.
-3. **Edit** in *Tools > CEV Video Editor*: preview, descriptor (route, A/V offset, languages, triggers, markers; *Apply to
+3. **Edit** in *Tools > CEV Video Editor*: preview, descriptor (route, A/V offset, audio tracks with Default track / Follow game language, triggers, markers; *Apply to
    descriptor*, then Save with Ctrl+S). If a background operation rewrites the descriptor while you have unsaved edits,
    your edits are merged with the new file (and you are told).
 4. **Audio operations** run as background jobs; the Jobs list shows progress and a cancel button. Quitting the editor
    cancels and joins them. Files a cancelled or failed job created from nothing are removed again.
 5. **Cue route**: *Upgrade to cue route* copies the WAV / Ogg to `audio/sdlmixer/assets/cev/<name>/`, writes
-   `audio/sdlmixer/ace/cev_<name>.xml` (Play_ / Pause_ / Resume_ trigger per language, the Audio Controls Editor shows
+   `audio/sdlmixer/ace/cev_<name>.xml` (Play_ / Pause_ / Resume_ trigger per audio track, the Audio Controls Editor shows
    them) and switches the descriptor. These two locations are not Files of the asset; delete and rename keep them in step.
    Wwise / FMOD: the info panel lists the manual steps.
 6. **Known engine behaviour**: the engine creates a Sound asset (`<file>.wav.cryasset`) for every `.wav` under Assets,
