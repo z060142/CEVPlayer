@@ -51,6 +51,7 @@ namespace CEVPlayer
 			"D71E69BE-A424-451D-8840-A7BCFE53ADDD"_cry_guid, // VideoAdvanced::SetVariant
 			"20A1CC28-BE7C-4382-8F5C-FAD6955C25D2"_cry_guid, // VideoAdvanced::SetSkippable
 			"13B9D4C4-43B4-4602-9E42-E8A6F07B4974"_cry_guid, // VideoAdvanced::Info
+			"6A464499-0622-463D-8F43-57E805205A1C"_cry_guid, // VideoAdvanced::SetPauseDecodeWhenHidden (M7)
 		};
 		const CryGUID kCryVSResizedSignalGuid = "8431E4A5-BEA5-4461-B110-4B7883761FBC"_cry_guid;
 		const CryGUID kCryVSClosedSignalGuid  = "AAE0463C-E424-4A35-8737-00D3F22801F1"_cry_guid;
@@ -148,6 +149,8 @@ namespace CEVPlayer
 			bool FnSetVariant(const SCall& c) { c.pPlayer->SetVariant(c.args[0].i); return true; }
 			bool FnSetSkippable(const SCall& c) { mEnv->pApi->SetSkippable(c.handle, c.args[0].b); return true; }
 			bool FnUnbindMaterial(const SCall& c) { c.pPlayer->UnbindMaterial(nullptr); return true; }
+			// every IVideoPlayer of this plug-in is a CVideoPlayerImpl (made by CPlayerManager)
+			bool FnSetPauseDecodeWhenHidden(const SCall& c) { static_cast<CVideoPlayerImpl*>(c.pPlayer)->SetPauseDecodeWhenHidden(c.args[0].b); return true; }
 			bool FnSetDecode(const SCall& c)
 			{
 				const int mode = c.args[0].i;
@@ -241,6 +244,7 @@ namespace CEVPlayer
 			bool FnRate(const SCall& c) { *c.pResult = SValue::FromFloat(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetRate()); return true; }
 			bool FnVolume(const SCall& c) { *c.pResult = SValue::FromFloat(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetVolume()); return true; }
 			bool FnPath(const SCall& c) { *c.pResult = SValue::FromString(c.pPlayer->GetPath()); return true; }
+			bool FnPauseDecodeWhenHidden(const SCall& c) { *c.pResult = SValue::FromBool(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetPauseDecodeWhenHidden()); return true; }
 
 			// ======================================================================================== parameters
 			const SParam kCreateForSurfaceParams[] = { { EType::String, "SurfaceID", "Surface id: 1 to 63 of A-Z a-z 0-9 _ . : -, compared case-insensitively; UIs find the video by it", 0, "", 'in00' } };
@@ -261,6 +265,7 @@ namespace CEVPlayer
 			const SParam kSetVariantParams[]  = { { EType::Int, "Variant", "-2 = follow the cvar cev_variant, -1 = automatic, 0 = main video, n = n-th variant of the .cevvideo descriptor", -2.0, nullptr, 'in00' } };
 			const SParam kSetSkippableParams[] = { { EType::Bool, "Skippable", "A key / mouse / gamepad button press stops the video while it plays and sends the Skipped event", 0, nullptr, 'in00' } };
 			const SParam kSetDecodeParams[]   = { { EType::Int, "Mode", "0 = Auto, 1 = GPU, 2 = CPU (recorded only: this build always decodes on the CPU)", 0, nullptr, 'in00' } };
+			const SParam kSetPauseDecodeWhenHiddenParams[] = { { EType::Bool, "Pause", "true (default) = a surface no UI shows only decodes, and stops decoding after cev_hiddenStopSeconds; false = it keeps decoding and uploading", 1.0, nullptr, 'in00' } };
 
 			const SParam kNewFrameParams[]    = { { EType::String, "Serial", "Number of the uploaded picture as decimal text (counts up, never wraps)", 0, "", 'seri' } };
 			const SParam kMarkerParams[]      =
@@ -297,6 +302,7 @@ namespace CEVPlayer
 				{ EKind::Control, "76A06A36-55E3-46A3-A2F0-651F74507C41"_cry_guid, "SetSkippable", "Makes the video skippable: a key / mouse / gamepad button press stops it while it plays and sends the Skipped event.", CEV_ARRAY(kSetSkippableParams), EType::Void, nullptr, false, 0, &FnSetSkippable },
 				{ EKind::Control, "0EABF916-13B4-4588-B90A-29C6951B3B99"_cry_guid, "SetDecode", "Chooses the decoder: Auto, GPU or CPU. Recorded only in this build: the video is always decoded on the CPU (GPU logs a warning).", CEV_ARRAY(kSetDecodeParams), EType::Void, nullptr, false, 0, &FnSetDecode },
 				{ EKind::Control, "C3E284F2-F49E-4554-B15F-0A8A3DBC4FCB"_cry_guid, "UnbindMaterial", "Removes every material binding of the player (the Material output).", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnUnbindMaterial },
+				{ EKind::Control, "19B4033E-18B4-4488-B0B2-C1B42FD5C2E4"_cry_guid, "SetPauseDecodeWhenHidden", "Surface players: while no UI shows the surface, decode only (nothing is copied, converted or uploaded) and stop decoding after cev_hiddenStopSeconds; the clock, the sound and the events go on. On by default. Screen / Material outputs are always visible.", CEV_ARRAY(kSetPauseDecodeWhenHiddenParams), EType::Void, nullptr, false, 0, &FnSetPauseDecodeWhenHidden },
 			};
 
 			const SEntry kQueries[] =
@@ -322,6 +328,7 @@ namespace CEVPlayer
 				{ EKind::Query, "AD99F4C8-E215-466F-A561-92370F82314E"_cry_guid, "Rate", "Playback speed last set (1 = normal).", CEV_NOPARAMS, EType::Float, "Rate", false, 0, &FnRate },
 				{ EKind::Query, "B683DEC0-4EA3-4B01-9DEE-2A85987BABEE"_cry_guid, "Volume", "Player volume last set (0..1).", CEV_NOPARAMS, EType::Float, "Volume", false, 0, &FnVolume },
 				{ EKind::Query, "6A378344-3AD7-4639-BC35-2254E21D51D9"_cry_guid, "Path", "Path given to the last Load, empty before.", CEV_NOPARAMS, EType::String, "Path", false, 0, &FnPath },
+				{ EKind::Query, "99BFBA2F-54FE-4E5E-AC78-97D4583CA48F"_cry_guid, "PauseDecodeWhenHidden", "SetPauseDecodeWhenHidden is on (the default).", CEV_NOPARAMS, EType::Bool, "PauseDecodeWhenHidden", false, 0, &FnPauseDecodeWhenHidden },
 			};
 
 			const SEntry kEvents[] =

@@ -378,7 +378,7 @@ namespace CEVPlayer
 			// ========================================================================================== VideoUI
 			class CPlayToSurfaceNode final : public CNodeBase
 			{
-				enum EIn { eI_Play, eI_Stop, eI_Video, eI_SurfaceId, eI_Loop, eI_Autoplay, eI_Decode };
+				enum EIn { eI_Play, eI_Stop, eI_Video, eI_SurfaceId, eI_Loop, eI_Autoplay, eI_Decode, eI_PauseDecodeWhenHidden };
 				enum EOut { eO_Ready, eO_TextureId, eO_Width, eO_Height, eO_Duration, eO_HasAlpha, eO_Ended, eO_Error, eO_ErrorCode, eO_ErrorMessage };
 
 			public:
@@ -395,6 +395,7 @@ namespace CEVPlayer
 						InputPortConfig<bool>("Loop", false, _HELP("Restart at the beginning when the end is reached.")),
 						InputPortConfig<bool>("Autoplay", false, _HELP("Play as soon as the game starts, without a Play trigger.")),
 						InputPortConfig<int>("Decode", 0, _HELP("Decoder: Auto, GPU or CPU (this build always decodes on the CPU)."), nullptr, _UICONFIG(kDecodeEnum)),
+						InputPortConfig<bool>("PauseDecodeWhenHidden", true, _HELP("While no UI shows the surface: only decode, and stop decoding after cev_hiddenStopSeconds (time, sound and events go on).")),
 						{ 0 }
 					};
 					static const SOutputPortConfig out[] =
@@ -462,6 +463,7 @@ namespace CEVPlayer
 					}
 					Run("SetDecode", m_owned, { I(GetPortInt(pActInfo, eI_Decode)) });
 					Run("SetLoop", m_owned, { B(GetPortBool(pActInfo, eI_Loop)) });
+					Run("SetPauseDecodeWhenHidden", m_owned, { B(GetPortBool(pActInfo, eI_PauseDecodeWhenHidden)) });
 					PlayFromStart(video);
 				}
 
@@ -848,7 +850,7 @@ namespace CEVPlayer
 
 			class CSettingsNode final : public CNodeBase
 			{
-				enum EIn { eI_Handle, eI_Loop, eI_Rate, eI_Volume, eI_Language, eI_Variant, eI_Skippable };
+				enum EIn { eI_Handle, eI_Loop, eI_Rate, eI_Volume, eI_Language, eI_Variant, eI_Skippable, eI_PauseDecodeWhenHidden };
 				enum EOut { eO_Done, eO_Error };
 
 			public:
@@ -865,6 +867,7 @@ namespace CEVPlayer
 						InputPortConfig<string>("Language", string(), _HELP("Applied when triggered: audio language of the .cevvideo descriptor (empty = default choice).")),
 						InputPortConfig<int>("Variant", -2, _HELP("Applied when triggered: -2 follows cev_variant, -1 automatic, 0 main video, n the n-th variant.")),
 						InputPortConfig<bool>("Skippable", false, _HELP("Applied when triggered: a button press stops the playing video and sends Skipped.")),
+						InputPortConfig<bool>("PauseDecodeWhenHidden", true, _HELP("Applied when triggered: a surface no UI shows only decodes, and stops decoding after cev_hiddenStopSeconds.")),
 						{ 0 }
 					};
 					static const SOutputPortConfig out[] =
@@ -896,6 +899,8 @@ namespace CEVPlayer
 						Result(pActInfo, Run("SetVariant", handle, { I(GetPortInt(pActInfo, eI_Variant)) }));
 					if (IsPortActive(pActInfo, eI_Skippable))
 						Result(pActInfo, Run("SetSkippable", handle, { B(GetPortBool(pActInfo, eI_Skippable)) }));
+					if (IsPortActive(pActInfo, eI_PauseDecodeWhenHidden))
+						Result(pActInfo, Run("SetPauseDecodeWhenHidden", handle, { B(GetPortBool(pActInfo, eI_PauseDecodeWhenHidden)) }));
 				}
 
 			private:

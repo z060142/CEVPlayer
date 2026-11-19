@@ -457,6 +457,17 @@ namespace CEVPlayer
 				args != nullptr && args->GetArgCount() > 2 ? args->GetArg(2) : nullptr);
 		}
 
+		void CmdHiddenBench(IConsoleCmdArgs* args)
+		{
+			if (args == nullptr || args->GetArgCount() < 2)
+			{
+				LogAlways("usage: cev_hidden_bench <path> [cycles=10] [hidden seconds=4] [visible seconds=2]");
+				return;
+			}
+			Contract::StartHiddenBench(args->GetArg(1), args->GetArgCount() > 2 ? std::atoi(args->GetArg(2)) : 10,
+				args->GetArgCount() > 3 ? static_cast<float>(std::atof(args->GetArg(3))) : 4.f, args->GetArgCount() > 4 ? static_cast<float>(std::atof(args->GetArg(4))) : 2.f);
+		}
+
 		void CmdList(IConsoleCmdArgs*)
 		{
 			if (mEnv->pManager != nullptr)
@@ -515,6 +526,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_probe_sync", DevProbe::CmdProbeSync, VF_NULL, "Measurement: cev_probe_sync 1|0, a 64x64 RGBA texture filled each frame with a colour coding the frame index, next to aux blocks of the same colour");
 		REGISTER_COMMAND("cev_bench_play", DevProbe::CmdBenchPlay, VF_NULL, "Measurement: cev_bench_play <path> <texture name> [loop 0|1] plays into a named texture (not fullscreen); no arguments = stop");
 		REGISTER_COMMAND("cev_bench_stop", DevProbe::CmdBenchStop, VF_NULL, "Measurement: stop the cev_bench_play player");
+		REGISTER_COMMAND("cev_hidden_bench", CmdHiddenBench, VF_NULL, "Measurement: cev_hidden_bench <path> [cycles] [hidden s] [visible s] plays into surface CevBench and toggles a consumer hint hidden / visible, logs the catch-up of every cycle");
 		REGISTER_COMMAND("cev_stats_file", DevProbe::CmdStatsFile, VF_NULL, "Measurement: cev_stats_file <path>|off writes the per-second cev_stats rows as CSV (turns cev_stats on)");
 
 		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log and draw a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");
@@ -527,6 +539,7 @@ namespace CEVPlayer
 		REGISTER_CVAR2("cev_variant", &mEnv->m_cevVariant, -1, VF_NULL, "Variant of a .cevvideo descriptor for players loaded afterwards: -1 = automatic (smallest not below the screen height when fullscreen, else the main video), 0 = main video, n = n-th <Variant>");
 		REGISTER_CVAR2("cev_cueForceFallback", &mEnv->m_cevCueForceFallback, 0, VF_NULL, "1 = the cue route (audio from a CryAudio trigger) ignores the optional engine patch and follows the video clock (test of the fallback)");
 		ConsoleRegistrationHelper::Register("cev_volume", &mEnv->m_cevVolume, 1.f, VF_NULL, "Master volume of all videos (0.0 - 1.0), multiplied with the player volume");
+		ConsoleRegistrationHelper::Register("cev_hiddenStopSeconds", &mEnv->m_cevHiddenStopSeconds, 2.f, VF_NULL, "Surface players that no consumer sees only decode (no copy / conversion / upload); after this many seconds hidden in a row they stop decoding the video. 0 = never stop");
 	}
 
 	void UnregisterConsole()
@@ -536,11 +549,11 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 
-		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume" };
+		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds" };
 		for (const char* name : variables)
 			pConsole->UnregisterVariable(name, true);
 	}

@@ -493,6 +493,18 @@ namespace cev
 				return false; // caught up with the clock: Update() wakes us every frame
 			const bool catchSkip = !hiddenSkip && vCatchUp && hasNext && demux->VideoPts(idx + 1) <= until + 1e-9;
 			const bool skipping = hiddenSkip || catchSkip || (vSeekActive && hasNext && demux->VideoPts(idx + 1) <= vSeekTarget + 1e-9);
+			if (!skipping && vCatchUp)
+			{
+				// The catch-up reached the clock: the next frame is for output. Frames still queued from before are
+				// older than it when packets were skipped (drop them, the ring may be full of them); without skipping
+				// they are the valid continuation and the consumer presents them first.
+				vCatchUp = false;
+				if (catchUpFrames > 0)
+					ring.FlushReady();
+				const int64_t ns = SteadyNs() - catchUpRequestNs.load(std::memory_order_relaxed);
+				stats.NoteCatchUp(static_cast<float>(static_cast<double>(std::max<int64_t>(ns, 1)) * 1e-6), catchUpFrames);
+				catchUpPending.store(false, std::memory_order_release); // the consumer presents again
+			}
 
 			int slot = -1;
 			uint64_t epoch = 0;
@@ -547,14 +559,6 @@ namespace cev
 				return true;
 			}
 			vSeekActive = false;
-			if (vCatchUp)
-			{
-				// first frame decoded for output since the visible request
-				vCatchUp = false;
-				const int64_t ns = SteadyNs() - catchUpRequestNs.load(std::memory_order_relaxed);
-				stats.NoteCatchUp(static_cast<float>(static_cast<double>(std::max<int64_t>(ns, 1)) * 1e-6), catchUpFrames);
-				catchUpPending.store(false, std::memory_order_release);
-			}
 
 			if (Succeeded(st) && vdec->HasFrame())
 			{

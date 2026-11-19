@@ -10,7 +10,10 @@ namespace CEVPlayer
 	{
 		//! Starts the test (ignored while one runs). pathA / pathB: videos of different sizes, nullptr = defaults.
 		void StartSelfTest(const char* pathA, const char* pathB);
-		//! Plug-in UpdateBeforeRender, after the manager's tick.
+		//! cev_hidden_bench (measurement, M7): plays `path` looping into surface "CevBench" and toggles a consumer hint
+		//! between hidden (`hiddenSeconds`) and visible (`visibleSeconds`) for `cycles` cycles; logs the catch-ups.
+		void StartHiddenBench(const char* path, int cycles, float hiddenSeconds, float visibleSeconds);
+		//! Plug-in UpdateBeforeRender, after the manager's tick (also drives cev_hidden_bench).
 		void TickSelfTest();
 		//! Plug-in shutdown: drops a running test.
 		void ShutdownSelfTest();

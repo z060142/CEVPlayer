@@ -338,6 +338,12 @@ namespace CEVEditor
 			info += tr("Video: %1, %2 x %3, %4 fps\n").arg(Q(m.videoCodec)).arg(m.width).arg(m.height).arg(m.fps, 0, 'f', 3);
 			info += tr("Duration: %1 s\n").arg(m.durationSec, 0, 'f', 3);
 			info += tr("Alpha: %1\n").arg(m.hasAlpha ? tr("yes") : tr("no"));
+			if (m.maxKeyframeIntervalSec > 0.0)
+			{
+				info += tr("Max keyframe interval: %1 s\n").arg(m.maxKeyframeIntervalSec, 0, 'f', 2);
+				if (m.maxKeyframeIntervalSec > 5.0)
+					info += tr("Keyframes are sparse: showing the video again after it was hidden in a UI may stutter. Recompress it (adds a keyframe every 2 s).\n");
+			}
 			if (m.audioTracks.empty())
 				info += tr("Audio: none\n");
 			for (size_t i = 0; i < m.audioTracks.size(); ++i)

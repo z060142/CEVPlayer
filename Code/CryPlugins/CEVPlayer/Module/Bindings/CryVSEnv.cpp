@@ -264,6 +264,7 @@ namespace CEVPlayer
 				{ EPort::Bool, "Loop", "Restart at the beginning when the end is reached", 0, nullptr },
 				{ EPort::Bool, "Autoplay", "Play at once; otherwise the video is only loaded (VideoAdvanced::Play starts it)", 1, nullptr },
 				{ EPort::Decode, "Decode", kDecodeDesc, 0, nullptr },
+				{ EPort::Bool, "PauseDecodeWhenHidden", "While no UI shows the surface only decode, and stop decoding after cev_hiddenStopSeconds", 1, nullptr },
 			};
 
 			void FnPlayToSurface(const SValue* in, SValue* out)
@@ -279,6 +280,7 @@ namespace CEVPlayer
 					return;
 				Run("SetDecode", h, { I(in[4].i) });
 				Run("SetLoop", h, { B(in[2].b) });
+				Run("SetPauseDecodeWhenHidden", h, { B(in[5].b) });
 				if (!Run("Load", h, { S(in[0].s.c_str()) }) || (in[3].b && !Run("Play", h)))
 				{
 					DestroyIfAlive(h);
@@ -404,6 +406,9 @@ namespace CEVPlayer
 			const SPort kSetSkippableIn[] = { { EPort::Int, "Handle", kHandleDesc, 0, nullptr }, { EPort::Bool, "Skippable", "A button press stops the playing video and sends Skipped", 0, nullptr } };
 			void FnSetSkippable(const SValue* in, SValue*) { Run("SetSkippable", in[0].i, { in[1] }); }
 
+			const SPort kSetPauseDecodeWhenHiddenIn[] = { { EPort::Int, "Handle", kHandleDesc, 0, nullptr }, { EPort::Bool, "Pause", "A surface no UI shows only decodes, and stops decoding after cev_hiddenStopSeconds", 1, nullptr } };
+			void FnSetPauseDecodeWhenHidden(const SValue* in, SValue*) { Run("SetPauseDecodeWhenHidden", in[0].i, { in[1] }); }
+
 			const SPort kInfoOut[] =
 			{
 				{ EPort::Int, "State", "0 Stopped, 1 Playing, 2 Paused, 3 Ended, 4 Loading, 5 Error", 0, nullptr },
@@ -452,6 +457,7 @@ namespace CEVPlayer
 				{ Api::eCryVS_VideoAdvanced_SetVariant, "VideoAdvanced", "SetVariant", "Chooses the variant (resolution) of a .cevvideo descriptor.", CEV_PORTS(kSetVariantIn), CEV_NOPORTS, &FnSetVariant },
 				{ Api::eCryVS_VideoAdvanced_SetSkippable, "VideoAdvanced", "SetSkippable", "Makes the video skippable: a button press stops it while it plays.", CEV_PORTS(kSetSkippableIn), CEV_NOPORTS, &FnSetSkippable },
 				{ Api::eCryVS_VideoAdvanced_Info, "VideoAdvanced", "Info", "Reads the state, time, size, language, variant, decoder, frame serial and surface id of a player handle.", CEV_PORTS(kHandleIn), CEV_PORTS(kInfoOut), &FnInfo },
+				{ Api::eCryVS_VideoAdvanced_SetPauseDecodeWhenHidden, "VideoAdvanced", "SetPauseDecodeWhenHidden", "Surface players: while no UI shows the surface only decode, and stop decoding after cev_hiddenStopSeconds (on by default).", CEV_PORTS(kSetPauseDecodeWhenHiddenIn), CEV_NOPORTS, &FnSetPauseDecodeWhenHidden },
 			};
 			static_assert(CRY_ARRAY_COUNT(kGlobalFunctions) == Api::eCryVS_FunctionCount, "one entry per ECryVSFunction");
 #undef CEV_PORTS

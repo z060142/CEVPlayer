@@ -147,14 +147,15 @@ namespace CEVPlayer
 			LogAlways("cev_apitest: start (%s)", t.path.c_str());
 
 			// the table itself (M6b): entry counts, retired entries gone, new entries present
-			t.Check(Controls().size() == 18 && Queries().size() == 21 && Events().size() == eEvent_Count,
-				"table has 18 controls, 21 queries, 8 events (" + std::to_string(Controls().size()) + ", " + std::to_string(Queries().size()) + ", " + std::to_string(Events().size()) + ")");
+			t.Check(Controls().size() == 19 && Queries().size() == 22 && Events().size() == eEvent_Count,
+				"table has 19 controls, 22 queries, 8 events (" + std::to_string(Controls().size()) + ", " + std::to_string(Queries().size()) + ", " + std::to_string(Events().size()) + ")");
 			t.Check(FindByName("TextureName") == nullptr && FindByName("InterfaceVersion") == nullptr && FindByName("Caps") == nullptr, "TextureName, InterfaceVersion and Caps are retired");
 			bool allNew = true;
 			for (const char* name : { "CreateForSurface", "SetDecode", "UnbindMaterial", "SurfaceId", "Generation", "PixelLayout", "DecodeBackend", "FrameSerial", "IsLoaded", "IsLooping", "HasAudio", "Rate", "Volume", "Path" })
 				allNew = allNew && FindByName(name) != nullptr;
 			t.Check(allNew, "the 14 entries added in M6b exist");
 			t.Check(FindByName("Create")->paramCount == 0, "Create has no TextureName parameter");
+			t.Check(FindByName("SetPauseDecodeWhenHidden") != nullptr && FindByName("PauseDecodeWhenHidden") != nullptr, "SetPauseDecodeWhenHidden / PauseDecodeWhenHidden exist (M7)");
 			t.Check(Events()[eEvent_NewFrame].params[0].type == EType::String, "NewFrame Serial is a string");
 
 			// creation through the table
@@ -247,6 +248,14 @@ namespace CEVPlayer
 			t.Check(t.Query("IsLoaded").b && t.Query("IsLooping").b, "IsLoaded and IsLooping");
 			t.Check(t.Query("Rate").f == 1.f && t.Query("Volume").f == 0.f, "Rate 1 and Volume 0 as set");
 			t.Check(t.Query("Path").s == t.path, "Path is <" + t.Query("Path").s + ">");
+			// M7: PauseDecodeWhenHidden, on by default; a player without a surface id is visible whatever it says
+			t.Check(t.Query("PauseDecodeWhenHidden").b, "PauseDecodeWhenHidden is on by default");
+			{
+				const SValue off[1] = { SValue::FromBool(false) };
+				const SValue on[1] = { SValue::FromBool(true) };
+				t.Check(Call(STest::E("SetPauseDecodeWhenHidden"), t.handle, off, 1, nullptr) && !t.Query("PauseDecodeWhenHidden").b, "SetPauseDecodeWhenHidden(false)");
+				t.Check(Call(STest::E("SetPauseDecodeWhenHidden"), t.handle, on, 1, nullptr) && t.Query("PauseDecodeWhenHidden").b, "SetPauseDecodeWhenHidden(true)");
+			}
 			t.Check(t.serialIsString && !t.lastSerial.empty(), "NewFrame Serial payloads are decimal strings (last " + t.lastSerial + ")");
 			LogAlways("cev_apitest: HasAudio=%d", t.Query("HasAudio").b ? 1 : 0);
 			LogAlways("cev_apitest: HasAlpha=%d Language='%s' Variant=%d events: ready=%u started=%u newFrame=%u looped=%u ended=%u error=%u",

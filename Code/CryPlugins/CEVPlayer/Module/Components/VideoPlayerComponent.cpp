@@ -298,6 +298,7 @@ namespace CEVPlayer
 		desc.AddMember(&CVideoPlayerComponent::m_autoplay, 'auto', "autoplay", "Autoplay", "Load and play when the game starts", false);
 		desc.AddMember(&CVideoPlayerComponent::m_skippable, 'skip', "skippable", "Skippable", "A key / mouse / gamepad button press stops the video and sends Skipped", false);
 		desc.AddMember(&CVideoPlayerComponent::m_decode, 'deco', "decode", "Decode", "Decoder: Auto, GPU or CPU (this build always decodes on the CPU; GPU logs a warning)", Api::EDecodeMode::Auto);
+		desc.AddMember(&CVideoPlayerComponent::m_pauseDecodeWhenHidden, 'pdwh', "pausedecodewhenhidden", "PauseDecodeWhenHidden", "Output Surface: while no UI shows the surface only decode, and stop decoding after cev_hiddenStopSeconds", true);
 	}
 
 	CVideoPlayerComponent::~CVideoPlayerComponent()
@@ -381,6 +382,7 @@ namespace CEVPlayer
 		const SValue language[1] = { SValue::FromString(m_language.c_str()) };
 		const SValue skippable[1] = { SValue::FromBool(m_skippable) };
 		const SValue decode[1] = { SValue::FromInt(static_cast<int>(m_decode)) };
+		const SValue pauseHidden[1] = { SValue::FromBool(m_pauseDecodeWhenHidden) };
 		const SValue output[5] =
 		{
 			SValue::FromInt(static_cast<int>(m_outputMode)), SValue::FromString(m_material.c_str()), SValue::FromInt(m_slot),
@@ -390,6 +392,7 @@ namespace CEVPlayer
 		Call(*FindByName("SetLoop"), m_handle, loop, 1, nullptr);
 		Call(*FindByName("SetLanguage"), m_handle, language, 1, nullptr);
 		Call(*FindByName("SetSkippable"), m_handle, skippable, 1, nullptr);
+		Call(*FindByName("SetPauseDecodeWhenHidden"), m_handle, pauseHidden, 1, nullptr);
 		Call(*FindByName("SetOutput"), m_handle, output, 5, nullptr, EntityMaterial());
 	}
 

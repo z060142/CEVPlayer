@@ -101,6 +101,21 @@ namespace CEVPlayer
 		//! Values last given to SetRate / SetVolume (API table queries Rate / Volume).
 		float GetRate() const { return m_rate; }
 		float GetVolume() const { return m_volume; }
+		//! M7: pause the video decoding while no consumer of the surface sees the picture (default on). Players without
+		//! a surface id, fullscreen and material outputs always count as visible.
+		void SetPauseDecodeWhenHidden(bool enable) { m_pauseDecodeWhenHidden = enable; }
+		bool GetPauseDecodeWhenHidden() const { return m_pauseDecodeWhenHidden; }
+		//! Contract control MUTE: silences the voice without touching the volume value.
+		void SetMuted(bool muted);
+		bool IsMuted() const { return m_muted; }
+		//! The player was made by a contract `open` (its `close` destroys it).
+		void SetOwnedByOpen(bool owned) { m_ownedByOpen = owned; }
+		bool OwnedByOpen() const { return m_ownedByOpen; }
+		//! Aggregated hints of the surface as seen at the last tick (0 consumers: nobody hinted).
+		int HintPixelHeight() const { return m_hintPixelHeight; }
+		uint32_t HintConsumers() const { return m_hintConsumers; }
+		//! "visible", "decode-only" or "stopped" (the core's VideoVisibility).
+		const char* VisibilityName() const;
 		cev::PlayerCore& Core() { return *m_core; }
 		//! "audio" while an audio voice drives the clock (AudioClock), "cue" while the playback position of the cue
 		//! trigger does, otherwise "internal" (wall clock / video clock).
@@ -183,7 +198,12 @@ namespace CEVPlayer
 		void StartVoice();
 		void StopVoice();
 		void ReapplyLevelLoadPause();
-		void TickBody();
+		void TickBody(float dt);
+		//! Visibility of this tick from the aggregated hints (M7) -> PlayerCore::SetVisible.
+		void ApplyVisibility(float dt);
+		//! Height the automatic variant choice aims at: the window height (fullscreen) or the aggregated pixel height of
+		//! the surface's consumers; 0 = no automatic choice.
+		int VariantTargetHeight() const;
 		//! Surface players: writes the snapshot that CryTexSource query returns (end of Tick; no engine call).
 		void PublishSnapshot();
 
@@ -236,6 +256,13 @@ namespace CEVPlayer
 		bool m_loop = false;
 		float m_rate = 1.f;
 		float m_volume = 1.f;
+		bool m_muted = false;
+		bool m_pauseDecodeWhenHidden = true;
+		bool m_ownedByOpen = false;
+		int m_hintPixelHeight = 0;
+		uint32_t m_hintConsumers = 0;
+		uint8_t m_lastVisibility = 0;     // cev::VideoVisibility of the previous tick (stats window reset on change)
+		bool m_startedAfterReload = false; // Play() reloaded for another variant: OnLoaded sends Started
 
 		// presentation
 		ITexture* m_pTexture = nullptr; // one reference owned by this player (RenderBridge::ReleaseTexture)

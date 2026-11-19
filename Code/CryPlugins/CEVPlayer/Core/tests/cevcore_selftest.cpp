@@ -3542,7 +3542,7 @@ namespace
 		for (int i = 0; i < 29; ++i)
 			freshWhileHidden = HiddenStep(p, clk, step) || freshWhileHidden;
 		const double tA = clk.NowSeconds();
-		const uint64_t expectA = static_cast<uint64_t>((tA - tA0) / period) - 2;
+		const uint64_t expectA = static_cast<uint64_t>((tA - tA0) / period) - 5; // up to 3 frames were decoded into the ring before hiding
 		CHECKF(WaitFor([&] { return p.GetStats().framesDecodeOnly - a0.framesDecodeOnly >= expectA; }, 5000),
 			"decode only frames %llu, expected >= %llu", (unsigned long long)(p.GetStats().framesDecodeOnly - a0.framesDecodeOnly), (unsigned long long)expectA);
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -3594,6 +3594,23 @@ namespace
 		CHECKF(b.lastCatchUpMs > 0.0f, "catch-up time %.3f ms", b.lastCatchUpMs);
 		Log("  %-34s ok: decode only %llu frames in %.2f s, stopped after %d steps, catch-up %u frames %.2f ms\n", g_context.c_str(),
 			(unsigned long long)(a1.framesDecodeOnly - a0.framesDecodeOnly), tA - tA0, steps, b.lastCatchUpFrames, b.lastCatchUpMs);
+
+		// --- phase C: stopped and visible again inside the same keyframe interval (the decoder continues from where
+		// it stopped, the ring is still full of frames from before hiding: they must not block the catch-up)
+		for (int i = 0; i < 30 && sim.Step(); ++i)
+			p.SetVisible(true, step); // ring full again
+		p.SetHiddenStopSeconds(0.1);
+		for (int i = 0; i < 15; ++i)
+			HiddenStep(p, clk, step);
+		CHECK(p.GetVisibility() == VideoVisibility::Stopped);
+		p.SetVisible(true, step);
+		const uint64_t beforeC = sim.presented;
+		CHECK(sim.RunUntilPresented(beforeC + 1));
+		CHECK(WaitFor([&] { return p.GetStats().catchUps == 2; }, 5000));
+		CHECK(p.GetFrame(fv));
+		CHECKF(std::fabs(fv.pts - p.GetTime()) <= 2.0 * period + step, "frame after the short catch-up pts %.3f at clock %.3f", fv.pts, p.GetTime());
+		CHECKF(p.GetStats().lastCatchUpFrames <= keyframeInterval, "short catch-up %u frames", p.GetStats().lastCatchUpFrames);
+		Log("  %-34s ok: short catch-up %u frames %.2f ms\n", g_context.c_str(), p.GetStats().lastCatchUpFrames, p.GetStats().lastCatchUpMs);
 
 		// Unload resets the visibility
 		p.SetVisible(false, step);
