@@ -230,6 +230,29 @@ M10 尚未開工：等 patch 17（CE-90）併入、主線通知。以下是寫 M
 - 停止迴圈會卡主執行緒 15～34 ms（載入結束、執行緒換回時的時鐘跳動要一併容忍）。
 - `OnLoadingProgress` 每次載入最多觸發一次且值為 0，不能當進度來源。
 
+### 9.2 我方探測的結果與定案（M10a，2026-11-20；`E:/coding3/xt-bench/cev-m10/`，測試專案不載入 CryXTUI，關卡讀取約 0.3 秒，另以主執行緒睡眠 3／5／19 秒模擬長讀取）
+
+| 問題 | 結果 |
+|---|---|
+| 渲染器匯出 | `CryRenderD3D11.dll` 的 `XUI2D_Patched()`＝255（第 7 位元有） |
+| 迴圈內更新貼圖 | 渲染執行緒每圈 `UpdateTextureInVideoMemory`，失敗 0 次；dt 中位約 30.5 ms、最大 37～100 ms |
+| 換關卡卸載段 | 我方貼圖**沒有**被釋放（id、尺寸、loaded、裝置位元組在每個事件與每一圈都不變）→ 不需要重建、`generation` 不變 |
+| 讀取中開檔 | 渲染執行緒在迴圈內以 CryPak 開檔並讀取成功（0.15～0.23 ms，9/9）；「LOADINGSCREEN 排入、第一圈開檔」同樣成功 |
+| Add／Remove | 迴圈執行中自主執行緒呼叫，2～9 µs，Remove 後不再被呼叫 |
+| 全螢幕繪製 | `IRenderAuxImage::Draw2dImage` 不論在 `LoadtimeRender` 或 `LoadtimeUpdate` 內呼叫，都**不會**出現在呈現的畫面上（讀回 0 像素，6 次；正常幀的對照組有） |
+| 現況的聲音與時鐘 | LOADINGSCREEN → LOAD_END 之間畫面、時鐘、聲音都凍結（裝置輸出靜音），結束後從原位置接續，沒有追幀 |
+
+定案：
+
+1. 讀取期間只有**只輸出到貼圖的播放器**（Surface 播放器與具名貼圖播放器）會動。全螢幕輸出與材質輸出在讀取期間維持暫停——讀取畫面上的影片一律經由 UI（與 §1「影片本來就應該經由 UI」一致）。
+2. 契約的 `open`／`control` 在讀取模式的 tick 內處理（含開檔）；§3 規則 10 不需要例外。
+3. 換關卡不改 `generation`。
+4. 讀取模式下會動的播放器不暫停時鐘，聲音因此持續；dt 單次上限 0.25 秒。
+5. 註冊時機：平常的 tick、建立／銷毀播放器時，以及 `LEVEL_LOAD_START_LOADINGSCREEN` 與其後的 `LEVEL_LOAD_START`（後者在所有監聽者的 LOADINGSCREEN 處理都跑完之後，接得住 UI 在預熱時才送的 `open`）。
+6. `cev_loadtime 0` 回到舊行為（讀取期間全部暫停）。
+
+附帶（與讀取無關）：暫停中 seek 讓 `contentSerial` 加 2 的原因是 `Seek()` 設了上傳旗標，下一次 tick 把還握著的 **seek 前的舊畫面**再上傳一次；目標幀解出後才是第二次。M10b 一併修成一次。
+
 ## 10. 階段 0 的結果與對本設計的修訂（2026-11-19；細節在 `docs/research/05a-standalone.md`、`05b-engine.md`，原始資料在 `E:/coding3/xt-bench/cev-s0/`）
 
 本機：13600K、RTX 4070 Ti；引擎樹 `CRYENGINE_Source_CEVPlayer_XTFrame`（Profile，CryXTUI v0.17.0）。耗時為 ms、平均／p99。
