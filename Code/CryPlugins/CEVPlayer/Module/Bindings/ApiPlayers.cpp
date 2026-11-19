@@ -5,6 +5,8 @@
 #include <algorithm>
 
 #include "Player/PlayerManager.h"
+#include "Player/VideoPlayerImpl.h"
+#include "CEVCore/Status.h"
 
 namespace CEVPlayer
 {
@@ -18,7 +20,7 @@ namespace CEVPlayer
 
 		void CApiPlayers::SRecord::OnNewFrame(IVideoPlayer&, uint64_t frameSerial)
 		{
-			const SValue args[1] = { SValue::FromInt(static_cast<int>(frameSerial & 0x7fffffff)) };
+			const SValue args[1] = { SValue::FromString(SerialText(frameSerial).c_str()) };
 			pOwner->Dispatch(*this, eEvent_NewFrame, args, 1);
 		}
 
@@ -45,23 +47,100 @@ namespace CEVPlayer
 			Shutdown();
 		}
 
-		int CApiPlayers::Create(const char* textureName, bool componentOwned)
+		int CApiPlayers::AddRecord(IVideoPlayer* pPlayer, bool componentOwned, bool attached)
 		{
-			if (m_shutdown)
-				return 0;
-			IVideoPlayer* const pPlayer = m_manager.CreatePlayer(textureName);
-			if (pPlayer == nullptr)
-				return 0;
 			std::unique_ptr<SRecord> pRecord = std::make_unique<SRecord>();
 			pRecord->pOwner = this;
 			pRecord->handle = m_nextHandle++;
 			pRecord->pPlayer = pPlayer;
+			pRecord->playerId = static_cast<CVideoPlayerImpl*>(pPlayer)->Id(); // every player of the manager is a CVideoPlayerImpl
 			pRecord->componentOwned = componentOwned;
+			pRecord->attached = attached;
 			pPlayer->AddListener(pRecord.get());
 			const int handle = pRecord->handle;
 			m_records[handle] = std::move(pRecord);
-			LogDebug("api: player handle %d created (%s)", handle, pPlayer->GetTextureName());
+			LogDebug("api: player handle %d %s (%s)", handle, attached ? "attached" : "created", pPlayer->GetTextureName());
 			return handle;
+		}
+
+		bool CApiPlayers::IsAlive(const SRecord& record) const
+		{
+			return m_manager.IsPlayer(record.pPlayer) && static_cast<const CVideoPlayerImpl*>(record.pPlayer)->Id() == record.playerId;
+		}
+
+		int CApiPlayers::Create(bool componentOwned)
+		{
+			m_lastErrorCode = 0;
+			m_lastErrorMessage.clear();
+			if (m_shutdown)
+				return 0;
+			IVideoPlayer* const pPlayer = m_manager.CreatePlayer(nullptr);
+			if (pPlayer == nullptr)
+			{
+				m_lastErrorCode = static_cast<int>(cev::Status::InvalidState);
+				m_lastErrorMessage = "the plug-in is shutting down";
+				return 0;
+			}
+			return AddRecord(pPlayer, componentOwned, false);
+		}
+
+		int CApiPlayers::CreateForSurface(const char* surfaceId, bool componentOwned)
+		{
+			m_lastErrorCode = 0;
+			m_lastErrorMessage.clear();
+			if (m_shutdown)
+				return 0;
+			if (!CPlayerManager::IsValidSurfaceId(surfaceId))
+			{
+				m_lastErrorCode = static_cast<int>(cev::Status::InvalidArgument);
+				m_lastErrorMessage = std::string("invalid surface id <") + (surfaceId != nullptr ? surfaceId : "") + "> (1 to 63 of A-Z a-z 0-9 _ . : -)";
+				LogWarning("api: CreateForSurface: %s", m_lastErrorMessage.c_str());
+				return 0;
+			}
+			if (m_manager.FindPlayerBySurface(surfaceId) != nullptr)
+			{
+				m_lastErrorCode = static_cast<int>(cev::Status::InvalidState);
+				m_lastErrorMessage = std::string("surface id <") + surfaceId + "> is already in use";
+				LogWarning("api: CreateForSurface: %s", m_lastErrorMessage.c_str());
+				return 0;
+			}
+			IVideoPlayer* const pPlayer = m_manager.CreatePlayerForSurface(surfaceId);
+			if (pPlayer == nullptr)
+			{
+				m_lastErrorCode = static_cast<int>(cev::Status::InvalidState);
+				m_lastErrorMessage = std::string("surface player <") + surfaceId + "> could not be created";
+				return 0;
+			}
+			return AddRecord(pPlayer, componentOwned, false);
+		}
+
+		int CApiPlayers::AttachSurface(const char* surfaceId)
+		{
+			if (m_shutdown || surfaceId == nullptr || surfaceId[0] == '\0')
+				return 0;
+			IVideoPlayer* const pPlayer = m_manager.FindPlayerBySurface(surfaceId);
+			if (pPlayer == nullptr)
+				return 0;
+			const uint32_t id = static_cast<CVideoPlayerImpl*>(pPlayer)->Id();
+			for (const std::pair<const int, std::unique_ptr<SRecord>>& entry : m_records)
+			{
+				if (entry.second->pPlayer == pPlayer && entry.second->playerId == id)
+					return entry.first;
+			}
+			return AddRecord(pPlayer, false, true);
+		}
+
+		void CApiPlayers::SetDecodeMode(int handle, int mode)
+		{
+			SRecord* const pRecord = FindRecord(handle, true);
+			if (pRecord != nullptr)
+				pRecord->decodeMode = mode;
+		}
+
+		int CApiPlayers::GetDecodeMode(int handle) const
+		{
+			const std::map<int, std::unique_ptr<SRecord>>::const_iterator it = m_records.find(handle);
+			return it != m_records.end() ? it->second->decodeMode : 0;
 		}
 
 		CApiPlayers::SRecord* CApiPlayers::FindRecord(int handle, bool warn)
@@ -73,7 +152,7 @@ namespace CEVPlayer
 					LogWarning("api: invalid player handle %d (never created or already destroyed), call ignored", handle);
 				return nullptr;
 			}
-			if (!m_manager.IsPlayer(it->second->pPlayer))
+			if (!IsAlive(*it->second))
 			{
 				// destroyed behind our back (cannot happen through the handle API): the player is gone with its listeners
 				std::unique_ptr<SRecord> pDead = std::move(it->second);
@@ -109,10 +188,11 @@ namespace CEVPlayer
 			}
 			std::unique_ptr<SRecord> pRecord = std::move(it->second);
 			m_records.erase(it);
-			if (m_manager.IsPlayer(pRecord->pPlayer))
+			if (IsAlive(*pRecord))
 			{
 				pRecord->pPlayer->RemoveListener(pRecord.get());
-				m_manager.DestroyPlayer(pRecord->pPlayer);
+				if (!pRecord->attached) // an attached player belongs to someone else: only forget the handle
+					m_manager.DestroyPlayer(pRecord->pPlayer);
 			}
 			pRecord->sinks.clear();
 			pRecord->skipPending = false;
@@ -202,7 +282,7 @@ namespace CEVPlayer
 			for (std::pair<const int, std::unique_ptr<SRecord>>& entry : m_records)
 			{
 				SRecord& record = *entry.second;
-				if (!record.skippable || record.skipPending || !m_manager.IsPlayer(record.pPlayer))
+				if (!record.skippable || record.skipPending || !IsAlive(record))
 					continue;
 				if (record.pPlayer->GetState() != EVideoPlayerState::Playing)
 					continue;
@@ -290,7 +370,7 @@ namespace CEVPlayer
 			for (std::pair<const int, std::unique_ptr<SRecord>>& entry : m_records)
 			{
 				SRecord& record = *entry.second;
-				if (m_manager.IsPlayer(record.pPlayer))
+				if (IsAlive(record))
 					record.pPlayer->RemoveListener(&record); // the manager destroys the player itself right after
 				record.sinks.clear();
 			}

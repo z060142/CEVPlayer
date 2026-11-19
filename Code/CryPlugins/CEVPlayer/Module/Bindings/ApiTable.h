@@ -2,14 +2,21 @@
 //
 // Every control, query and event is described ONCE (fixed GUID, name, description, parameters, return type, async
 // flag and - for controls and queries - a plain C++ function that implements it on top of IVideoPlayer). The
-// FlowGraph nodes, the Schematyc component functions / signals, the CryVS elements and the console self test are all
-// generated from this table; none of them contains any playback logic of its own.
+// Schematyc component functions / signals, the CryVS elements and the console self test are generated from this
+// table (one function per entry). The FlowGraph nodes (Bindings/FlowApiNodes.cpp) are ten hand described composite
+// nodes that only call table functions (docs/design/M6-ui-source.md section 4.2); none of them contains any playback
+// logic of its own.
 //
 // Players are addressed by an integer handle (see CApiPlayers). Handle 0 is never valid. A call with a handle that
 // is not valid (never created, destroyed, plug-in shut down) is a safe no-op that logs a warning and returns false.
 //
 // The GUIDs in ApiTable.cpp are fixed literals: they are stored in saved flow graphs / Schematyc scripts / CryVS
 // scripts and MUST NEVER CHANGE after the first release. Adding an entry means generating a new GUID for it.
+//
+// RETIRED GUIDs (entries removed in M6b; never reuse them for anything):
+//   6215D8DE-93E8-4236-9DB5-9DDCFD4F1C0D  query TextureName
+//   2819FAC7-8B52-4BA3-9FA7-25BE56E317AD  query InterfaceVersion   (console: cev_info)
+//   23441E42-DE20-4EA3-A312-F6D624D5D83C  query Caps               (console: cev_info)
 #pragma once
 
 #include <cstddef>
@@ -71,7 +78,7 @@ namespace CEVPlayer
 		//! Entry flags.
 		enum EEntryFlags : uint32_t
 		{
-			eEntry_NoPlayer  = 1u << 0, //!< does not use a handle (Create, InterfaceVersion, Caps)
+			eEntry_NoPlayer  = 1u << 0, //!< does not use a handle (Create, CreateForSurface)
 			eEntry_Standalone = 1u << 1, //!< only for handle based users (FlowGraph, console): the Schematyc / CryVS component owns its player itself
 		};
 
@@ -139,9 +146,17 @@ namespace CEVPlayer
 		//! SetOutput modes (parameter "Mode").
 		enum class EOutputMode : int
 		{
-			Texture = 0,  //!< only the texture (named at Create / generated), nothing is drawn by the plug-in
+			Surface = 0,  //!< only the surface texture, nothing is drawn by the plug-in; only for players made by CreateForSurface
 			Screen,       //!< fullscreen on the top layer, `Fit` decides how it is placed
 			Material,     //!< bind the texture to a texture slot of a material
+		};
+
+		//! SetDecode modes (parameter "Mode"). Only recorded so far: the backend is always the CPU decoder.
+		enum class EDecodeMode : int
+		{
+			Auto = 0,
+			Gpu,
+			Cpu,
 		};
 
 		//! Fixed GUIDs of the Schematyc / CryVS elements that are not table entries.
@@ -150,9 +165,15 @@ namespace CEVPlayer
 		extern const CryGUID kOutputModeTypeGuid;
 		extern const CryGUID kVideoFileNameTypeGuid;
 		extern const CryGUID kFitTypeGuid;
+		extern const CryGUID kDecodeModeTypeGuid;
 
-		//! Number of FlowGraph node classes generated from the table.
+		//! Number of FlowGraph node classes (the composite nodes of FlowApiNodes.cpp).
 		uint32_t FlowNodeCount();
+		//! Name of the n-th FlowGraph node class ("Video:PlayOnScreen", ...), nullptr past the end.
+		const char* FlowNodeClassName(uint32_t index);
+
+		//! Decimal text of a frame serial (FrameSerial query, NewFrame event): no wrap.
+		std::string SerialText(uint64_t serial);
 
 		//! The one function every binding calls. Validates the thread and the handle (warning + false on failure),
 		//! converts / defaults the arguments, then runs entry.fn. `in` may be shorter than paramCount.

@@ -1,4 +1,4 @@
-// Console variables and commands of the plug-in (cev_* and the legacy vp_* ones).
+// Console variables and commands of the plug-in (cev_*).
 #pragma once
 
 namespace CEVPlayer
@@ -9,4 +9,7 @@ namespace CEVPlayer
 	void DevProbesBeforeRender();
 	void DevProbesAfterRender();
 	void DevProbesShutdown();
+	// Development-only test driver (cev_run_script): runs the next lines of the script, called by the plug-in each frame.
+	void TickRunScript();
+	void ShutdownRunScript();
 }

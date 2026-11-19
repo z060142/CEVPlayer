@@ -6,16 +6,20 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include <CrySystem/ConsoleRegistration.h>
 #include <CryRenderer/IRenderer.h>
 #include <CryRenderer/IRenderAuxGeom.h>
 
+#include "Bindings/ApiTable.h"
 #include "Bindings/ApiTest.h"
+#include "Bindings/FlowTest.h"
 #include "Contract/ContractTest.h"
 #include "Contract/TexSource.h"
-#include "Compat/LegacyPlayback.h"
 #include "Player/PlayerManager.h"
 
 namespace CEVPlayer
@@ -252,6 +256,109 @@ namespace CEVPlayer
 		}
 	}
 
+	// ------------------------------------------------------------------------------------------------
+	// Development-only test driver: cev_run_script <file> runs one console line per frame from the plug-in's own
+	// update, immediately (IConsole::ExecuteString without deferring), so no engine deferred queue / exec cfg is
+	// involved. `wait <seconds>` pauses, empty lines and lines starting with # or // are skipped.
+	namespace RunScript
+	{
+		namespace
+		{
+			std::vector<std::string> s_lines;
+			size_t s_next = 0;
+			double s_waitUntil = 0.0;
+			bool s_active = false;
+
+			double Now() { return gEnv != nullptr && gEnv->pTimer != nullptr ? gEnv->pTimer->GetAsyncCurTime() : 0.0; }
+
+			std::string Trim(const std::string& s)
+			{
+				const size_t a = s.find_first_not_of(" \t\r\n");
+				if (a == std::string::npos)
+					return std::string();
+				const size_t b = s.find_last_not_of(" \t\r\n");
+				return s.substr(a, b - a + 1);
+			}
+
+			bool ReadAll(const char* path, std::string& text)
+			{
+				std::ifstream file(path, std::ios::binary); // absolute / working directory path
+				if (file)
+				{
+					std::stringstream buffer;
+					buffer << file.rdbuf();
+					text = buffer.str();
+					return true;
+				}
+				if (gEnv == nullptr || gEnv->pCryPak == nullptr)
+					return false;
+				FILE* const pFile = gEnv->pCryPak->FOpen(path, "rb"); // game folder path
+				if (pFile == nullptr)
+					return false;
+				const size_t size = gEnv->pCryPak->FGetSize(pFile);
+				text.resize(size);
+				const size_t read = size != 0 ? gEnv->pCryPak->FReadRaw(&text[0], 1, size, pFile) : 0;
+				gEnv->pCryPak->FClose(pFile);
+				text.resize(read);
+				return true;
+			}
+		}
+
+		void Start(const char* path)
+		{
+			std::string text;
+			if (path == nullptr || !ReadAll(path, text))
+			{
+				LogWarning("cev_run_script: cannot read <%s>", path != nullptr ? path : "");
+				return;
+			}
+			s_lines.clear();
+			std::stringstream stream(text);
+			std::string line;
+			while (std::getline(stream, line))
+				s_lines.push_back(Trim(line));
+			s_next = 0;
+			s_waitUntil = 0.0;
+			s_active = true;
+			LogAlways("cev_run_script: <%s>, %u lines", path, static_cast<unsigned>(s_lines.size()));
+		}
+
+		void Tick()
+		{
+			if (!s_active || gEnv == nullptr || gEnv->pConsole == nullptr)
+				return;
+			if (Now() < s_waitUntil)
+				return;
+			while (s_next < s_lines.size())
+			{
+				const std::string line = s_lines[s_next++];
+				if (line.empty() || line[0] == '#' || line.compare(0, 2, "//") == 0)
+					continue;
+				if (line.compare(0, 5, "wait ") == 0)
+				{
+					const double seconds = std::atof(line.c_str() + 5);
+					s_waitUntil = Now() + seconds;
+					LogAlways("cev_run_script: wait %.2f s", seconds);
+					return;
+				}
+				LogAlways("cev_run_script: > %s", line.c_str());
+				gEnv->pConsole->ExecuteString(line.c_str(), false, false); // immediately, not through the deferred queue
+				return; // one command per frame
+			}
+			s_active = false;
+			LogAlways("cev_run_script: done");
+		}
+
+		void Shutdown()
+		{
+			s_active = false;
+			s_lines.clear();
+		}
+	}
+
+	void TickRunScript() { RunScript::Tick(); }
+	void ShutdownRunScript() { RunScript::Shutdown(); }
+
 	void DevProbesBeforeRender() { DevProbe::BeforeRender(); }
 	void DevProbesAfterRender() { DevProbe::AfterRender(); }
 	void DevProbesShutdown() { DevProbe::Shutdown(); }
@@ -356,29 +463,29 @@ namespace CEVPlayer
 				mEnv->pManager->ListPlayers();
 		}
 
-		// ---- legacy vp_* ----
-		void CmdLegacyPlay(IConsoleCmdArgs* args)
+		void CmdInfo(IConsoleCmdArgs*)
 		{
-			if (args != nullptr && args->GetArgCount() > 1 && mEnv->pLegacy != nullptr)
-				mEnv->pLegacy->Play2DVideo(nullptr, args->GetArg(1));
+			// developer information that used to be the table queries InterfaceVersion / Caps (retired in M6b)
+			LogAlways("cev_info: player interface version %u, caps 0x%x (1 Alpha, 2 Premultiplied, 4 MultiResolution, 8 Variants), texture source contract version %u, registered surfaces %u, players %u",
+				kVideoPlayerInterfaceVersion, kPluginCaps, Contract::ApiVersion(), Contract::SurfaceCount(), mEnv->pManager != nullptr ? mEnv->pManager->GetPlayerCount() : 0u);
+			LogAlways("cev_info: API table %u controls, %u queries, %u events; %u FlowGraph node classes",
+				static_cast<unsigned>(Api::Controls().size()), static_cast<unsigned>(Api::Queries().size()), static_cast<unsigned>(Api::Events().size()), Api::FlowNodeCount());
 		}
 
-		void CmdLegacyPause(IConsoleCmdArgs*)
+		void CmdFlowTest(IConsoleCmdArgs* args)
 		{
-			if (mEnv->pLegacy != nullptr)
-				mEnv->pLegacy->Pause2DVideo();
+			Api::StartFlowTest(args != nullptr && args->GetArgCount() > 1 ? args->GetArg(1) : nullptr,
+				args != nullptr && args->GetArgCount() > 2 ? args->GetArg(2) : nullptr);
 		}
 
-		void CmdLegacyResume(IConsoleCmdArgs*)
+		void CmdRunScript(IConsoleCmdArgs* args)
 		{
-			if (mEnv->pLegacy != nullptr)
-				mEnv->pLegacy->Resume2DVideo();
-		}
-
-		void CmdLegacyStop(IConsoleCmdArgs*)
-		{
-			if (mEnv->pLegacy != nullptr)
-				mEnv->pLegacy->Stop2DVideo();
+			if (args == nullptr || args->GetArgCount() < 2)
+			{
+				LogAlways("usage: cev_run_script <file>   (one console line per frame; wait <seconds>; # comments)");
+				return;
+			}
+			RunScript::Start(args->GetArg(1));
 		}
 	}
 
@@ -399,6 +506,9 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_list", CmdList, VF_NULL, "List all CEVPlayer players with state, time and upload count");
 		REGISTER_COMMAND("cev_play_surface", CmdPlaySurface, VF_NULL, "Play a video into a surface player (texture $cev:<id>). cev_play_surface <id> <path> [loop]; without a path the surface player is destroyed");
 		REGISTER_COMMAND("cev_surfaces", CmdSurfaces, VF_NULL, "List the surfaces of the texture source contract: snapshot and aggregated consumer hints");
+		REGISTER_COMMAND("cev_info", CmdInfo, VF_NULL, "Developer information: player interface version, capability bits, texture source contract version, registered surfaces, API table size");
+		REGISTER_COMMAND("cev_flowtest", CmdFlowTest, VF_NULL, "Self test of the FlowGraph nodes: builds a flow graph in memory with every node class, drives it and checks the outputs. cev_flowtest [pathA] [pathB] (pathB: another size), logs PASS / FAIL");
+		REGISTER_COMMAND("cev_run_script", CmdRunScript, VF_NULL, "Development: cev_run_script <file> runs a list of console commands, one per frame, immediately (not through the deferred queue); wait <seconds>, # comments");
 		REGISTER_COMMAND("cev_contract_selftest", CmdContractSelfTest, VF_NULL, "Self test of the texture source contract through the CryTexSource_v1 export. cev_contract_selftest [pathA] [pathB] (two videos of different sizes), logs PASS / FAIL");
 		// development-only measurement commands (S0)
 		REGISTER_COMMAND("cev_probe_r8", DevProbe::CmdProbeR8, VF_NULL, "Measurement: cev_probe_r8 <w> <h> creates an eTF_R8 dynamic texture, updates it every frame and draws it top left (no arguments = off)");
@@ -416,17 +526,7 @@ namespace CEVPlayer
 		REGISTER_CVAR2("cev_disableEmbeddedAudio", &mEnv->m_cevDisableEmbeddedAudio, 0, VF_NULL, "1 = videos play silently and the plug-in never initialises the SDL audio subsystem (set it in the .cryproject console_variables to cover the whole run)");
 		REGISTER_CVAR2("cev_variant", &mEnv->m_cevVariant, -1, VF_NULL, "Variant of a .cevvideo descriptor for players loaded afterwards: -1 = automatic (smallest not below the screen height when fullscreen, else the main video), 0 = main video, n = n-th <Variant>");
 		REGISTER_CVAR2("cev_cueForceFallback", &mEnv->m_cevCueForceFallback, 0, VF_NULL, "1 = the cue route (audio from a CryAudio trigger) ignores the optional engine patch and follows the video clock (test of the fallback)");
-		ConsoleRegistrationHelper::Register("cev_volume", &mEnv->m_cevVolume, 1.f, VF_NULL, "Master volume of all videos (0.0 - 1.0), multiplied with the player volume and vp_audio_volume");
-
-		// Legacy (kept for existing projects)
-		REGISTER_COMMAND("vp_play", CmdLegacyPlay, VF_NULL, "Play video file. Ex. vp_play logo (without extension name)");
-		REGISTER_COMMAND("vp_pause", CmdLegacyPause, VF_NULL, "Pause current playing video");
-		REGISTER_COMMAND("vp_resume", CmdLegacyResume, VF_NULL, "Resume current paused video");
-		REGISTER_COMMAND("vp_stop", CmdLegacyStop, VF_NULL, "Stop current playing/paused video");
-		REGISTER_CVAR2("vp_debug_log", &mEnv->m_bDebugLog, 0, VF_NULL, "Video plugin debug log");
-		REGISTER_CVAR2("vp_debug_draw", &mEnv->m_bDebugDraw, 0, VF_NULL, "Video plugin debug draw (same overlay as cev_stats)");
-		REGISTER_CVAR2("vp_disableLogs", &mEnv->m_bDisableLog, 0, VF_NULL, "Disable logs from video plugin");
-		ConsoleRegistrationHelper::Register("vp_audio_volume", &mEnv->m_audioVolume, 1.f, VF_NULL, "Audio volume of all videos (0.0 - 1.0)");
+		ConsoleRegistrationHelper::Register("cev_volume", &mEnv->m_cevVolume, 1.f, VF_NULL, "Master volume of all videos (0.0 - 1.0), multiplied with the player volume");
 	}
 
 	void UnregisterConsole()
@@ -436,11 +536,11 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "vp_play", "vp_pause", "vp_resume", "vp_stop" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 
-		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "vp_debug_log", "vp_debug_draw", "vp_disableLogs", "vp_audio_volume" };
+		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume" };
 		for (const char* name : variables)
 			pConsole->UnregisterVariable(name, true);
 	}

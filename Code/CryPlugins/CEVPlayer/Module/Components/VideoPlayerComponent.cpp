@@ -37,9 +37,20 @@ namespace CEVPlayer
 		desc.SetLabel("VideoOutputMode");
 		desc.SetDescription("Where the picture of a video player goes");
 		desc.SetDefaultValue(Api::EOutputMode::Screen);
+		desc.AddConstant(Api::EOutputMode::Surface, "Surface", "Surface (for UIs)");
 		desc.AddConstant(Api::EOutputMode::Screen, "Screen", "Screen");
 		desc.AddConstant(Api::EOutputMode::Material, "Material", "Material slot");
-		desc.AddConstant(Api::EOutputMode::Texture, "Texture", "Named texture");
+	}
+
+	static void ReflectType(Schematyc::CTypeDesc<EDecodeMode>& desc)
+	{
+		desc.SetGUID(Api::kDecodeModeTypeGuid);
+		desc.SetLabel("VideoDecode");
+		desc.SetDescription("Decoder choice of a video player (this build always decodes on the CPU)");
+		desc.SetDefaultValue(Api::EDecodeMode::Auto);
+		desc.AddConstant(Api::EDecodeMode::Auto, "Auto", "Auto");
+		desc.AddConstant(Api::EDecodeMode::Gpu, "GPU", "GPU");
+		desc.AddConstant(Api::EDecodeMode::Cpu, "CPU", "CPU");
 	}
 	}
 
@@ -79,7 +90,7 @@ namespace CEVPlayer
 	{
 		ReflectSignalBase(desc, Api::eEvent_NewFrame);
 		const Api::SParam& p = EventEntry(Api::eEvent_NewFrame).params[0];
-		desc.AddMember(&CVideoPlayerComponent::SNewFrameSignal::serial, p.id, p.name, p.name, p.description, 0);
+		desc.AddMember(&CVideoPlayerComponent::SNewFrameSignal::serial, p.id, p.name, p.name, p.description, Schematyc::CSharedString());
 	}
 
 	static void ReflectType(Schematyc::CTypeDesc<CVideoPlayerComponent::SMarkerSignal>& desc)
@@ -272,19 +283,21 @@ namespace CEVPlayer
 		desc.SetGUID(Api::kSchematycComponentGuid);
 		desc.SetEditorCategory("Video");
 		desc.SetLabel("Video Player");
-		desc.SetDescription("Plays a .webm video or a .cevvideo descriptor to the screen, a material slot or a named texture");
+		desc.SetDescription("Plays a .webm video or a .cevvideo descriptor into a surface for UIs, to the screen or to a material slot");
 		desc.SetIcon("icons:General/Camera.ico");
 		desc.SetComponentFlags({ IEntityComponent::EFlags::Attach, IEntityComponent::EFlags::ClientOnly });
 
 		desc.AddMember(&CVideoPlayerComponent::m_video, 'vide', "video", "Video", "Video file (.webm) or runtime descriptor (.cevvideo)", VideoFileName(""));
-		desc.AddMember(&CVideoPlayerComponent::m_outputMode, 'omod', "outputmode", "Output Mode", "Screen = fullscreen on the top layer, Material slot = texture slot of a material, Named texture = only the texture below (use it in materials / Flash)", Api::EOutputMode::Screen);
-		desc.AddMember(&CVideoPlayerComponent::m_name, 'name', "name", "Name", "Named texture mode: texture name, normally $something (empty = generated). Material slot mode: material name (empty = the material of this entity)", Schematyc::CSharedString());
-		desc.AddMember(&CVideoPlayerComponent::m_slot, 'slot', "slot", "Slot Index", "Material slot mode: texture slot of the material (0 = diffuse)", 0);
+		desc.AddMember(&CVideoPlayerComponent::m_outputMode, 'omod', "outputmode", "Output", "Surface = a named surface UIs show by its SurfaceID, Screen = fullscreen on the top layer, Material = texture slot of a material", Api::EOutputMode::Screen);
+		desc.AddMember(&CVideoPlayerComponent::m_surfaceId, 'surf', "surfaceid", "SurfaceID", "Output Surface: the surface id UIs use (1 to 63 of A-Z a-z 0-9 _ . : -, unique)", Schematyc::CSharedString());
+		desc.AddMember(&CVideoPlayerComponent::m_material, 'mtl_', "material", "Material", "Output Material: material name (empty = the material of this entity)", Schematyc::CSharedString());
+		desc.AddMember(&CVideoPlayerComponent::m_slot, 'slot', "slot", "Slot", "Output Material: texture slot of the material (0 = diffuse)", 0);
 		desc.AddMember(&CVideoPlayerComponent::m_fit, 'fit_', "fit", "Screen Fit", "Screen mode: how the picture is placed", EVideoFit::Letterbox);
 		desc.AddMember(&CVideoPlayerComponent::m_language, 'lang', "language", "Language", "Audio language of the .cevvideo descriptor (empty = default choice)", Schematyc::CSharedString());
 		desc.AddMember(&CVideoPlayerComponent::m_loop, 'loop', "loop", "Loop", "Restart at 0 when the end is reached", false);
 		desc.AddMember(&CVideoPlayerComponent::m_autoplay, 'auto', "autoplay", "Autoplay", "Load and play when the game starts", false);
 		desc.AddMember(&CVideoPlayerComponent::m_skippable, 'skip', "skippable", "Skippable", "A key / mouse / gamepad button press stops the video and sends Skipped", false);
+		desc.AddMember(&CVideoPlayerComponent::m_decode, 'deco', "decode", "Decode", "Decoder: Auto, GPU or CPU (this build always decodes on the CPU; GPU logs a warning)", Api::EDecodeMode::Auto);
 	}
 
 	CVideoPlayerComponent::~CVideoPlayerComponent()
@@ -339,9 +352,12 @@ namespace CEVPlayer
 		if (m_handle != 0 && mEnv->pApi->Find(m_handle, false) != nullptr)
 			return true;
 
-		m_handle = mEnv->pApi->Create(m_outputMode == Api::EOutputMode::Texture ? m_name.c_str() : nullptr, true);
+		m_handle = m_outputMode == Api::EOutputMode::Surface ? mEnv->pApi->CreateForSurface(m_surfaceId.c_str(), true) : mEnv->pApi->Create(true);
 		if (m_handle == 0)
+		{
+			LogWarning("<CVideoPlayerComponent> no player: %s", mEnv->pApi->LastErrorMessage());
 			return false;
+		}
 		mEnv->pApi->Subscribe(m_handle, this);
 		ApplyProperties();
 		return true;
@@ -364,11 +380,13 @@ namespace CEVPlayer
 		const SValue loop[1] = { SValue::FromBool(m_loop) };
 		const SValue language[1] = { SValue::FromString(m_language.c_str()) };
 		const SValue skippable[1] = { SValue::FromBool(m_skippable) };
+		const SValue decode[1] = { SValue::FromInt(static_cast<int>(m_decode)) };
 		const SValue output[5] =
 		{
-			SValue::FromInt(static_cast<int>(m_outputMode)), SValue::FromString(m_name.c_str()), SValue::FromInt(m_slot),
+			SValue::FromInt(static_cast<int>(m_outputMode)), SValue::FromString(m_material.c_str()), SValue::FromInt(m_slot),
 			SValue::FromInt(-1), SValue::FromInt(static_cast<int>(m_fit))
 		};
+		Call(*FindByName("SetDecode"), m_handle, decode, 1, nullptr);
 		Call(*FindByName("SetLoop"), m_handle, loop, 1, nullptr);
 		Call(*FindByName("SetLanguage"), m_handle, language, 1, nullptr);
 		Call(*FindByName("SetSkippable"), m_handle, skippable, 1, nullptr);
@@ -421,7 +439,7 @@ namespace CEVPlayer
 		{
 			SNewFrameSignal signal;
 			if (argCount > 0)
-				signal.serial = args[0].i;
+				signal.serial = Schematyc::CSharedString(args[0].s.c_str());
 			pObject->ProcessSignal(signal, GetGUID());
 			break;
 		}

@@ -2,11 +2,13 @@
 #include "PluginEnv.h"
 #include "ApiTest.h"
 
+#include <cstdlib>
 #include <string>
 
 #include "Bindings/ApiPlayers.h"
 #include "Bindings/ApiTable.h"
 #include "Player/VideoPlayerImpl.h"
+#include "CEVCore/Status.h"
 
 namespace CEVPlayer
 {
@@ -24,11 +26,21 @@ namespace CEVPlayer
 				int failed = 0;
 				uint32_t events[eEvent_Count] = {};
 				std::string path;
+				std::string lastSerial;      // payload of the last NewFrame event
+				bool serialIsString = true;  // every NewFrame payload was a string of digits
 
-				virtual void OnApiEvent(int, uint32_t event, const SValue*, uint32_t) override
+				virtual void OnApiEvent(int, uint32_t event, const SValue* args, uint32_t argCount) override
 				{
 					if (event < eEvent_Count)
 						++events[event];
+					if (event == eEvent_NewFrame)
+					{
+						const bool ok = argCount == 1 && args[0].type == EType::String && !args[0].s.empty()
+							&& args[0].s.find_first_not_of("0123456789") == std::string::npos;
+						serialIsString = serialIsString && ok;
+						if (argCount > 0)
+							lastSerial = args[0].s;
+					}
 				}
 
 				void Check(bool ok, const std::string& what)
@@ -55,6 +67,34 @@ namespace CEVPlayer
 
 			STest s_test;
 
+			//! Surface players through the table: CreateForSurface, the refusals with their codes, SetOutput(Surface),
+			//! AttachSurface, Destroy.
+			void SurfaceChecks(STest& t)
+			{
+				SValue made;
+				const SValue id[1] = { SValue::FromString("apitest_surface") };
+				t.Check(Call(STest::E("CreateForSurface"), 0, id, 1, &made) && made.i != 0, "CreateForSurface(apitest_surface) returns a handle");
+				if (made.i == 0)
+					return;
+				SValue v;
+				t.Check(Call(STest::E("SurfaceId"), made.i, nullptr, 0, &v) && v.s == "apitest_surface", "SurfaceId query is <" + v.s + ">");
+				const SValue surfaceOut[5] = { SValue::FromInt(static_cast<int>(EOutputMode::Surface)), SValue::FromString(""), SValue::FromInt(0), SValue::FromInt(-1), SValue::FromInt(2) };
+				t.Check(Call(STest::E("SetOutput"), made.i, surfaceOut, 5, nullptr), "SetOutput(Surface) on a surface player");
+				SValue again;
+				const SValue sameId[1] = { SValue::FromString("APITEST_SURFACE") };
+				bool refused = !Call(STest::E("CreateForSurface"), 0, sameId, 1, &again) && again.i == 0;
+				t.Check(refused && mEnv->pApi->LastErrorCode() == static_cast<int>(cev::Status::InvalidState),
+					std::string("CreateForSurface with the same id (other case) is refused, code 2 (") + mEnv->pApi->LastErrorMessage() + ")");
+				const SValue badId[1] = { SValue::FromString("bad id!") };
+				refused = !Call(STest::E("CreateForSurface"), 0, badId, 1, &again) && again.i == 0;
+				t.Check(refused && mEnv->pApi->LastErrorCode() == static_cast<int>(cev::Status::InvalidArgument),
+					std::string("CreateForSurface with an invalid id is refused, code 1 (") + mEnv->pApi->LastErrorMessage() + ")");
+				t.Check(mEnv->pApi->AttachSurface("ApiTest_Surface") == made.i, "AttachSurface finds the handle of the surface (case-insensitive)");
+				t.Check(mEnv->pApi->AttachSurface("no_such_surface") == 0, "AttachSurface of an unknown id is 0");
+				t.Check(Call(STest::E("Destroy"), made.i, nullptr, 0, nullptr), "Destroy the surface player");
+				t.Check(mEnv->pApi->AttachSurface("apitest_surface") == 0, "the destroyed surface is gone");
+			}
+
 			void Finish(STest& t)
 			{
 				t.step = STest::EStep::Idle;
@@ -62,11 +102,12 @@ namespace CEVPlayer
 				SValue ignored;
 				t.Check(!Call(STest::E("State"), t.handle, nullptr, 0, &ignored), "State on the destroyed handle is rejected");
 
+				SurfaceChecks(t);
+
 				// script owned players are destroyed by DestroyScriptOwned (game mode ended / level unloaded), component owned stay
 				SValue scriptMade;
-				const SValue noName[1] = { SValue::FromString("") };
-				t.Check(Call(STest::E("Create"), 0, noName, 1, &scriptMade) && scriptMade.i != 0, "Create (script owned)");
-				const int componentMade = mEnv->pApi->Create(nullptr, true);
+				t.Check(Call(STest::E("Create"), 0, nullptr, 0, &scriptMade) && scriptMade.i != 0, "Create (script owned)");
+				const int componentMade = mEnv->pApi->Create(true);
 				t.Check(componentMade != 0, "Create (component owned)");
 				const uint32_t destroyed = mEnv->pApi->DestroyScriptOwned();
 				t.Check(destroyed >= 1 && mEnv->pApi->Find(scriptMade.i, false) == nullptr, "DestroyScriptOwned destroyed the script owned player (" + std::to_string(destroyed) + ")");
@@ -101,12 +142,24 @@ namespace CEVPlayer
 			for (uint32_t& n : t.events)
 				n = 0;
 			t.path = path != nullptr && path[0] != '\0' ? path : "Videos/vp9_alpha.webm";
+			t.lastSerial.clear();
+			t.serialIsString = true;
 			LogAlways("cev_apitest: start (%s)", t.path.c_str());
+
+			// the table itself (M6b): entry counts, retired entries gone, new entries present
+			t.Check(Controls().size() == 18 && Queries().size() == 21 && Events().size() == eEvent_Count,
+				"table has 18 controls, 21 queries, 8 events (" + std::to_string(Controls().size()) + ", " + std::to_string(Queries().size()) + ", " + std::to_string(Events().size()) + ")");
+			t.Check(FindByName("TextureName") == nullptr && FindByName("InterfaceVersion") == nullptr && FindByName("Caps") == nullptr, "TextureName, InterfaceVersion and Caps are retired");
+			bool allNew = true;
+			for (const char* name : { "CreateForSurface", "SetDecode", "UnbindMaterial", "SurfaceId", "Generation", "PixelLayout", "DecodeBackend", "FrameSerial", "IsLoaded", "IsLooping", "HasAudio", "Rate", "Volume", "Path" })
+				allNew = allNew && FindByName(name) != nullptr;
+			t.Check(allNew, "the 14 entries added in M6b exist");
+			t.Check(FindByName("Create")->paramCount == 0, "Create has no TextureName parameter");
+			t.Check(Events()[eEvent_NewFrame].params[0].type == EType::String, "NewFrame Serial is a string");
 
 			// creation through the table
 			SValue created;
-			const SValue textureName[1] = { SValue::FromString("") };
-			t.Check(Call(STest::E("Create"), 0, textureName, 1, &created) && created.i != 0, "Create returns a handle");
+			t.Check(Call(STest::E("Create"), 0, nullptr, 0, &created) && created.i != 0, "Create returns a handle");
 			t.handle = created.i;
 			if (t.handle == 0)
 			{
@@ -116,15 +169,22 @@ namespace CEVPlayer
 			mEnv->pApi->Subscribe(t.handle, &t);
 
 			// static queries and bad handles (warnings "invalid player handle" are expected here)
-			t.Check(t.Query("InterfaceVersion").i == static_cast<int>(kVideoPlayerInterfaceVersion), "InterfaceVersion matches the header");
-			t.Check((t.Query("Caps").i & eVideoCap_Variants) != 0, "Caps has the Variants bit");
 			SValue ignored;
 			t.Check(!Call(STest::E("Play"), 987654, nullptr, 0, &ignored), "Play on an invalid handle is rejected without a crash");
 			t.Check(!Call(STest::E("State"), 0, nullptr, 0, &ignored), "State on handle 0 is rejected");
 
 			// control sequence
 			const SValue output[5] = { SValue::FromInt(static_cast<int>(EOutputMode::Screen)), SValue::FromString(""), SValue::FromInt(0), SValue::FromInt(-1), SValue::FromInt(2) };
+			const SValue surfaceOut[5] = { SValue::FromInt(static_cast<int>(EOutputMode::Surface)), SValue::FromString(""), SValue::FromInt(0), SValue::FromInt(-1), SValue::FromInt(2) };
+			t.Check(!Call(STest::E("SetOutput"), t.handle, surfaceOut, 5, nullptr), "SetOutput(Surface) on a player without surface id is rejected");
 			t.Check(Call(STest::E("SetOutput"), t.handle, output, 5, nullptr), "SetOutput(Screen)");
+			const SValue gpu[1] = { SValue::FromInt(static_cast<int>(EDecodeMode::Gpu)) };
+			t.Check(Call(STest::E("SetDecode"), t.handle, gpu, 1, nullptr) && mEnv->pApi->GetDecodeMode(t.handle) == 1, "SetDecode(GPU) recorded (a warning is expected)");
+			const SValue badDecode[1] = { SValue::FromInt(7) };
+			t.Check(!Call(STest::E("SetDecode"), t.handle, badDecode, 1, nullptr) && mEnv->pApi->GetDecodeMode(t.handle) == 1, "SetDecode(7) rejected");
+			const SValue cpu[1] = { SValue::FromInt(static_cast<int>(EDecodeMode::Cpu)) };
+			t.Check(Call(STest::E("SetDecode"), t.handle, cpu, 1, nullptr) && mEnv->pApi->GetDecodeMode(t.handle) == 2, "SetDecode(CPU) recorded");
+			t.Check(Call(STest::E("UnbindMaterial"), t.handle, nullptr, 0, nullptr), "UnbindMaterial accepted");
 			const SValue loop[1] = { SValue::FromBool(true) };
 			t.Check(Call(STest::E("SetLoop"), t.handle, loop, 1, nullptr), "SetLoop(true)");
 			const SValue volume[1] = { SValue::FromFloat(0.f) };
@@ -176,8 +236,19 @@ namespace CEVPlayer
 			const int height = t.Query("Height").i;
 			t.Check(width > 0 && height > 0, "Width x Height known (" + std::to_string(width) + "x" + std::to_string(height) + ")");
 			t.Check(t.Query("Duration").f > 0.f, "Duration known");
-			t.Check(t.Query("TextureId").i != 0, "TextureId " + std::to_string(t.Query("TextureId").i) + ", name " + t.Query("TextureName").s);
+			t.Check(t.Query("TextureId").i != 0, "TextureId " + std::to_string(t.Query("TextureId").i));
 			t.Check(t.Query("IsPremultiplied").b, "IsPremultiplied");
+			// queries added in M6b
+			t.Check(t.Query("SurfaceId").s.empty(), "SurfaceId of a Create player is empty");
+			t.Check(t.Query("Generation").i == 0, "Generation of a player without surface id stays 0 (only surface players count, " + std::to_string(t.Query("Generation").i) + ")");
+			t.Check(t.Query("PixelLayout").i == 0 && t.Query("DecodeBackend").i == 0, "PixelLayout RGBA8, DecodeBackend CPU");
+			const std::string serial = t.Query("FrameSerial").s;
+			t.Check(!serial.empty() && serial.find_first_not_of("0123456789") == std::string::npos && std::strtoull(serial.c_str(), nullptr, 10) > 10, "FrameSerial is decimal text > 10 (" + serial + ")");
+			t.Check(t.Query("IsLoaded").b && t.Query("IsLooping").b, "IsLoaded and IsLooping");
+			t.Check(t.Query("Rate").f == 1.f && t.Query("Volume").f == 0.f, "Rate 1 and Volume 0 as set");
+			t.Check(t.Query("Path").s == t.path, "Path is <" + t.Query("Path").s + ">");
+			t.Check(t.serialIsString && !t.lastSerial.empty(), "NewFrame Serial payloads are decimal strings (last " + t.lastSerial + ")");
+			LogAlways("cev_apitest: HasAudio=%d", t.Query("HasAudio").b ? 1 : 0);
 			LogAlways("cev_apitest: HasAlpha=%d Language='%s' Variant=%d events: ready=%u started=%u newFrame=%u looped=%u ended=%u error=%u",
 				t.Query("HasAlpha").b ? 1 : 0, t.Query("Language").s.c_str(), t.Query("Variant").i,
 				t.events[eEvent_Ready], t.events[eEvent_Started], t.events[eEvent_NewFrame], t.events[eEvent_Looped], t.events[eEvent_Ended], t.events[eEvent_Error]);

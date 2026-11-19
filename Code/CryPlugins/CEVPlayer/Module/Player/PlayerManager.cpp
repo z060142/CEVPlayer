@@ -204,7 +204,7 @@ namespace CEVPlayer
 
 	bool CPlayerManager::GlobalStatsEnabled() const
 	{
-		return mEnv->m_cevStats != 0 || mEnv->m_bDebugDraw != 0;
+		return mEnv->m_cevStats != 0;
 	}
 
 	void CPlayerManager::RegisterLevelListener()

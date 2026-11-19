@@ -226,7 +226,7 @@ namespace CEVPlayer
 		if (mEnv != nullptr)
 		{
 			enabled = mEnv->m_cevAudioEnable != 0;
-			master = Clamp01(mEnv->m_cevVolume) * Clamp01(mEnv->m_audioVolume);
+			master = Clamp01(mEnv->m_cevVolume);
 			if (mEnv->m_cevMuteOnFocusLoss != 0 && !m_focused.load(std::memory_order_relaxed))
 				master = 0.f;
 		}
