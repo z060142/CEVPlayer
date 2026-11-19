@@ -86,6 +86,9 @@ namespace CEVPlayer
 		void ConsolePlaySurface(const char* surfaceId, const char* path, bool loop);
 		//! Measurement (S0): cev_stats_file. nullptr / "" closes the file.
 		void SetStatsFile(const char* path);
+		//! Measurement: this process's private bytes (commit charge) and its local video memory use, MB (-1 = unknown).
+		static double ProcessPrivateMb();
+		static double ProcessGpuMb();
 
 	private:
 		class CConsoleListener;

@@ -94,6 +94,9 @@ namespace CEVPlayer
 		}
 	}
 
+	double CPlayerManager::ProcessPrivateMb() { return ProcessMemoryMb(true); }
+	double CPlayerManager::ProcessGpuMb() { return ProcessGpuMemoryMb(); }
+
 	void CPlayerManager::SetStatsFile(const char* path)
 	{
 		if (s_statsFile != nullptr)

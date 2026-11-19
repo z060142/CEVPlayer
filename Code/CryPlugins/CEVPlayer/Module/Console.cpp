@@ -42,6 +42,8 @@ namespace CEVPlayer
 			double s_r8MsSum = 0.0;
 			float s_r8MsMax = 0.f;
 			uint32 s_r8MsCount = 0;
+			bool s_r8Rgba = false;       // M8: "rgba" argument, an RGBA8 texture of the same size (RAM comparison)
+			double s_r8MbBefore = 0.0;   // private bytes before the texture was created
 
 			// cev_probe_sync
 			int s_syncId = 0;
@@ -90,7 +92,7 @@ namespace CEVPlayer
 			ReleaseTextureId(s_r8Id);
 			if (args == nullptr || args->GetArgCount() < 3)
 			{
-				LogAlways("cev_probe_r8: off (usage: cev_probe_r8 <width> <height>)");
+				LogAlways("cev_probe_r8: off (usage: cev_probe_r8 <width> <height> [rgba])");
 				return;
 			}
 			const int w = std::atoi(args->GetArg(1));
@@ -106,11 +108,17 @@ namespace CEVPlayer
 			s_r8MsSum = 0.0;
 			s_r8MsMax = 0.f;
 			s_r8MsCount = 0;
-			s_r8Buf.assign(static_cast<size_t>(w) * static_cast<size_t>(h), 0);
+			s_r8Rgba = args->GetArgCount() > 3 && stricmp(args->GetArg(3), "rgba") == 0;
+			const ETEX_Format format = s_r8Rgba ? eTF_R8G8B8A8 : eTF_R8;
+			s_r8Buf.assign(static_cast<size_t>(w) * static_cast<size_t>(h) * (s_r8Rgba ? 4u : 1u), 0);
+			s_r8MbBefore = CPlayerManager::ProcessPrivateMb();
+			const double gpuBefore = CPlayerManager::ProcessGpuMb();
 			const Clock::time_point t0 = Clock::now();
-			s_r8Id = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(nullptr, w, h, eTF_R8, eTF_R8, 0, false, FILTER_BILINEAR, 0, "$CevProbeR8", FT_NOMIPS));
+			s_r8Id = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(nullptr, w, h, format, format, 0, false, FILTER_BILINEAR, 0, s_r8Rgba ? "$CevProbeRgba" : "$CevProbeR8", FT_NOMIPS));
 			const float ms = std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
-			LogAlways("cev_probe_r8: UploadToVideoMemory(nullptr, %d, %d, eTF_R8, eTF_R8, ..., FT_NOMIPS) -> id %d (%.3f ms)", w, h, s_r8Id, ms);
+			LogAlways("cev_probe_r8: UploadToVideoMemory(nullptr, %d, %d, %s, ..., FT_NOMIPS) -> id %d (%.3f ms), private %+.1f MB, gpu %+.1f MB (buffer %.1f MB)", w, h,
+				s_r8Rgba ? "eTF_R8G8B8A8" : "eTF_R8", s_r8Id, ms, CPlayerManager::ProcessPrivateMb() - s_r8MbBefore, CPlayerManager::ProcessGpuMb() - gpuBefore,
+				static_cast<double>(s_r8Buf.size()) / 1048576.0);
 			LogTexture("cev_probe_r8", s_r8Id);
 		}
 
@@ -190,21 +198,23 @@ namespace CEVPlayer
 				const int bar = static_cast<int>((s_r8Frame * 8u) % static_cast<uint32>(w));
 				for (int y = 0; y < h; ++y)
 				{
-					uint8* row = s_r8Buf.data() + static_cast<size_t>(y) * w;
+					uint8* row = s_r8Buf.data() + static_cast<size_t>(y) * w * (s_r8Rgba ? 4 : 1);
+					if (s_r8Rgba)
+						continue; // RGBA: the content does not matter for the RAM / timing comparison
 					for (int x = 0; x < w; ++x)
 						row[x] = static_cast<uint8>(((x + y) >> 3) * 16 + s_r8Frame);
 					for (int x = bar; x < bar + 16 && x < w; ++x)
 						row[x] = 255;
 				}
 				const Clock::time_point t0 = Clock::now();
-				gEnv->pRenderer->UpdateTextureInVideoMemory(static_cast<uint32>(s_r8Id), s_r8Buf.data(), 0, 0, w, h, eTF_R8);
+				gEnv->pRenderer->UpdateTextureInVideoMemory(static_cast<uint32>(s_r8Id), s_r8Buf.data(), 0, 0, w, h, s_r8Rgba ? eTF_R8G8B8A8 : eTF_R8);
 				const float ms = std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
 				s_r8MsSum += ms;
 				s_r8MsMax = std::max(s_r8MsMax, ms);
 				if (++s_r8MsCount == 120)
 				{
-					LogAlways("cev_probe_r8: %dx%d UpdateTextureInVideoMemory(eTF_R8) avg %.3f ms max %.3f ms over 120 frames (%d bytes each)", w, h,
-						s_r8MsSum / s_r8MsCount, s_r8MsMax, w * h);
+					LogAlways("cev_probe_r8: %dx%d UpdateTextureInVideoMemory(%s) avg %.3f ms max %.3f ms over 120 frames (%u bytes each), private %+.1f MB since before the texture", w, h,
+						s_r8Rgba ? "eTF_R8G8B8A8" : "eTF_R8", s_r8MsSum / s_r8MsCount, s_r8MsMax, static_cast<unsigned>(s_r8Buf.size()), CPlayerManager::ProcessPrivateMb() - s_r8MbBefore);
 					s_r8MsSum = 0.0;
 					s_r8MsMax = 0.f;
 					s_r8MsCount = 0;
@@ -522,7 +532,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_run_script", CmdRunScript, VF_NULL, "Development: cev_run_script <file> runs a list of console commands, one per frame, immediately (not through the deferred queue); wait <seconds>, # comments");
 		REGISTER_COMMAND("cev_contract_selftest", CmdContractSelfTest, VF_NULL, "Self test of the texture source contract through the CryTexSource_v1 export. cev_contract_selftest [pathA] [pathB] (two videos of different sizes), logs PASS / FAIL");
 		// development-only measurement commands (S0)
-		REGISTER_COMMAND("cev_probe_r8", DevProbe::CmdProbeR8, VF_NULL, "Measurement: cev_probe_r8 <w> <h> creates an eTF_R8 dynamic texture, updates it every frame and draws it top left (no arguments = off)");
+		REGISTER_COMMAND("cev_probe_r8", DevProbe::CmdProbeR8, VF_NULL, "Measurement: cev_probe_r8 <w> <h> [rgba] creates an eTF_R8 (or RGBA8) dynamic texture, updates it every frame, draws it top left and logs the process memory it costs (no arguments = off)");
 		REGISTER_COMMAND("cev_probe_sync", DevProbe::CmdProbeSync, VF_NULL, "Measurement: cev_probe_sync 1|0, a 64x64 RGBA texture filled each frame with a colour coding the frame index, next to aux blocks of the same colour");
 		REGISTER_COMMAND("cev_bench_play", DevProbe::CmdBenchPlay, VF_NULL, "Measurement: cev_bench_play <path> <texture name> [loop 0|1] plays into a named texture (not fullscreen); no arguments = stop");
 		REGISTER_COMMAND("cev_bench_stop", DevProbe::CmdBenchStop, VF_NULL, "Measurement: stop the cev_bench_play player");
