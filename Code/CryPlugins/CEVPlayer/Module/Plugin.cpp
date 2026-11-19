@@ -133,6 +133,9 @@ namespace CEVPlayer
 		Api::TickApiTest();
 		Api::TickFlowTest();
 		Contract::TickSelfTest();
+#if CEV_HAVE_CRYVS
+		CryVSBind::Tick(); // WatchSurfaceID components, cev_cryvstest
+#endif
 		TickRunScript(); // development test driver (cev_run_script)
 		DevProbesBeforeRender(); // measurement only (S0)
 	}

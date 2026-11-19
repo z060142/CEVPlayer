@@ -143,6 +143,12 @@ namespace CEVPlayer
 			return it != m_records.end() ? it->second->decodeMode : 0;
 		}
 
+		bool CApiPlayers::IsScriptOwned(int handle) const
+		{
+			const std::map<int, std::unique_ptr<SRecord>>::const_iterator it = m_records.find(handle);
+			return it != m_records.end() && !it->second->componentOwned && !it->second->attached;
+		}
+
 		CApiPlayers::SRecord* CApiPlayers::FindRecord(int handle, bool warn)
 		{
 			const std::map<int, std::unique_ptr<SRecord>>::iterator it = m_records.find(handle);
