@@ -27,6 +27,8 @@ namespace cev
 		bool hasAlpha = false;            // AlphaMode == 1 (alpha as BlockAdditional id 1)
 		int matrixCoefficients = -1;      // Matroska Colour/MatrixCoefficients, -1 = absent
 		int colorRange = -1;              // Matroska Colour/Range, -1 = absent
+		int chromaSitingHorz = -1;        // Matroska Colour/ChromaSitingHorz, -1 = absent (M8)
+		int chromaSitingVert = -1;        // Matroska Colour/ChromaSitingVert, -1 = absent (M8)
 		uint32_t packetCount = 0;
 		uint32_t maxPacketSize = 0;
 		uint32_t maxAdditionalSize = 0;

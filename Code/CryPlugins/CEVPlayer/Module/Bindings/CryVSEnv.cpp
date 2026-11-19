@@ -2,13 +2,13 @@
 //
 // What is registered (docs/design/M6-ui-source.md section 4.2, docs/tasks/M6c.md):
 // - Three drawers = three namespaces of global functions (catalogue path Function::<Namespace>::<Name>): Video,
-//   VideoUI and VideoAdvanced. They are handle based and only call table functions (Api::Call); players they create
+//   CEVPlayer::UI and CEVPlayer::Advanced. They are handle based and only call table functions (Api::Call); players they create
 //   are script owned (DestroyScriptOwned removes them when a level unloads / the editor game mode ends). CryVS
 //   function nodes are synchronous with one input and one output pin, so a FlowGraph node with several triggers
-//   becomes several functions (VideoAdvanced::Play / Pause / Stop / Seek, one function per setting).
+//   becomes several functions (CEVPlayer::Advanced::Play / Pause / Stop / Seek, one function per setting).
 // - The component CEVPlayer::VideoPlayer keeps one member function per table entry (GUID = entry GUID) and one signal
 //   per table event. With the property WatchSurfaceID set it owns no player and only follows that surface: signals
-//   Ready, NewFrame, Resized, Closed (the FlowGraph node VideoUI:SurfaceEvents).
+//   Ready, NewFrame, Resized, Closed (the FlowGraph node CEVPlayer:UI:SurfaceEvents).
 // - Enumeration types Output, Screen Fit and Decode.
 //
 // Registration timing: plug-ins are loaded before CSystem::InitSchematyc (gEnv->pCryVS is null in Initialize), the
@@ -191,10 +191,10 @@ namespace CEVPlayer
 				out[0] = I(0);
 				if (in[0].s.empty())
 				{
-					LogWarning("CryVS: Video::PlayOnScreen: Video is empty");
+					LogWarning("CryVS: CEVPlayer::PlayOnScreen: Video is empty");
 					return;
 				}
-				const int h = CreatePlayer("Video::PlayOnScreen", nullptr);
+				const int h = CreatePlayer("CEVPlayer::PlayOnScreen", nullptr);
 				if (h == 0)
 					return;
 				Run("SetDecode", h, { I(in[4].i) });
@@ -217,7 +217,7 @@ namespace CEVPlayer
 				{ EPort::Int, "Slot", "Texture slot of the material that gets the video (0 = diffuse)", 0, nullptr },
 				{ EPort::Int, "SubMaterial", "Sub-material index; -1 uses the material itself", -1, nullptr },
 				{ EPort::Bool, "Loop", "Restart at the beginning when the end is reached", 0, nullptr },
-				{ EPort::Bool, "Autoplay", "Play at once; otherwise the video is only loaded (VideoAdvanced::Play starts it)", 1, nullptr },
+				{ EPort::Bool, "Autoplay", "Play at once; otherwise the video is only loaded (CEVPlayer::Advanced::Play starts it)", 1, nullptr },
 				{ EPort::Decode, "Decode", kDecodeDesc, 0, nullptr },
 			};
 
@@ -226,16 +226,16 @@ namespace CEVPlayer
 				out[0] = I(0);
 				if (in[1].s.empty())
 				{
-					LogWarning("CryVS: Video::PlayOnMaterial: Video is empty");
+					LogWarning("CryVS: CEVPlayer::PlayOnMaterial: Video is empty");
 					return;
 				}
-				const int h = CreatePlayer("Video::PlayOnMaterial", nullptr);
+				const int h = CreatePlayer("CEVPlayer::PlayOnMaterial", nullptr);
 				if (h == 0)
 					return;
 				Run("SetDecode", h, { I(in[7].i) });
 				if (!Run("SetOutput", h, { I(static_cast<int>(Api::EOutputMode::Material)), S(in[2].s.c_str()), I(in[3].i), I(in[4].i), I(2) }, nullptr, MaterialOfEntity(static_cast<EntityId>(in[0].i))))
 				{
-					LogWarning("CryVS: Video::PlayOnMaterial: material binding failed (no material, material not found or bad slot)");
+					LogWarning("CryVS: CEVPlayer::PlayOnMaterial: material binding failed (no material, material not found or bad slot)");
 					DestroyIfAlive(h);
 					return;
 				}
@@ -253,16 +253,16 @@ namespace CEVPlayer
 				if (in[0].i != 0 && ApiAvailable() && mEnv->pApi->IsScriptOwned(in[0].i))
 					Run("Destroy", in[0].i);
 				else if (in[0].i != 0)
-					LogWarning("CryVS: Video::Stop: handle %d is not a player made by a script function, ignored", in[0].i);
+					LogWarning("CryVS: CEVPlayer::Stop: handle %d is not a player made by a script function, ignored", in[0].i);
 			}
 
-			// ----- VideoUI
+			// ----- CEVPlayer::UI
 			const SPort kPlayToSurfaceIn[] =
 			{
 				{ EPort::String, "Video", kVideoDesc, 0, "" },
 				{ EPort::String, "SurfaceID", kSurfaceDesc, 0, "" },
 				{ EPort::Bool, "Loop", "Restart at the beginning when the end is reached", 0, nullptr },
-				{ EPort::Bool, "Autoplay", "Play at once; otherwise the video is only loaded (VideoAdvanced::Play starts it)", 1, nullptr },
+				{ EPort::Bool, "Autoplay", "Play at once; otherwise the video is only loaded (CEVPlayer::Advanced::Play starts it)", 1, nullptr },
 				{ EPort::Decode, "Decode", kDecodeDesc, 0, nullptr },
 				{ EPort::Bool, "PauseDecodeWhenHidden", "While no UI shows the surface only decode, and stop decoding after cev_hiddenStopSeconds", 1, nullptr },
 			};
@@ -272,10 +272,10 @@ namespace CEVPlayer
 				out[0] = I(0);
 				if (in[0].s.empty())
 				{
-					LogWarning("CryVS: VideoUI::PlayToSurface: Video is empty");
+					LogWarning("CryVS: CEVPlayer::UI::PlayToSurface: Video is empty");
 					return;
 				}
-				const int h = CreatePlayer("VideoUI::PlayToSurface", in[1].s.c_str());
+				const int h = CreatePlayer("CEVPlayer::UI::PlayToSurface", in[1].s.c_str());
 				if (h == 0)
 					return;
 				Run("SetDecode", h, { I(in[4].i) });
@@ -299,7 +299,7 @@ namespace CEVPlayer
 				if (mEnv->pApi->IsScriptOwned(h))
 					Run("Destroy", h);
 				else
-					LogWarning("CryVS: VideoUI::StopSurface: surface <%s> was not made by a script function, left alone", in[0].s.c_str());
+					LogWarning("CryVS: CEVPlayer::UI::StopSurface: surface <%s> was not made by a script function, left alone", in[0].s.c_str());
 			}
 
 			const SPort kSurfaceInfoOut[] =
@@ -308,8 +308,8 @@ namespace CEVPlayer
 				{ EPort::Int, "TextureId", "Renderer texture id of the surface, 0 while there is none", 0, nullptr },
 				{ EPort::Int, "Width", "Picture width in pixels, 0 until loaded", 0, nullptr },
 				{ EPort::Int, "Height", "Picture height in pixels, 0 until loaded", 0, nullptr },
-				{ EPort::Int, "PixelLayout", "Pixel layout of the texture: 0 = RGBA8", 0, nullptr },
-				{ EPort::Bool, "Premultiplied", "The texture holds premultiplied alpha", 0, nullptr },
+				{ EPort::Int, "PixelLayout", "Pixel layout of the texture: 0 = RGBA8, 1 = packed YUV420 (R8), 2 = packed YUVA420 (R8)", 0, nullptr },
+				{ EPort::Bool, "Premultiplied", "The texture holds premultiplied alpha (RGBA8 layout)", 0, nullptr },
 				{ EPort::Bool, "HasAlpha", "The video has an alpha channel", 0, nullptr },
 				{ EPort::String, "FrameSerial", "Number of uploaded pictures as decimal text", 0, "" },
 				{ EPort::Int, "State", "0 Stopped, 1 Playing, 2 Paused, 3 Ended, 4 Loading, 5 Error", 0, nullptr },
@@ -333,7 +333,7 @@ namespace CEVPlayer
 				out[8] = Q("State", h);
 			}
 
-			// ----- VideoAdvanced
+			// ----- CEVPlayer::Advanced
 			const SPort kOpenIn[] =
 			{
 				{ EPort::String, "Video", kVideoDesc, 0, "" },
@@ -351,17 +351,17 @@ namespace CEVPlayer
 				out[0] = I(0);
 				if (in[0].s.empty())
 				{
-					LogWarning("CryVS: VideoAdvanced::Open: Video is empty");
+					LogWarning("CryVS: CEVPlayer::Advanced::Open: Video is empty");
 					return;
 				}
 				const int output = in[1].i;
-				const int h = CreatePlayer("VideoAdvanced::Open", output == static_cast<int>(Api::EOutputMode::Surface) ? in[2].s.c_str() : nullptr);
+				const int h = CreatePlayer("CEVPlayer::Advanced::Open", output == static_cast<int>(Api::EOutputMode::Surface) ? in[2].s.c_str() : nullptr);
 				if (h == 0)
 					return;
 				Run("SetDecode", h, { I(in[7].i) });
 				if (!Run("SetOutput", h, { I(output), S(in[4].s.c_str()), I(in[5].i), I(in[6].i), I(in[3].i) }))
 				{
-					LogWarning("CryVS: VideoAdvanced::Open: SetOutput failed (unknown Output, or the material is missing / not found / bad slot)");
+					LogWarning("CryVS: CEVPlayer::Advanced::Open: SetOutput failed (unknown Output, or the material is missing / not found / bad slot)");
 					DestroyIfAlive(h);
 					return;
 				}
@@ -378,7 +378,7 @@ namespace CEVPlayer
 				if (in[0].i != 0 && ApiAvailable() && mEnv->pApi->IsScriptOwned(in[0].i))
 					Run("Destroy", in[0].i);
 				else if (in[0].i != 0)
-					LogWarning("CryVS: VideoAdvanced::Close: handle %d is not a player made by a script function, ignored", in[0].i);
+					LogWarning("CryVS: CEVPlayer::Advanced::Close: handle %d is not a player made by a script function, ignored", in[0].i);
 			}
 
 			void FnPlay(const SValue* in, SValue*) { Run("Play", in[0].i); }
@@ -429,7 +429,7 @@ namespace CEVPlayer
 				static const char* const queries[] = { "State", "Time", "Duration", "Width", "Height", "HasAlpha", "Language", "Variant", "DecodeBackend", "FrameSerial", "SurfaceId" };
 				const bool alive = HandleAlive(in[0].i);
 				if (!alive && in[0].i != 0)
-					LogWarning("CryVS: VideoAdvanced::Info: invalid player handle %d", in[0].i);
+					LogWarning("CryVS: CEVPlayer::Advanced::Info: invalid player handle %d", in[0].i);
 				for (uint32 i = 0; i < CRY_ARRAY_COUNT(queries); ++i)
 					out[i] = alive ? Q(queries[i], in[0].i) : SValue();
 			}
@@ -438,26 +438,26 @@ namespace CEVPlayer
 #define CEV_NOPORTS nullptr, 0
 			const SGlobalFunction kGlobalFunctions[] =
 			{
-				{ Api::eCryVS_Video_PlayOnScreen, "Video", "PlayOnScreen", "Plays a video fullscreen on top of the game and returns its handle. The player belongs to the script: Video::Stop, or the end of the level / game mode, destroys it.", CEV_PORTS(kPlayOnScreenIn), CEV_PORTS(kHandleOut), &FnPlayOnScreen },
-				{ Api::eCryVS_Video_PlayOnMaterial, "Video", "PlayOnMaterial", "Plays a video on a texture slot of a material (a screen in the level) and returns its handle. Video::Stop, or the end of the level / game mode, destroys it.", CEV_PORTS(kPlayOnMaterialIn), CEV_PORTS(kHandleOut), &FnPlayOnMaterial },
-				{ Api::eCryVS_Video_Stop, "Video", "Stop", "Stops the video and destroys its player (handle from PlayOnScreen / PlayOnMaterial).", CEV_PORTS(kHandleIn), CEV_NOPORTS, &FnVideoStop },
-				{ Api::eCryVS_VideoUI_PlayToSurface, "VideoUI", "PlayToSurface", "Plays a video into a named surface that any UI can show by its SurfaceID and returns its handle. VideoUI::StopSurface, or the end of the level / game mode, destroys it.", CEV_PORTS(kPlayToSurfaceIn), CEV_PORTS(kHandleOut), &FnPlayToSurface },
-				{ Api::eCryVS_VideoUI_StopSurface, "VideoUI", "StopSurface", "Stops the video of a surface made by PlayToSurface (or VideoAdvanced::Open) and destroys the surface.", CEV_PORTS(kSurfaceIn), CEV_NOPORTS, &FnStopSurface },
-				{ Api::eCryVS_VideoUI_SurfaceInfo, "VideoUI", "SurfaceInfo", "Reads a surface by its SurfaceID: texture id, size and layout for UI systems that use the texture directly.", CEV_PORTS(kSurfaceIn), CEV_PORTS(kSurfaceInfoOut), &FnSurfaceInfo },
-				{ Api::eCryVS_VideoAdvanced_Open, "VideoAdvanced", "Open", "Creates a player for the chosen Output, starts loading Video and returns the handle for the other VideoAdvanced functions. VideoAdvanced::Close, or the end of the level / game mode, destroys it.", CEV_PORTS(kOpenIn), CEV_PORTS(kHandleOut), &FnOpen },
-				{ Api::eCryVS_VideoAdvanced_Close, "VideoAdvanced", "Close", "Destroys a player made by Open.", CEV_PORTS(kHandleIn), CEV_NOPORTS, &FnClose },
-				{ Api::eCryVS_VideoAdvanced_Play, "VideoAdvanced", "Play", "Plays from the start, or continues a paused video.", CEV_PORTS(kHandleIn), CEV_NOPORTS, &FnPlay },
-				{ Api::eCryVS_VideoAdvanced_Pause, "VideoAdvanced", "Pause", "Pauses playback.", CEV_PORTS(kHandleIn), CEV_NOPORTS, &FnPause },
-				{ Api::eCryVS_VideoAdvanced_Stop, "VideoAdvanced", "Stop", "Stops and goes back to the beginning (the player stays).", CEV_PORTS(kHandleIn), CEV_NOPORTS, &FnStop },
-				{ Api::eCryVS_VideoAdvanced_Seek, "VideoAdvanced", "Seek", "Jumps to a time in seconds.", CEV_PORTS(kSeekIn), CEV_NOPORTS, &FnSeek },
-				{ Api::eCryVS_VideoAdvanced_SetLoop, "VideoAdvanced", "SetLoop", "Sets looping.", CEV_PORTS(kSetLoopIn), CEV_NOPORTS, &FnSetLoop },
-				{ Api::eCryVS_VideoAdvanced_SetRate, "VideoAdvanced", "SetRate", "Sets the playback speed.", CEV_PORTS(kSetRateIn), CEV_NOPORTS, &FnSetRate },
-				{ Api::eCryVS_VideoAdvanced_SetVolume, "VideoAdvanced", "SetVolume", "Sets the player volume.", CEV_PORTS(kSetVolumeIn), CEV_NOPORTS, &FnSetVolume },
-				{ Api::eCryVS_VideoAdvanced_SetLanguage, "VideoAdvanced", "SetLanguage", "Selects the audio language of a .cevvideo descriptor.", CEV_PORTS(kSetLanguageIn), CEV_NOPORTS, &FnSetLanguage },
-				{ Api::eCryVS_VideoAdvanced_SetVariant, "VideoAdvanced", "SetVariant", "Chooses the variant (resolution) of a .cevvideo descriptor.", CEV_PORTS(kSetVariantIn), CEV_NOPORTS, &FnSetVariant },
-				{ Api::eCryVS_VideoAdvanced_SetSkippable, "VideoAdvanced", "SetSkippable", "Makes the video skippable: a button press stops it while it plays.", CEV_PORTS(kSetSkippableIn), CEV_NOPORTS, &FnSetSkippable },
-				{ Api::eCryVS_VideoAdvanced_Info, "VideoAdvanced", "Info", "Reads the state, time, size, language, variant, decoder, frame serial and surface id of a player handle.", CEV_PORTS(kHandleIn), CEV_PORTS(kInfoOut), &FnInfo },
-				{ Api::eCryVS_VideoAdvanced_SetPauseDecodeWhenHidden, "VideoAdvanced", "SetPauseDecodeWhenHidden", "Surface players: while no UI shows the surface only decode, and stop decoding after cev_hiddenStopSeconds (on by default).", CEV_PORTS(kSetPauseDecodeWhenHiddenIn), CEV_NOPORTS, &FnSetPauseDecodeWhenHidden },
+				{ Api::eCryVS_Video_PlayOnScreen, "CEVPlayer", "PlayOnScreen", "Plays a video fullscreen on top of the game and returns its handle. The player belongs to the script: CEVPlayer::Stop, or the end of the level / game mode, destroys it.", CEV_PORTS(kPlayOnScreenIn), CEV_PORTS(kHandleOut), &FnPlayOnScreen },
+				{ Api::eCryVS_Video_PlayOnMaterial, "CEVPlayer", "PlayOnMaterial", "Plays a video on a texture slot of a material (a screen in the level) and returns its handle. CEVPlayer::Stop, or the end of the level / game mode, destroys it.", CEV_PORTS(kPlayOnMaterialIn), CEV_PORTS(kHandleOut), &FnPlayOnMaterial },
+				{ Api::eCryVS_Video_Stop, "CEVPlayer", "Stop", "Stops the video and destroys its player (handle from PlayOnScreen / PlayOnMaterial).", CEV_PORTS(kHandleIn), CEV_NOPORTS, &FnVideoStop },
+				{ Api::eCryVS_VideoUI_PlayToSurface, "CEVPlayer::UI", "PlayToSurface", "Plays a video into a named surface that any UI can show by its SurfaceID and returns its handle. CEVPlayer::UI::StopSurface, or the end of the level / game mode, destroys it.", CEV_PORTS(kPlayToSurfaceIn), CEV_PORTS(kHandleOut), &FnPlayToSurface },
+				{ Api::eCryVS_VideoUI_StopSurface, "CEVPlayer::UI", "StopSurface", "Stops the video of a surface made by PlayToSurface (or CEVPlayer::Advanced::Open) and destroys the surface.", CEV_PORTS(kSurfaceIn), CEV_NOPORTS, &FnStopSurface },
+				{ Api::eCryVS_VideoUI_SurfaceInfo, "CEVPlayer::UI", "SurfaceInfo", "Reads a surface by its SurfaceID: texture id, size and layout for UI systems that use the texture directly.", CEV_PORTS(kSurfaceIn), CEV_PORTS(kSurfaceInfoOut), &FnSurfaceInfo },
+				{ Api::eCryVS_VideoAdvanced_Open, "CEVPlayer::Advanced", "Open", "Creates a player for the chosen Output, starts loading Video and returns the handle for the other VideoAdvanced functions. CEVPlayer::Advanced::Close, or the end of the level / game mode, destroys it.", CEV_PORTS(kOpenIn), CEV_PORTS(kHandleOut), &FnOpen },
+				{ Api::eCryVS_VideoAdvanced_Close, "CEVPlayer::Advanced", "Close", "Destroys a player made by Open.", CEV_PORTS(kHandleIn), CEV_NOPORTS, &FnClose },
+				{ Api::eCryVS_VideoAdvanced_Play, "CEVPlayer::Advanced", "Play", "Plays from the start, or continues a paused video.", CEV_PORTS(kHandleIn), CEV_NOPORTS, &FnPlay },
+				{ Api::eCryVS_VideoAdvanced_Pause, "CEVPlayer::Advanced", "Pause", "Pauses playback.", CEV_PORTS(kHandleIn), CEV_NOPORTS, &FnPause },
+				{ Api::eCryVS_VideoAdvanced_Stop, "CEVPlayer::Advanced", "Stop", "Stops and goes back to the beginning (the player stays).", CEV_PORTS(kHandleIn), CEV_NOPORTS, &FnStop },
+				{ Api::eCryVS_VideoAdvanced_Seek, "CEVPlayer::Advanced", "Seek", "Jumps to a time in seconds.", CEV_PORTS(kSeekIn), CEV_NOPORTS, &FnSeek },
+				{ Api::eCryVS_VideoAdvanced_SetLoop, "CEVPlayer::Advanced", "SetLoop", "Sets looping.", CEV_PORTS(kSetLoopIn), CEV_NOPORTS, &FnSetLoop },
+				{ Api::eCryVS_VideoAdvanced_SetRate, "CEVPlayer::Advanced", "SetRate", "Sets the playback speed.", CEV_PORTS(kSetRateIn), CEV_NOPORTS, &FnSetRate },
+				{ Api::eCryVS_VideoAdvanced_SetVolume, "CEVPlayer::Advanced", "SetVolume", "Sets the player volume.", CEV_PORTS(kSetVolumeIn), CEV_NOPORTS, &FnSetVolume },
+				{ Api::eCryVS_VideoAdvanced_SetLanguage, "CEVPlayer::Advanced", "SetLanguage", "Selects the audio language of a .cevvideo descriptor.", CEV_PORTS(kSetLanguageIn), CEV_NOPORTS, &FnSetLanguage },
+				{ Api::eCryVS_VideoAdvanced_SetVariant, "CEVPlayer::Advanced", "SetVariant", "Chooses the variant (resolution) of a .cevvideo descriptor.", CEV_PORTS(kSetVariantIn), CEV_NOPORTS, &FnSetVariant },
+				{ Api::eCryVS_VideoAdvanced_SetSkippable, "CEVPlayer::Advanced", "SetSkippable", "Makes the video skippable: a button press stops it while it plays.", CEV_PORTS(kSetSkippableIn), CEV_NOPORTS, &FnSetSkippable },
+				{ Api::eCryVS_VideoAdvanced_Info, "CEVPlayer::Advanced", "Info", "Reads the state, time, size, language, variant, decoder, frame serial and surface id of a player handle.", CEV_PORTS(kHandleIn), CEV_PORTS(kInfoOut), &FnInfo },
+				{ Api::eCryVS_VideoAdvanced_SetPauseDecodeWhenHidden, "CEVPlayer::Advanced", "SetPauseDecodeWhenHidden", "Surface players: while no UI shows the surface only decode, and stop decoding after cev_hiddenStopSeconds (on by default).", CEV_PORTS(kSetPauseDecodeWhenHiddenIn), CEV_NOPORTS, &FnSetPauseDecodeWhenHidden },
 			};
 			static_assert(CRY_ARRAY_COUNT(kGlobalFunctions) == Api::eCryVS_FunctionCount, "one entry per ECryVSFunction");
 #undef CEV_PORTS
@@ -1228,12 +1228,12 @@ namespace CEVPlayer
 
 					CheckRegistry();
 
-					// VideoUI::PlayToSurface (Loop, Autoplay)
+					// CEVPlayer::UI::PlayToSurface (Loop, Autoplay)
 					CryVS::TVariantVector out = CallGlobal(Api::eCryVS_VideoUI_PlayToSurface, { { 0, CryVS::CVariant(s_video.c_str()) }, { 1, CryVS::CVariant(kSurface) }, { 2, CryVS::CVariant(true) }, { 3, CryVS::CVariant(true) } });
 					s_surfaceHandle = out.size() == 1 ? out[0].AsInt32() : 0;
-					Check(s_surfaceHandle != 0 && ApiAvailable() && mEnv->pApi->IsScriptOwned(s_surfaceHandle), "VideoUI::PlayToSurface returned a script owned handle (%d)", s_surfaceHandle);
+					Check(s_surfaceHandle != 0 && ApiAvailable() && mEnv->pApi->IsScriptOwned(s_surfaceHandle), "CEVPlayer::UI::PlayToSurface returned a script owned handle (%d)", s_surfaceHandle);
 					out = CallGlobal(Api::eCryVS_VideoUI_PlayToSurface, { { 0, CryVS::CVariant(s_video.c_str()) }, { 1, CryVS::CVariant(kSurface) } });
-					Check(out.size() == 1 && out[0].AsInt32() == 0, "VideoUI::PlayToSurface with a SurfaceID in use returns 0");
+					Check(out.size() == 1 && out[0].AsInt32() == 0, "CEVPlayer::UI::PlayToSurface with a SurfaceID in use returns 0");
 					s_step = EStep::WaitSurface;
 					s_waitUntil = Now() + 2.f;
 				}
@@ -1243,7 +1243,7 @@ namespace CEVPlayer
 					const CryVS::TVariantVector out = CallGlobal(Api::eCryVS_VideoUI_SurfaceInfo, { { 0, CryVS::CVariant(kSurface) } });
 					const int h = s_surfaceHandle;
 					const bool sizes = out.size() == 9;
-					Check(sizes, "VideoUI::SurfaceInfo has 9 outputs (%u)", static_cast<uint32>(out.size()));
+					Check(sizes, "CEVPlayer::UI::SurfaceInfo has 9 outputs (%u)", static_cast<uint32>(out.size()));
 					if (!sizes)
 						return;
 					LogAlways("cev_cryvstest: SurfaceInfo Exists=%d TextureId=%d Width=%d Height=%d PixelLayout=%d Premultiplied=%d HasAlpha=%d FrameSerial=%s State=%d",
@@ -1256,19 +1256,19 @@ namespace CEVPlayer
 					Check(out[8].AsInt32() == Q("State", h).i && out[8].AsInt32() == static_cast<int>(EVideoPlayerState::Playing), "SurfaceInfo State = table State = Playing (%d)", out[8].AsInt32());
 
 					CallGlobal(Api::eCryVS_VideoUI_StopSurface, { { 0, CryVS::CVariant(kSurface) } });
-					Check(!HandleAlive(h), "VideoUI::StopSurface destroyed the surface player");
+					Check(!HandleAlive(h), "CEVPlayer::UI::StopSurface destroyed the surface player");
 					const CryVS::TVariantVector after = CallGlobal(Api::eCryVS_VideoUI_SurfaceInfo, { { 0, CryVS::CVariant(kSurface) } });
 					Check(after.size() == 9 && !after[0].AsBool() && after[1].AsInt32() == 0, "SurfaceInfo after StopSurface: Exists false, TextureId 0");
 					s_surfaceHandle = 0;
 
-					// VideoAdvanced::Open (Output Surface) / Play
+					// CEVPlayer::Advanced::Open (Output Surface) / Play
 					const CryVS::TVariantVector open = CallGlobal(Api::eCryVS_VideoAdvanced_Open, { { 0, CryVS::CVariant(s_video.c_str()) }, { 1, CryVS::CVariant(static_cast<int32>(Api::EOutputMode::Surface)) }, { 2, CryVS::CVariant(kOpenSurface) } });
 					s_openHandle = open.size() == 1 ? open[0].AsInt32() : 0;
-					Check(s_openHandle != 0 && mEnv->pApi->IsScriptOwned(s_openHandle), "VideoAdvanced::Open (Output Surface) returned a script owned handle (%d)", s_openHandle);
+					Check(s_openHandle != 0 && mEnv->pApi->IsScriptOwned(s_openHandle), "CEVPlayer::Advanced::Open (Output Surface) returned a script owned handle (%d)", s_openHandle);
 					CallGlobal(Api::eCryVS_VideoAdvanced_SetLoop, { { 0, CryVS::CVariant(static_cast<int32>(s_openHandle)) }, { 1, CryVS::CVariant(true) } });
 					CallGlobal(Api::eCryVS_VideoAdvanced_SetVolume, { { 0, CryVS::CVariant(static_cast<int32>(s_openHandle)) }, { 1, CryVS::CVariant(0.f) } });
 					CallGlobal(Api::eCryVS_VideoAdvanced_Play, { { 0, CryVS::CVariant(static_cast<int32>(s_openHandle)) } });
-					Check(Q("IsLooping", s_openHandle).b && Q("Volume", s_openHandle).f == 0.f, "VideoAdvanced::SetLoop / SetVolume applied");
+					Check(Q("IsLooping", s_openHandle).b && Q("Volume", s_openHandle).f == 0.f, "CEVPlayer::Advanced::SetLoop / SetVolume applied");
 					s_step = EStep::WaitOpen;
 					s_waitUntil = Now() + 1.5f;
 				}
@@ -1278,7 +1278,7 @@ namespace CEVPlayer
 					const int h = s_openHandle;
 					const CryVS::TVariantVector out = CallGlobal(Api::eCryVS_VideoAdvanced_Info, { { 0, CryVS::CVariant(static_cast<int32>(h)) } });
 					const bool sizes = out.size() == 11;
-					Check(sizes, "VideoAdvanced::Info has 11 outputs (%u)", static_cast<uint32>(out.size()));
+					Check(sizes, "CEVPlayer::Advanced::Info has 11 outputs (%u)", static_cast<uint32>(out.size()));
 					if (sizes)
 					{
 						LogAlways("cev_cryvstest: Info State=%d Time=%.3f Duration=%.3f Width=%d Height=%d HasAlpha=%d Language='%s' Variant=%d DecodeBackend=%d FrameSerial=%s SurfaceId=%s",
@@ -1291,9 +1291,9 @@ namespace CEVPlayer
 						Check(atoi(out[9].c_str()) > 0 && stricmp(out[10].c_str(), kOpenSurface) == 0, "Info FrameSerial > 0 and SurfaceId = %s (%s)", kOpenSurface, out[10].c_str());
 					}
 					CallGlobal(Api::eCryVS_VideoAdvanced_Pause, { { 0, CryVS::CVariant(static_cast<int32>(h)) } });
-					Check(Q("State", h).i == static_cast<int>(EVideoPlayerState::Paused), "VideoAdvanced::Pause");
+					Check(Q("State", h).i == static_cast<int>(EVideoPlayerState::Paused), "CEVPlayer::Advanced::Pause");
 					CallGlobal(Api::eCryVS_VideoAdvanced_Close, { { 0, CryVS::CVariant(static_cast<int32>(h)) } });
-					Check(!HandleAlive(h), "VideoAdvanced::Close destroyed the player");
+					Check(!HandleAlive(h), "CEVPlayer::Advanced::Close destroyed the player");
 					const CryVS::TVariantVector closed = CallGlobal(Api::eCryVS_VideoAdvanced_Info, { { 0, CryVS::CVariant(static_cast<int32>(h)) } });
 					Check(closed.size() == 11 && closed[0].AsInt32() == 0 && closed[3].AsInt32() == 0, "Info on the closed handle gives zeros");
 					s_openHandle = 0;
@@ -1346,7 +1346,7 @@ namespace CEVPlayer
 			if (!s_commandRegistered && gEnv->pConsole != nullptr)
 			{
 				REGISTER_COMMAND("cev_cryvstest", SelfTest::Command, VF_NULL, "Self test of the CryVS bindings: checks every registered global function / member function / signal by GUID, "
-					"calls VideoUI::PlayToSurface, SurfaceInfo, StopSurface and VideoAdvanced::Open, Info, Close. cev_cryvstest [path], logs PASS / FAIL");
+					"calls CEVPlayer::UI::PlayToSurface, SurfaceInfo, StopSurface and CEVPlayer::Advanced::Open, Info, Close. cev_cryvstest [path], logs PASS / FAIL");
 				s_commandRegistered = true;
 			}
 		}

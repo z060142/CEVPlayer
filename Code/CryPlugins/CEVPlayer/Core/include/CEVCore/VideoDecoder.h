@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "CEVCore/ColorConvert.h"
 #include "CEVCore/FrameRing.h"
 #include "CEVCore/Status.h"
 #include "CEVCore/WebmDemuxer.h"
@@ -38,6 +39,9 @@ namespace cev
 		// A visible frame came out of the last Decode(). Valid until the next Decode().
 		bool HasFrame() const;
 		Status GetFrameInfo(DecodedImageInfo& info) const;
+		// The last decoded frame as libvpx holds it (planes, strides, size, subsampling; A = the alpha decoder's luma or
+		// null). Valid until the next Decode(). Tests compare ring slots against it.
+		Status GetFrameView(YuvaImage& out) const;
 
 		// Copies the last decoded frame into the slot (planes and A). Slot memory was sized for `format`;
 		// returns InvalidData if the frame does not match it.

@@ -94,6 +94,9 @@ namespace CEVPlayer
 		}
 	}
 
+	double CPlayerManager::ProcessPrivateMb() { return ProcessMemoryMb(true); }
+	double CPlayerManager::ProcessGpuMb() { return ProcessGpuMemoryMb(); }
+
 	void CPlayerManager::SetStatsFile(const char* path)
 	{
 		if (s_statsFile != nullptr)
@@ -114,9 +117,9 @@ namespace CEVPlayer
 		std::fprintf(s_statsFile, "wall_s,player,t,width,height,alpha,decode_avg_ms,decode_p99_ms,copy_avg_ms,copy_p99_ms,color_avg_ms,color_p99_ms,"
 			"convert_avg_ms,convert_p99_ms,upload_avg_ms,upload_p99_ms,uploads_per_s,upload_bytes_per_frame,upload_bytes_per_s,frames_decoded,dropped,ring_avg,"
 			"proc_ws_mb,proc_private_mb,gpu_local_mb,players,"
-			"visibility,decode_only_frames,copy_bytes,color_bytes,catchups,catchup_last_ms,catchup_last_frames,variant,hint_consumers,hint_px_h\n");
+			"visibility,decode_only_frames,copy_bytes,color_bytes,catchups,catchup_last_ms,catchup_last_frames,variant,hint_consumers,hint_px_h,layout,rgba_buffers\n");
 		// baseline row (player 0): memory before / without the measured players
-		std::fprintf(s_statsFile, "0.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,%.1f,%.1f,%.1f,%u,-,0,0,0,0,0,0,0,0,0\n", ProcessMemoryMb(false), ProcessMemoryMb(true),
+		std::fprintf(s_statsFile, "0.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,%.1f,%.1f,%.1f,%u,-,0,0,0,0,0,0,0,0,0,-,0\n", ProcessMemoryMb(false), ProcessMemoryMb(true),
 			ProcessGpuMemoryMb(), GetPlayerCount());
 		std::fflush(s_statsFile);
 		LogAlways("cev_stats_file: writing <%s> (one row per player per second while cev_stats is on)", path);
@@ -604,8 +607,8 @@ namespace CEVPlayer
 		s_layers.clear();
 		for (const CVideoPlayerImpl* p : m_fullscreen)
 		{
-			if (!p->IsLoaded() || p->GetTextureId() <= 0 || p->FullscreenHidden())
-				continue;
+			if (!p->IsLoaded() || p->GetTextureId() <= 0 || p->FullscreenHidden() || p->GetPixelLayout() != EVideoPixelLayout::RGBA8)
+				continue; // a planar texture is never drawn (the player switches to RGBA8 in its next tick)
 			FullscreenOutput::SLayer layer;
 			layer.textureId = p->GetTextureId();
 			layer.textureWidth = p->GetWidth();
@@ -649,7 +652,7 @@ namespace CEVPlayer
 			p->TakeUploadTiming(uploadAvg, uploadP99, uploadSamples);
 			std::snprintf(line, sizeof(line),
 				"[CEV stats] #%u t=%.1f/%.1f decodeMs avg=%.2f p99=%.2f convertMs avg=%.2f p99=%.2f (copy %.2f/%.2f color %.2f/%.2f) uploadMs avg=%.2f p99=%.2f uploads=%llu (+%llu/s) dropped=%llu allocs=%llu ring=%.1f clock=%s avOffsetMs=%.1f"
-				" | %s decodeOnly=%llu copyB=%llu colorB=%llu catchUp=%llu last %.2fms/%uf variant=%d hints=%u px_h=%d",
+				" | %s decodeOnly=%llu copyB=%llu colorB=%llu catchUp=%llu last %.2fms/%uf variant=%d hints=%u px_h=%d layout=%s rgbaBuffers=%u",
 				p->Id(), p->GetTime(), p->GetDuration(), s.decodeMs.avg, s.decodeMs.p99, s.convertMs.avg, s.convertMs.p99,
 				s.copyMs.avg, s.copyMs.p99, s.colorMs.avg, s.colorMs.p99, uploadAvg, uploadP99,
 				static_cast<unsigned long long>(uploads), static_cast<unsigned long long>(perSecond),
@@ -657,11 +660,11 @@ namespace CEVPlayer
 				p->ClockSourceName(), haveAvOffset ? avOffsetMs : 0.0,
 				p->VisibilityName(), static_cast<unsigned long long>(s.framesDecodeOnly), static_cast<unsigned long long>(s.copyBytes),
 				static_cast<unsigned long long>(s.colorBytes), static_cast<unsigned long long>(s.catchUps), static_cast<double>(s.lastCatchUpMs),
-				s.lastCatchUpFrames, p->GetVariant(), p->HintConsumers(), p->HintPixelHeight());
+				s.lastCatchUpFrames, p->GetVariant(), p->HintConsumers(), p->HintPixelHeight(), p->LayoutName(), p->Core().RgbaBufferCount());
 			if (s_statsFile != nullptr)
 			{
 				const uint64_t bytes = p->LastUploadBytes();
-				std::fprintf(s_statsFile, "%.2f,%u,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%.2f,%.1f,%.1f,%.1f,%u,%s,%llu,%llu,%llu,%llu,%.3f,%u,%d,%u,%d\n",
+				std::fprintf(s_statsFile, "%.2f,%u,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%.2f,%.1f,%.1f,%.1f,%u,%s,%llu,%llu,%llu,%llu,%.3f,%u,%d,%u,%d,%s,%u\n",
 					now - s_statsFileStart, p->Id(), p->GetTime(), p->GetWidth(), p->GetHeight(), p->HasAlpha() ? 1 : 0,
 					s.decodeMs.avg, s.decodeMs.p99, s.copyMs.avg, s.copyMs.p99, s.colorMs.avg, s.colorMs.p99, s.convertMs.avg, s.convertMs.p99,
 					uploadAvg, uploadP99, static_cast<unsigned long long>(perSecond), static_cast<unsigned long long>(bytes),
@@ -670,7 +673,7 @@ namespace CEVPlayer
 					ProcessMemoryMb(false), ProcessMemoryMb(true), ProcessGpuMemoryMb(), GetPlayerCount(),
 					p->VisibilityName(), static_cast<unsigned long long>(s.framesDecodeOnly), static_cast<unsigned long long>(s.copyBytes),
 					static_cast<unsigned long long>(s.colorBytes), static_cast<unsigned long long>(s.catchUps), static_cast<double>(s.lastCatchUpMs),
-					s.lastCatchUpFrames, p->GetVariant(), p->HintConsumers(), p->HintPixelHeight());
+					s.lastCatchUpFrames, p->GetVariant(), p->HintConsumers(), p->HintPixelHeight(), p->LayoutName(), p->Core().RgbaBufferCount());
 				std::fflush(s_statsFile);
 			}
 			s_statsLines.push_back(line);

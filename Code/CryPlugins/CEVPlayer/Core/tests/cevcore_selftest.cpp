@@ -1,7 +1,9 @@
 // CEVPlayerCore selftest. Plain executable (no engine, no test framework).
 //
-//   cevcore_selftest [--media <dir>] [--only <substring>] [--stress <iterations>] [--verbose]
+//   cevcore_selftest [--media <dir>] [--only <substring>] [--stress <iterations>] [--bench <dir>] [--verbose]
 //
+// --bench <dir>: the six measurement clips of tools/probes/make_bench_media.sh (vp9_{1080p30,1080p60,2160p30}[_alpha]),
+// used by the M8 reference sampler check on real content.
 // The media directory holds the clips produced by tools/make_test_media.sh. Playback is simulated with a manual
 // clock that advances 1/60 s per step, as fast as the decoder delivers frames (faster than real time).
 // Global operator new / delete are replaced to count allocations: after warm-up, steady state playback must
@@ -34,7 +36,10 @@
 #include "CEVCore/PlayerCore.h"
 #include "CEVCore/Resampler.h"
 #include "CEVCore/Stats.h"
+#include "CEVCore/VideoDecoder.h"
 #include "CEVCore/WebmDemuxer.h"
+
+#include "ReferenceSampler.h"
 
 #if defined(_WIN32)
 	#include <malloc.h>
@@ -3655,12 +3660,434 @@ namespace
 		}
 	}
 
+	// =================================================================================================================
+	// M8: packed ring layout, RGBA on demand, chroma siting, reference sampler
+	// =================================================================================================================
+	const char* const kM8Clips[] = {"vp9_444.webm", "vp9_320x181.webm", "vp9_siting_left.webm"};
+
+	bool ClipExists(const char* file)
+	{
+		FILE* f = std::fopen((g_mediaDir + "/" + file).c_str(), "rb");
+		if (f == nullptr)
+			return false;
+		std::fclose(f);
+		return true;
+	}
+
+	void TestPackedRingLayout()
+	{
+		g_context = "packed ring";
+		{
+			FrameFormat f;
+			f.width = 64; f.height = 48; f.withRgba = false;
+			FrameRing ring;
+			CHECK(Succeeded(ring.Init(f, 3)));
+			CHECK(ring.IsPacked());
+			CHECK(ring.PackedWidth() == 64 && ring.PackedHeight() == 72);
+			const PlaneRect y = ring.PackedPlane(0), u = ring.PackedPlane(1), v = ring.PackedPlane(2), a = ring.PackedPlane(3);
+			CHECK(y.x == 0 && y.y == 0 && y.w == 64 && y.h == 48);
+			CHECK(u.x == 0 && u.y == 48 && u.w == 32 && u.h == 24);
+			CHECK(v.x == 32 && v.y == 48 && v.w == 32 && v.h == 24);
+			CHECK(a.w == 0 && a.h == 0);
+			const FrameRing::Slot& s = ring.GetSlot(0);
+			CHECK(s.packed != nullptr && s.plane[0] == s.packed && s.plane[1] == s.packed + 48 * 64 && s.plane[2] == s.packed + 48 * 64 + 32);
+			CHECK(s.stride[0] == 64 && s.stride[1] == 64 && s.stride[2] == 64 && s.plane[3] == nullptr);
+			CHECK(s.rgba == nullptr && !s.rgbaValid && ring.RgbaBufferCount() == 0);
+			// neutral content: Y 16, U / V 128
+			CHECK(s.packed[0] == 16 && s.packed[48 * 64 - 1] == 16 && s.packed[48 * 64] == 128 && s.packed[72 * 64 - 1] == 128);
+
+			// RGBA on demand: only for owned slots; Free slots can be released by anybody
+			uint64_t epoch = 0;
+			const int w = ring.AcquireWrite(epoch);
+			CHECK(w >= 0);
+			CHECK(ring.EnsureRgba(static_cast<uint32_t>(w)));
+			CHECK(ring.GetSlot(static_cast<uint32_t>(w)).rgba != nullptr && ring.GetSlot(static_cast<uint32_t>(w)).rgbaStride == 64 * 4);
+			CHECK(ring.RgbaBufferCount() == 1);
+			CHECK(ring.EnsureRgba(static_cast<uint32_t>(w))); // already there: no second buffer
+			CHECK(ring.RgbaBufferCount() == 1);
+			ring.ReleaseFreeRgba();                          // the slot is Writing: untouched
+			CHECK(ring.RgbaBufferCount() == 1);
+			ring.Abandon(w);
+			ring.ReleaseFreeRgba();                          // now Free: freed
+			CHECK(ring.RgbaBufferCount() == 0 && ring.GetSlot(static_cast<uint32_t>(w)).rgba == nullptr);
+		}
+		{
+			// odd height with alpha: ch = 24, packed height 47 + 24 + 47
+			FrameFormat f;
+			f.width = 64; f.height = 47; f.hasAlpha = true; f.withRgba = true;
+			FrameRing ring;
+			CHECK(Succeeded(ring.Init(f, 3)));
+			CHECK(ring.IsPacked() && ring.PackedHeight() == 118);
+			const PlaneRect u = ring.PackedPlane(1), v = ring.PackedPlane(2), a = ring.PackedPlane(3);
+			CHECK(u.y == 47 && u.h == 24 && v.x == 32 && v.y == 47);
+			CHECK(a.x == 0 && a.y == 71 && a.w == 64 && a.h == 47);
+			const FrameRing::Slot& s = ring.GetSlot(1);
+			CHECK(s.plane[3] == s.packed + 71 * 64 && s.stride[3] == 64 && s.plane[3][0] == 255);
+			CHECK(s.rgba != nullptr && ring.RgbaBufferCount() == 3); // withRgba: allocated at Init
+		}
+		// not packable: odd width, 4:4:4, 4:2:2, 4:4:0
+		const int shapes[4][3] = {{63, 1, 1}, {64, 0, 0}, {64, 1, 0}, {64, 0, 1}};
+		for (const auto& sh : shapes)
+		{
+			FrameFormat f;
+			f.width = sh[0]; f.height = 48; f.chromaShiftX = sh[1]; f.chromaShiftY = sh[2];
+			FrameRing ring;
+			CHECK(Succeeded(ring.Init(f, 3)));
+			CHECKF(!ring.IsPacked() && ring.GetSlot(0).packed == nullptr && ring.PackedWidth() == 0, "%dx48 shift %d,%d", sh[0], sh[1], sh[2]);
+			CHECK(ring.GetSlot(0).plane[1] != nullptr && ring.GetSlot(0).rgba != nullptr);
+		}
+		Log("  %-34s ok\n", g_context.c_str());
+	}
+
+	//! WriteFrame into a slot must reproduce the decoder's planes byte for byte (packed or not).
+	void TestPackedWriteFrame(const char* file, bool expectPacked)
+	{
+		g_context = std::string("packed write ") + file;
+		std::unique_ptr<WebmDemuxer> d;
+		CHECK(Succeeded(WebmDemuxer::Open(OpenSource(g_mediaDir + "/" + file, true), d)));
+		if (!d)
+			return;
+		std::unique_ptr<VideoDecoder> dec;
+		CHECK(Succeeded(VideoDecoder::Create(d->Video(), 2, dec)));
+		if (!dec)
+			return;
+		std::vector<uint8_t> pkt(d->Video().maxPacketSize + 16), add(d->Video().maxAdditionalSize + 16);
+		FrameRing ring;
+		FrameFormat fmt;
+		int frames = 0;
+		bool same = true;
+		for (uint32_t i = 0; i < d->VideoPacketCount() && frames < 12; ++i)
+		{
+			const PacketRef& ref = d->VideoPacket(i);
+			CHECK(Succeeded(d->ReadVideoPacket(i, pkt.data(), static_cast<uint32_t>(pkt.size()))));
+			uint32_t addSize = 0;
+			if (ref.additionalSize > 0 && Succeeded(d->ReadVideoAdditional(i, add.data(), static_cast<uint32_t>(add.size()))))
+				addSize = ref.additionalSize;
+			if (Failed(dec->Decode(pkt.data(), ref.size, addSize ? add.data() : nullptr, addSize)) || !dec->HasFrame())
+				continue;
+			YuvaImage img;
+			CHECK(Succeeded(dec->GetFrameView(img)));
+			if (!ring.IsInitialized())
+			{
+				fmt.width = img.width; fmt.height = img.height;
+				fmt.chromaShiftX = img.chromaShiftX; fmt.chromaShiftY = img.chromaShiftY;
+				fmt.hasAlpha = d->Video().hasAlpha; fmt.withRgba = false;
+				CHECK(Succeeded(ring.Init(fmt, 3)));
+				CHECKF(ring.IsPacked() == expectPacked, "packed %d expected %d", ring.IsPacked() ? 1 : 0, expectPacked ? 1 : 0);
+			}
+			FrameRing::Slot& s = ring.GetSlot(static_cast<uint32_t>(frames % 3));
+			CHECK(Succeeded(dec->WriteFrame(fmt, s)));
+			const int cw = fmt.ChromaWidth(), ch = fmt.ChromaHeight();
+			const int rows[4] = {fmt.height, ch, ch, fmt.height};
+			const int cols[4] = {fmt.width, cw, cw, fmt.width};
+			for (int p = 0; p < (fmt.hasAlpha ? 4 : 3); ++p)
+			{
+				if (img.plane[p] == nullptr || s.plane[p] == nullptr)
+				{
+					same = same && p == 3 && img.plane[3] == nullptr; // alpha missing in this frame: opaque
+					continue;
+				}
+				for (int r = 0; r < rows[p]; ++r)
+					same = same && std::memcmp(s.plane[p] + static_cast<ptrdiff_t>(r) * s.stride[p], img.plane[p] + static_cast<ptrdiff_t>(r) * img.stride[p], static_cast<size_t>(cols[p])) == 0;
+			}
+			if (ring.IsPacked())
+			{
+				const PlaneRect u = ring.PackedPlane(1), v = ring.PackedPlane(2), a = ring.PackedPlane(3);
+				CHECK(s.plane[0] == s.packed && s.plane[1] == s.packed + static_cast<ptrdiff_t>(u.y) * fmt.width + u.x &&
+					s.plane[2] == s.packed + static_cast<ptrdiff_t>(v.y) * fmt.width + v.x);
+				CHECK(!fmt.hasAlpha || s.plane[3] == s.packed + static_cast<ptrdiff_t>(a.y) * fmt.width);
+			}
+			++frames;
+		}
+		CHECK(frames >= 10);
+		CHECK(same);
+		Log("  %-34s %s: %d frames, %s, planes identical to libvpx: %s\n", g_context.c_str(), same ? "ok" : "FAILED", frames,
+			ring.IsPacked() ? "packed" : "separate planes", same ? "yes" : "NO");
+	}
+
+	void TestChromaSiting()
+	{
+		g_context = "chroma siting";
+		CHECK(ResolveChromaSiting(1, 2) == ChromaSiting::Left);
+		CHECK(ResolveChromaSiting(2, 2) == ChromaSiting::Center);
+		CHECK(ResolveChromaSiting(1, 1) == ChromaSiting::TopLeft);
+		CHECK(ResolveChromaSiting(-1, -1) == ChromaSiting::Left);
+		CHECK(ResolveChromaSiting(0, 0) == ChromaSiting::Left);
+		CHECK(ResolveChromaSiting(2, 1) == ChromaSiting::Left); // not expressible in the contract
+		CHECK(ResolveChromaSiting(1, -1) == ChromaSiting::Left);
+
+		// not tagged
+		std::unique_ptr<WebmDemuxer> d;
+		CHECK(Succeeded(WebmDemuxer::Open(OpenSource(g_mediaDir + "/vp9_alpha.webm", true), d)));
+		if (d)
+			CHECK(d->Video().chromaSitingHorz == -1 && d->Video().chromaSitingVert == -1);
+
+		// tagged left (1, 2), and the same file with the tag bytes changed to (2, 2) and (1, 1)
+		std::vector<uint8_t> bytes;
+		CHECK(ReadClipBytes("vp9_siting_left.webm", bytes));
+		size_t horz = 0, vert = 0;
+		for (size_t i = 0; i + 3 < bytes.size() && (horz == 0 || vert == 0); ++i)
+		{
+			if (bytes[i] == 0x55 && bytes[i + 1] == 0xB7 && bytes[i + 2] == 0x81)
+				horz = i + 3;
+			if (bytes[i] == 0x55 && bytes[i + 1] == 0xB8 && bytes[i + 2] == 0x81)
+				vert = i + 3;
+		}
+		CHECK(horz != 0 && vert != 0);
+		if (horz == 0 || vert == 0)
+			return;
+		const uint8_t cases[3][2] = {{1, 2}, {2, 2}, {1, 1}};
+		const ChromaSiting expect[3] = {ChromaSiting::Left, ChromaSiting::Center, ChromaSiting::TopLeft};
+		for (int c = 0; c < 3; ++c)
+		{
+			std::vector<uint8_t> copy = bytes;
+			if (c == 0)
+				CHECK(copy[horz] == 1 && copy[vert] == 2); // as ffmpeg wrote it
+			copy[horz] = cases[c][0];
+			copy[vert] = cases[c][1];
+			std::unique_ptr<WebmDemuxer> dm;
+			std::vector<uint8_t> forDemux = copy;
+			CHECK(Succeeded(WebmDemuxer::Open(std::make_unique<MemoryByteSource>(std::move(forDemux)), dm)));
+			if (dm)
+				CHECKF(dm->Video().chromaSitingHorz == cases[c][0] && dm->Video().chromaSitingVert == cases[c][1], "case %d: %d %d", c,
+					dm->Video().chromaSitingHorz, dm->Video().chromaSitingVert);
+			ManualClock clk;
+			PlayerCore p(MakeConfig(clk));
+			CHECK(Succeeded(p.Load(std::make_unique<MemoryByteSource>(std::move(copy)))));
+			CHECK(WaitFor([&] { return p.GetLoadState() != LoadState::Loading; }, 10000));
+			CHECKF(p.GetLoadState() == LoadState::Ready && p.GetInfo().chromaSiting == expect[c], "case %d: siting %d", c, static_cast<int>(p.GetInfo().chromaSiting));
+		}
+		ManualClock clk;
+		PlayerCore p(MakeConfig(clk));
+		if (LoadAndWait(p, g_mediaDir + "/vp9_alpha.webm", true))
+			CHECK(p.GetInfo().chromaSiting == ChromaSiting::Left); // not tagged -> Left
+		Log("  %-34s ok\n", g_context.c_str());
+	}
+
+	cevref::Packed RefFromView(const FrameView& f, const MediaInfo& info)
+	{
+		cevref::Packed r;
+		r.data = f.packed;
+		r.packedWidth = f.packedWidth;
+		r.packedHeight = f.packedHeight;
+		r.width = f.width;
+		r.height = f.height;
+		r.y = {f.rectY.x, f.rectY.y, f.rectY.w, f.rectY.h};
+		r.u = {f.rectU.x, f.rectU.y, f.rectU.w, f.rectU.h};
+		r.v = {f.rectV.x, f.rectV.y, f.rectV.w, f.rectV.h};
+		r.a = {f.rectA.x, f.rectA.y, f.rectA.w, f.rectA.h};
+		r.bt709 = info.colorStandard == ColorStandard::BT709;
+		r.full = info.colorRange == ColorRange::Full;
+		r.siting = static_cast<cevref::Siting>(info.chromaSiting);
+		return r;
+	}
+
+	struct RgbaWatch
+	{
+		const MediaInfo* info = nullptr;
+		uint64_t withRgba = 0, withoutRgba = 0, checked = 0, mismatched = 0;
+		bool compare = false;          // run the nearest reference on every 10th frame with RGBA
+		std::vector<uint8_t> scratch;  // reserved before the allocation window
+	};
+
+	void WatchFrame(const FrameView& f, uint64_t index, void* user)
+	{
+		RgbaWatch& w = *static_cast<RgbaWatch*>(user);
+		if (f.rgba == nullptr)
+		{
+			++w.withoutRgba;
+			return;
+		}
+		++w.withRgba;
+		if (w.compare && f.packed != nullptr && index % 10 == 0 && w.scratch.size() >= static_cast<size_t>(f.width) * f.height * 4)
+		{
+			cevref::SampleNearest(RefFromView(f, *w.info), w.scratch.data(), f.width * 4);
+			++w.checked;
+			for (int y = 0; y < f.height; ++y)
+				if (std::memcmp(w.scratch.data() + static_cast<size_t>(y) * f.width * 4, f.rgba + static_cast<ptrdiff_t>(y) * f.rgbaStride, static_cast<size_t>(f.width) * 4) != 0)
+				{
+					++w.mismatched;
+					break;
+				}
+		}
+	}
+
+	bool NearestMatches(const FrameView& f, const MediaInfo& info)
+	{
+		if (f.rgba == nullptr || f.packed == nullptr)
+			return false;
+		std::vector<uint8_t> ref(static_cast<size_t>(f.width) * f.height * 4);
+		cevref::SampleNearest(RefFromView(f, info), ref.data(), f.width * 4);
+		for (int y = 0; y < f.height; ++y)
+			if (std::memcmp(ref.data() + static_cast<size_t>(y) * f.width * 4, f.rgba + static_cast<ptrdiff_t>(y) * f.rgbaStride, static_cast<size_t>(f.width) * 4) != 0)
+				return false;
+		return true;
+	}
+
+	//! RGBA switched off and on while playing: frame boundaries, the held frame converted at once, no allocation on the
+	//! steady path, no drop, clock untouched.
+	void TestRgbaSwitch(const Clip& clip)
+	{
+		g_context = std::string("rgba switch ") + clip.file;
+		ManualClock clk;
+		PlayerConfig cfg = MakeConfig(clk);
+		cfg.outputRgba = false;
+		PlayerCore p(cfg);
+		if (!LoadAndWait(p, ClipPath(clip), true))
+			return;
+		const MediaInfo& info = p.GetInfo();
+		CHECK(info.packedLayout);
+		CHECK(!p.GetOutputRgba());
+		CHECK(Succeeded(p.SetLoop(true))); // the test runs longer than the clip
+		CHECK(p.RgbaBufferCount() == 0);
+		RgbaWatch watch;
+		watch.info = &info;
+		watch.scratch.assign(static_cast<size_t>(clip.width) * clip.height * 4, 0);
+		Sim sim;
+		sim.Init(p, clk);
+		sim.onFrame = &WatchFrame;
+		sim.onFrameUser = &watch;
+		CHECK(p.Update());
+		sim.presented = 1;
+		FrameView fv;
+		CHECK(p.GetFrame(fv));
+		const int ch = (clip.height + 1) / 2;
+		CHECK(fv.rgba == nullptr && fv.packed != nullptr && fv.packedWidth == clip.width && fv.packedHeight == clip.height + ch + (clip.alpha ? clip.height : 0));
+		CHECK(fv.rectY.w == clip.width && fv.rectU.y == clip.height && fv.rectV.x == clip.width / 2 && (fv.rectA.w > 0) == clip.alpha);
+		CHECK(fv.plane[0] == fv.packed);
+		CHECK(Succeeded(p.Play()));
+		CHECK(sim.RunUntilPresented(20));
+		CHECK(watch.withRgba == 0 && watch.withoutRgba >= 19);
+		CHECK(p.GetStats().colorBytes == 0);
+
+		// on: the held frame has RGBA at once and matches the reference
+		CHECK(Succeeded(p.SetOutputRgba(true)));
+		CHECK(p.GetOutputRgba());
+		CHECK(p.GetFrame(fv) && fv.rgba != nullptr);
+		CHECK(NearestMatches(fv, info));
+		const uint64_t noRgbaBefore = watch.withoutRgba;
+		CHECK(sim.RunUntilPresented(sim.presented + 10)); // warm-up: queued frames, buffers of the other slots
+		CHECKF(watch.withoutRgba - noRgbaBefore <= 4, "%llu frames without RGBA after switching on", (unsigned long long)(watch.withoutRgba - noRgbaBefore));
+		watch.compare = true;
+		watch.withoutRgba = 0;
+		uint64_t n0 = g_newCount.load(), d0 = g_deleteCount.load();
+		const uint64_t alloc0 = p.GetStats().allocs;
+		CHECK(sim.RunUntilPresented(sim.presented + 60));
+		CHECKF(g_newCount.load() == n0 && g_deleteCount.load() == d0, "%llu allocations / %llu frees after switching on",
+			(unsigned long long)(g_newCount.load() - n0), (unsigned long long)(g_deleteCount.load() - d0));
+		CHECK(p.GetStats().allocs == alloc0);
+		CHECK(watch.withoutRgba == 0 && watch.checked >= 5 && watch.mismatched == 0);
+		CHECK(p.RgbaBufferCount() >= 2);
+
+		// off: no RGBA from the current frame on, buffers freed
+		watch.compare = false;
+		CHECK(Succeeded(p.SetOutputRgba(false)));
+		CHECK(p.GetFrame(fv) && fv.rgba == nullptr);
+		const uint64_t color0 = p.GetStats().colorBytes;
+		CHECK(sim.RunUntilPresented(sim.presented + 10));
+		CHECK(p.RgbaBufferCount() == 0);
+		watch.withRgba = 0;
+		n0 = g_newCount.load(); d0 = g_deleteCount.load();
+		CHECK(sim.RunUntilPresented(sim.presented + 60));
+		CHECKF(g_newCount.load() == n0 && g_deleteCount.load() == d0, "%llu allocations / %llu frees after switching off",
+			(unsigned long long)(g_newCount.load() - n0), (unsigned long long)(g_deleteCount.load() - d0));
+		CHECK(watch.withRgba == 0);
+		CHECKF(p.GetStats().colorBytes <= color0 + 4ull * clip.width * clip.height * 4, "colour conversion continued after off");
+
+		const StatsSnapshot st = p.GetStats();
+		CHECK(!sim.timedOut);
+		CHECKF(st.framesDropped == 0, "dropped %llu", (unsigned long long)st.framesDropped);
+		CHECKF(std::fabs(p.GetTime() - std::min(clk.NowSeconds(), info.durationSeconds)) < 1e-9, "the clock was touched");
+		Log("  %-34s ok: %llu frames, switches on/off at frame boundaries, 0 allocations on the steady path\n", g_context.c_str(),
+			(unsigned long long)sim.presented);
+	}
+
+	//! A stream that cannot be packed keeps RGBA8 whatever is requested.
+	void TestRgbaForcedOn(const char* file)
+	{
+		g_context = std::string("rgba forced ") + file;
+		ManualClock clk;
+		PlayerConfig cfg = MakeConfig(clk);
+		cfg.outputRgba = false;
+		PlayerCore p(cfg);
+		if (!LoadAndWait(p, g_mediaDir + "/" + file, true))
+			return;
+		CHECK(!p.GetInfo().packedLayout);
+		CHECK(p.GetOutputRgba());
+		CHECK(p.SetOutputRgba(false) == Status::Unsupported);
+		CHECK(p.GetOutputRgba());
+		CHECK(p.Update());
+		FrameView fv;
+		CHECK(p.GetFrame(fv) && fv.rgba != nullptr && fv.packed == nullptr && fv.packedWidth == 0);
+		Log("  %-34s ok\n", g_context.c_str());
+	}
+
+	//! The nearest reference sampler applied to the packed buffer reproduces ConvertSlot byte for byte; the bilinear
+	//! (consumer) variant is reported.
+	void TestReferenceSampler(const std::string& path, int samples)
+	{
+		const size_t slash = path.find_last_of("/\\");
+		g_context = std::string("reference ") + (slash == std::string::npos ? path : path.substr(slash + 1));
+		ManualClock clk;
+		PlayerCore p(MakeConfig(clk));
+		if (!LoadAndWait(p, path, true))
+			return;
+		const MediaInfo& info = p.GetInfo();
+		CHECK(info.packedLayout);
+		if (!info.packedLayout)
+			return;
+		Sim sim;
+		sim.Init(p, clk);
+		CHECK(p.Update());
+		sim.presented = 1;
+		CHECK(Succeeded(p.Play()));
+		const uint64_t stride = std::max<uint64_t>(1, info.videoPacketCount / static_cast<uint32_t>(samples + 1));
+		std::vector<uint8_t> nearest(static_cast<size_t>(info.width) * info.height * 4), bilinear(nearest.size());
+		int compared = 0, exact = 0, maxDiff = 0;
+		double sumDiff = 0.0;
+		uint64_t diffCount = 0;
+		for (int k = 0; k < samples; ++k)
+		{
+			const uint64_t target = 1 + static_cast<uint64_t>(k) * stride;
+			if (target > sim.presented && !sim.RunUntilPresented(target))
+				break;
+			FrameView fv;
+			if (!p.GetFrame(fv) || fv.rgba == nullptr || fv.packed == nullptr)
+				continue;
+			const cevref::Packed ref = RefFromView(fv, info);
+			cevref::SampleNearest(ref, nearest.data(), info.width * 4);
+			cevref::SampleBilinear(ref, bilinear.data(), info.width * 4);
+			bool same = true;
+			for (int y = 0; y < info.height; ++y)
+			{
+				const uint8_t* got = fv.rgba + static_cast<ptrdiff_t>(y) * fv.rgbaStride;
+				same = same && std::memcmp(nearest.data() + static_cast<size_t>(y) * info.width * 4, got, static_cast<size_t>(info.width) * 4) == 0;
+				for (int x = 0; x < info.width * 4; ++x)
+				{
+					const int dd = std::abs(static_cast<int>(bilinear[static_cast<size_t>(y) * info.width * 4 + x]) - static_cast<int>(got[x]));
+					maxDiff = std::max(maxDiff, dd);
+					sumDiff += dd;
+				}
+				diffCount += static_cast<uint64_t>(info.width) * 4;
+			}
+			++compared;
+			exact += same ? 1 : 0;
+		}
+		CHECK(compared == samples);
+		CHECKF(exact == compared, "nearest reference differs from the converter in %d of %d frames", compared - exact, compared);
+		Log("  %-34s %s: %dx%d%s %s %s siting %d, %d frames, nearest == converter in %d/%d, bilinear vs converter max %d mean %.3f\n",
+			g_context.c_str(), exact == compared ? "ok" : "FAILED", info.width, info.height, info.hasAlpha ? " alpha" : "",
+			info.colorStandard == ColorStandard::BT709 ? "BT709" : "BT601", info.colorRange == ColorRange::Full ? "full" : "limited",
+			static_cast<int>(info.chromaSiting), compared, exact, compared, maxDiff, diffCount ? sumDiff / static_cast<double>(diffCount) : 0.0);
+	}
+
 int main(int argc, char** argv)
 {
 #if defined(CEV_DEFAULT_MEDIA_DIR)
 	g_mediaDir = CEV_DEFAULT_MEDIA_DIR;
 #endif
 	const char* only = nullptr;
+	std::string benchDir; // M8: directory of the six measurement clips (reference sampler on real content)
 	int stressIterations = 20;
 	for (int i = 1; i < argc; ++i)
 	{
@@ -3670,11 +4097,13 @@ int main(int argc, char** argv)
 			only = argv[++i];
 		else if (std::strcmp(argv[i], "--stress") == 0 && i + 1 < argc)
 			stressIterations = std::atoi(argv[++i]);
+		else if (std::strcmp(argv[i], "--bench") == 0 && i + 1 < argc)
+			benchDir = argv[++i];
 		else if (std::strcmp(argv[i], "--verbose") == 0)
 			g_verbose = true;
 		else
 		{
-			std::printf("usage: cevcore_selftest [--media <dir>] [--only <substring>] [--stress <n>] [--verbose]\n");
+			std::printf("usage: cevcore_selftest [--media <dir>] [--only <substring>] [--stress <n>] [--bench <dir>] [--verbose]\n");
 			return 2;
 		}
 	}
@@ -3765,6 +4194,32 @@ int main(int argc, char** argv)
 	{
 		TestHiddenCatchUp(*FindClip("vp8_vorbis.webm"), 50); // -g 50: a keyframe every 2 s
 		TestHiddenEnd(*FindClip("vp9_odd_321x181.webm"));
+	}
+	if (wanted("packed"))
+	{
+		for (const char* f : kM8Clips)
+		{
+			g_context = f;
+			CHECKF(ClipExists(f), "missing clip %s/%s (tools/make_test_media.sh)", g_mediaDir.c_str(), f);
+		}
+		TestPackedRingLayout();
+		TestPackedWriteFrame("vp9_alpha.webm", true);
+		TestPackedWriteFrame("vp9_1080p30_opus.webm", true);
+		TestPackedWriteFrame("vp8_vorbis.webm", true);
+		TestPackedWriteFrame("vp9_320x181.webm", true);
+		TestPackedWriteFrame("vp9_odd_321x181.webm", false);
+		TestPackedWriteFrame("vp9_444.webm", false);
+		TestChromaSiting();
+		TestRgbaSwitch(*FindClip("vp9_alpha.webm"));
+		TestRgbaSwitch(*FindClip("vp8_vorbis.webm"));
+		TestRgbaForcedOn("vp9_odd_321x181.webm");
+		TestRgbaForcedOn("vp9_444.webm");
+		TestReferenceSampler(g_mediaDir + "/vp9_alpha.webm", 5);
+		TestReferenceSampler(g_mediaDir + "/vp9_320x181.webm", 5);
+		TestReferenceSampler(g_mediaDir + "/vp8_vorbis.webm", 5);
+		if (!benchDir.empty())
+			for (const char* f : { "vp9_1080p30.webm", "vp9_1080p30_alpha.webm", "vp9_1080p60.webm", "vp9_1080p60_alpha.webm", "vp9_2160p30.webm", "vp9_2160p30_alpha.webm" })
+				TestReferenceSampler(benchDir + "/" + f, 4);
 	}
 	if (wanted("stress"))
 		TestStress(stressIterations);

@@ -131,17 +131,18 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 
   | 抽屜 | 節點 | 合併了什麼 |
   |---|---|---|
-  | 開箱即用 `Video` | `Video:PlayOnScreen`——Video、Fit、Loop、Skippable、Decode；Play／Stop → Started、Ended、Skipped、Error | Create＋Load＋SetOutput(Screen)＋Play＋SetLoop＋SetSkippable＋Destroy |
-  | | `Video:PlayOnMaterial`——Video、Material（空＝實體自己的）、Slot、SubMaterial、Loop、Autoplay、Decode；Play／Stop → Started、Ended、Error | 同上，SetOutput(Material) |
-  | 連通 UI `VideoUI` | `VideoUI:PlayToSurface`——Video、SurfaceID、Loop、Autoplay、Decode；Play／Stop → Ready（帶 TextureId、Width、Height、Duration、HasAlpha）、Ended、Error | Create＋Load＋Play＋Destroy，輸出是具名 surface |
-  | | `VideoUI:SurfaceInfo`——SurfaceID → Exists、TextureId、Width、Height、PixelLayout、Premultiplied、HasAlpha、FrameSerial、State | TextureId、TextureName、IsPremultiplied 三個查詢移到這裡（給不經契約的 UI 系統用） |
-  | | `VideoUI:SurfaceEvents`——SurfaceID → Ready、NewFrame、Resized、Closed | 以 ID 訂閱，不必持有 Handle |
-  | 進階 `VideoAdvanced` | `Open`——Video、Output（Surface／Screen／Material）與其參數、Decode；Open／Close → Handle、Ready、Error | Create、Load、SetOutput、Destroy |
+  | 主抽屜 `CEVPlayer`（開箱即用） | `CEVPlayer:PlayOnScreen`——Video、Fit、Loop、Skippable、Decode；Play／Stop → Started、Ended、Skipped、Error | Create＋Load＋SetOutput(Screen)＋Play＋SetLoop＋SetSkippable＋Destroy |
+  | | `CEVPlayer:PlayOnMaterial`——Video、Material（空＝實體自己的）、Slot、SubMaterial、Loop、Autoplay、Decode；Play／Stop → Started、Ended、Error | 同上，SetOutput(Material) |
+  | 子抽屜 `CEVPlayer:UI`（連通 UI） | `CEVPlayer:UI:PlayToSurface`——Video、SurfaceID、Loop、Autoplay、Decode；Play／Stop → Ready（帶 TextureId、Width、Height、Duration、HasAlpha）、Ended、Error | Create＋Load＋Play＋Destroy，輸出是具名 surface |
+  | | `CEVPlayer:UI:SurfaceInfo`——SurfaceID → Exists、TextureId、Width、Height、PixelLayout、Premultiplied、HasAlpha、FrameSerial、State | TextureId、TextureName、IsPremultiplied 三個查詢移到這裡（給不經契約的 UI 系統用） |
+  | | `CEVPlayer:UI:SurfaceEvents`——SurfaceID → Ready、NewFrame、Resized、Closed | 以 ID 訂閱，不必持有 Handle |
+  | 子抽屜 `CEVPlayer:Advanced`（進階） | `Open`——Video、Output（Surface／Screen／Material）與其參數、Decode；Open／Close → Handle、Ready、Error | Create、Load、SetOutput、Destroy |
   | | `Transport`——Handle；Play、Pause、Stop、Seek（＋Seconds） | Play、Pause、Resume、Stop、Seek（Play 兼作繼續） |
   | | `Settings`——Handle；Loop、Rate、Volume、Language、Variant、Skippable（哪個埠被觸發就套用哪一項） | SetLoop、SetRate、SetVolume、SetLanguage、SetVariant、SetSkippable |
   | | `Info`——Handle；Get（或每幀）→ State、Time、Duration、Width、Height、HasAlpha、Language、Variant、DecodeBackend、FrameSerial、SurfaceId | State、Time、Duration、Width、Height、HasAlpha、Language、Variant |
   | | `Events`——Handle → Ready、Started、NewFrame、Marker、Looped、Ended、Skipped、Error | 不變 |
 
+- 抽屜的位置：主抽屜 `CEVPlayer` 直接放兩個開箱即用節點，`UI` 與 `Advanced` 是它之下的子抽屜（使用者 2026-11-19：「把 basic 獨立抽屜取消放在主抽屜，Advanced 跟 UI 的抽屜保留放在主抽屜內，主抽屜改名 CEVPlayer」）。CryVS 的全域函式命名空間對應為 `CEVPlayer`、`CEVPlayer::UI`、`CEVPlayer::Advanced`（目錄路徑 `Function::CEVPlayer::…`）。
 - 取消：`TextureName`（名詞消失）、`InterfaceVersion` 與 `Caps`（開發者資訊，改由主控台 `cev_info` 顯示）。事件與查詢的幀序號改以字串輸出，不再 2^31 回繞。
 - 描述表仍是單一事實來源：腳本綁定（Schematyc 函式、CryVS）維持一項一個函式——程式裡細粒度是正常的；合併只發生在 FlowGraph 節點這一層（複合節點由手寫的描述組合表內的函式）。Schematyc 元件 `Video Player` 的屬性對應同一組名詞（Output、SurfaceID、Decode、Loop、Autoplay、Skippable）。
 - **CryVS（社群版引擎的視覺腳本）也要有同一組節點**（使用者 2026-11-19：「CryVS 的節點要加」）。現況：`Module/Bindings/CryVSEnv.cpp` 以描述表產生一個元件與其函式／訊號（與 Schematyc 相同），只在社群版引擎樹編譯過、從未實跑（`PLAN.md` M2 備註）。M6 的要求：CryVS 端提供與 FlowGraph 相同的三個抽屜與 10 個節點的對應物（名詞一致：SurfaceID、Decode、Output…），並在社群版引擎（`E:\coding crycry\CryENGINE-5-7-community`，`z060142/CryENGINE-5-7-community`）實際執行驗證。CryVS 的節點模型（是否有不屬於元件的獨立函式節點、類別怎麼分抽屜、複合節點怎麼表達）在動工前先唯讀調查，寫進 M6 的任務單。
@@ -156,7 +157,7 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 ### 5.2 RGBA 改為按需
 - RGBA 緩衝與 `ConvertSlot` 只在聚合結果需要 RGBA8 時配置與執行；切換發生在幀與幀之間（配置不在穩定播放路徑上），不重新載入 core。
 - 貼圖：打包平面時是 `eTF_R8`、`w × (h + ch [+ h])`、無 mip；RGBA8 時照舊。切換或尺寸改變 → 釋放再建立、`generation`＋1。
-- **M8 動工前先驗（階段 0）**：引擎的 `UploadToVideoMemory`／`UpdateTextureInVideoMemory` 是否接受 `eTF_R8`（已讀到的程式沒有排除，格式表未查）；不接受則 M8 停下重議。
+- **M8 動工前先驗（階段 0，已驗：可用，§10）**：引擎的 `UploadToVideoMemory`／`UpdateTextureInVideoMemory` 是否接受 `eTF_R8`（已讀到的程式沒有排除，格式表未查）；不接受則 M8 停下重議。
 
 ### 5.3 看不見時（M7）
 1. 聚合後不可見：立刻改為「只解碼」（不取 slot、不複製、不轉色、不上傳——現成的 seek skip 模式）；時鐘與聲音照走。
@@ -258,3 +259,53 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 - 不可見時的結尾以時鐘判定：Ended 在 5.019 s（片長 5.0）；循環與標記點照送。`open` 的函式耗時 0.004 ms。
 - 階段 0 的更正：`vp9_alpha.webm` 有兩個關鍵幀（0 與 4.267 s），不是一個。Core 自測的 `av_sync_flash_beep` 失敗來自 PATH 上 ImageMagick 附帶的 ffmpeg 4.2.3 產生的測試素材（webm muxer 把時間戳偏移 7 ms）；以 scoop 的 ffmpeg 7.1.1 產生的素材全過——產生測試素材時要用明確的 ffmpeg 路徑。
 
+## 12. 平面取樣的參考實作（M8，消費端照做）
+
+參考程式：`Code/CryPlugins/CEVPlayer/Core/tests/ReferenceSampler.h`（只供測試與文件，不在執行期路徑）。輸入是來源上傳的那一張 R8 貼圖（`w × (h + ch [+ h])` texel，列緊密）與快照的 `planeY/U/V/A`、`colorMatrix`、`colorRange`、`chromaSiting`；輸出是畫面大小 `width × height` 的預乘 RGBA8。下文 `ch = ⌈h/2⌉`、`cw = w/2`（打包排列只用在寬為偶數時）。
+
+**取樣位置**（texel 中心在整數座標 i；輸出像素 (x, y)）：
+- Y 與 A：讀各自矩形內的 texel (x, y)（1:1，最近點與雙線性相同）。
+- 色度：在 U／V 矩形內的連續座標 `cx = (x + ox) / 2`、`cy = (y + oy) / 2`，`ox = −0.5`（CENTER）或 `0`（LEFT、TOPLEFT），`oy = 0`（TOPLEFT）或 `−0.5`（LEFT、CENTER）。雙線性內插，座標**先夾在 `[0, cw−1] × [0, ch−1]`**——換成貼圖 UV 就是夾在矩形內縮半個 texel：`u ∈ [(rx + 0.5)/W, (rx + rw − 0.5)/W]`、`v ∈ [(ry + 0.5)/H, (ry + rh − 0.5)/H]`（W、H 是整張貼圖的尺寸），所以永遠不會取到相鄰平面。
+- 來源自己的 RGBA8（現行 CPU 轉換）是最近點：色度 texel `(x >> 1, y >> 1)`，不看 `chromaSiting`。
+
+**色彩**（浮點，K 值：BT.601 `Kr = 0.299, Kb = 0.114`；BT.709 `Kr = 0.2126, Kb = 0.0722`；`Kg = 1 − Kr − Kb`）：
+- limited（`colorRange` 0）：`Y' = (Y − 16) / 219`，`Cb = (U − 128) / 224`，`Cr = (V − 128) / 224`；full（1）：`Y' = Y / 255`，`Cb = (U − 128) / 255`，`Cr = (V − 128) / 255`。
+- `R = Y' + 2(1 − Kr)·Cr`；`G = Y' − (2Kb(1 − Kb)/Kg)·Cb − (2Kr(1 − Kr)/Kg)·Cr`；`B = Y' + 2(1 − Kb)·Cb`。
+- 每個分量先夾到 [0, 1]，**再**乘 alpha（`a = A / 255`；沒有 A 平面時 1；`flags` bit3 = 0 表示色彩平面是 straight），最後 `round(c · a · 255)`；輸出 alpha `round(a · 255)`。結果是預乘。
+
+**與來源 RGBA8 逐位元組相同的最近點變體**（16.16 定點，`ColorConvert.cpp` 的表）：`luma = yk·(Y − yOff) + 32768`，`R = clamp8((luma + rv·Cr8) >> 16)`、`G = clamp8((luma − gu·Cb8 − gv·Cr8) >> 16)`、`B = clamp8((luma + bu·Cb8) >> 16)`，`Cb8 = U − 128`、`Cr8 = V − 128`，`>>` 為算術右移，`clamp8` 夾到 0..255。係數 `{yOff, yk, rv, gu, gv, bu}`：601 limited `{16, 76284, 104595, 25675, 53279, 132201}`；709 limited `{16, 76284, 117489, 13975, 34925, 138438}`；601 full `{0, 65536, 91881, 22554, 46802, 116130}`；709 full `{0, 65536, 103206, 12276, 30679, 121609}`（即 1.164、1.596／0.392／0.813／2.017 與 709 的 1.793／0.213／0.533／2.112 乘 65536 取整）。alpha 為 255 時直接輸出；否則每個分量 `((c·a + 128)·257) >> 16`。
+
+**驗證**（M8，`cevcore_selftest --only packed --bench <六支量測素材>`）：最近點變體套在 Core 的打包緩衝上，與 `ConvertSlot` 的 RGBA8 **逐位元組相同**——三支測試素材各 5 幀、六支量測素材各 4 幀全數相同。雙線性變體與來源 RGBA8 的差：平均 0.25～2.3 級，最大值在色度銳利邊緣可到 255（測試圖樣的色塊邊界；這是最近點與內插本身的差，不是錯誤）。消費端的著色器應與雙線性變體比對（浮點誤差 ≤ 1 級）。
+
+## 13. M8 的實測（2026-11-19；`E:/coding3/xt-bench/cev-m8/`）
+
+**RAM 拆解**（§10 的疑點；方法：`tools/probes/ram_probe` 在獨立行程裡依序建出各元件、量 private bytes；引擎內以 `cev_probe_r8 <w> <h> [rgba]` 量貼圖每幀更新造成的行程增量）：
+
+| 素材 | 整檔讀入 | libvpx（參考幀、執行緒緩衝，90 幀後） | ring 4 格（舊：平面＋RGBA） | 引擎上傳複本（舊：RGBA8 每幀更新） | 合計（舊） | ring 4 格（新：打包、無 RGBA） | 引擎上傳複本（新：R8） | 合計（新） |
+|---|---|---|---|---|---|---|---|---|
+| 1080p30 | 9.7 | 32.0 | 43.6 | ≈32（≈4 份 8.3 MB） | ≈117（S0 實測 110） | 11.9 | ≈6（2 份 3.1 MB） | ≈60 |
+| 1080p30 alpha | 9.8 | 63.3 | 51.5 | ≈32 | ≈157（S0 141） | 19.8 | ≈10 | ≈103 |
+| 2160p30 alpha | 37.9 | 243.5 | 206.1 | ≈127（≈4 份 33 MB） | ≈615（S0 573） | 79.3 | 16～40 | ≈380 |
+
+- 「推算只有 ring」少算的部分：CryPak 來源把整個檔案讀進記憶體、libvpx 自己的參考幀池（VP9 8 個參考＋執行緒／row-MT 緩衝，alpha 是第二個解碼器）、以及引擎 `UpdateTextureInVideoMemory` 每次把整張圖複製進 render command（排隊中的 2～4 幀同時存在）。音訊（PCM ring 500 ms）不到 1 MB。PlayerCore 端到端（3 秒播放）：舊 83.7／123.9／487.1 MB，新 53.0／92.2／358.9 MB。
+
+**兩種排列**（GameLauncher、無 CryXTUI、`cev_bench_hint` 扮演接受打包的消費端，各 20 秒，ms 平均／p99）：
+
+| 素材 | 排列 | 解碼 | 複製 | 轉色 | 主執行緒上傳 | 每幀上傳 | 上傳／秒 | 掉幀 |
+|---|---|---|---|---|---|---|---|---|
+| 1080p30 | RGBA8 | 1.85／2.91 | 0.50／0.93 | 4.61／6.53 | 2.41／3.21 | 8.29 MB | 30.5 | 0 |
+| | 打包 | 1.90／2.99 | 0.54／1.14 | 0 | 1.06／1.54 | 3.11 MB | 30.2 | 0 |
+| 1080p30 alpha | RGBA8 | 2.93／4.83 | 1.03／1.50 | 5.93／9.06 | 2.27／3.24 | 8.29 MB | 30.4 | 0 |
+| | 打包 | 3.13／5.01 | 0.92／1.45 | 0 | 1.64／2.78 | 5.18 MB | 30.1 | 1 |
+| 1080p60 | RGBA8 | 1.95／3.25 | 0.51／0.91 | 4.70／9.47 | 2.63／4.54 | 8.29 MB | 60.5 | 0 |
+| | 打包 | 1.87／2.73 | 0.47／0.76 | 0 | 1.02／1.63 | 3.11 MB | 60.5 | 0 |
+| 1080p60 alpha | RGBA8 | 3.15／4.42 | 1.03／1.62 | 5.87／8.68 | 2.67／4.16 | 8.29 MB | 60.6 | 0 |
+| | 打包 | 3.19／4.87 | 0.89／1.48 | 0 | 1.68／2.84 | 5.18 MB | 60.6 | 0 |
+| 2160p30 | RGBA8 | 7.99／12.01 | 2.90／4.23 | 17.72／23.31 | 10.59／17.09 | 33.2 MB | 29.9 | 0 |
+| | 打包 | 7.61／11.91 | 2.55／3.93 | 0 | 4.09／5.83 | 12.4 MB | 30.1 | 0 |
+| 2160p30 alpha | RGBA8 | 14.11／27.63 | 5.18／7.39 | 26.01／45.91 | 12.81／24.60 | 33.2 MB | **22.8** | 0 |
+| | 打包 | 13.62／22.50 | 4.31／6.32 | 0 | 8.67／11.68 | 20.7 MB | **30.2** | 0 |
+
+- **2160p30 alpha 在打包排列下即時播放**（每秒 30 次上傳＝每幀都到；RGBA8 只有 22.8）。
+- 引擎內的 GPU／行程 RAM 欄位在連續換素材的單次執行裡基準漂移，不採用；RAM 以上表的拆解為準。
+- 像素：打包貼圖內容＝Core 的平面（`cev_contract_selftest` 以上傳緩衝的雜湊對照快照矩形重組的平面，含 A），截圖 `shots/packed_yuva420_1080p30_alpha.jpg`（R8 以紅色顯示：Y、U｜V、A 三段）。`ITexture::GetData32` 對 R8 不可用（非 RGBA8 時以 `GetDeviceDataSize()` 整塊 memcpy、忽略 staging 列距，且在呼叫端執行緒直接下載），未採用。

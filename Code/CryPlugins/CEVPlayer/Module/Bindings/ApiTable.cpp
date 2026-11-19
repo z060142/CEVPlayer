@@ -32,26 +32,26 @@ namespace CEVPlayer
 		// CryVS global functions, in ECryVSFunction order (M6c).
 		const CryGUID kCryVSFunctionGuids[eCryVS_FunctionCount] =
 		{
-			"27AF1B77-C05D-456D-B465-016FB958F9D9"_cry_guid, // Video::PlayOnScreen
-			"BD64D321-5F54-4C88-BE59-9F89D90883E7"_cry_guid, // Video::PlayOnMaterial
-			"35BF4E46-7F0D-49AC-A196-B57EAB16D689"_cry_guid, // Video::Stop
-			"4276BD72-C99B-40B4-95C1-213C80FFEB98"_cry_guid, // VideoUI::PlayToSurface
-			"4212CE2B-B8C1-44E0-A010-E1B1391AF471"_cry_guid, // VideoUI::StopSurface
-			"70FA6405-329B-4335-AB42-5334E1F8DA79"_cry_guid, // VideoUI::SurfaceInfo
-			"30F7ED4B-1FC5-43E9-952A-80A3847F199F"_cry_guid, // VideoAdvanced::Open
-			"4CA6690D-4E60-4EBC-8782-1B0C9F2414A0"_cry_guid, // VideoAdvanced::Close
-			"414E5002-C895-45FD-A347-81D12E7C8465"_cry_guid, // VideoAdvanced::Play
-			"AF12D09D-DD5A-440F-B6F8-D21D5139C43D"_cry_guid, // VideoAdvanced::Pause
-			"46CA5F4B-83E0-4C20-892D-F47737861B40"_cry_guid, // VideoAdvanced::Stop
-			"404EFDA7-98CF-461A-BC27-62B92AEF6787"_cry_guid, // VideoAdvanced::Seek
-			"4ACC3D98-043C-4CA7-A43C-9DB7D96F69BA"_cry_guid, // VideoAdvanced::SetLoop
-			"285B5336-FBD5-4D52-A878-40FD620E7932"_cry_guid, // VideoAdvanced::SetRate
-			"C24FFE00-8215-4B4C-80D5-3996D2650B39"_cry_guid, // VideoAdvanced::SetVolume
-			"888EAF9B-3128-4510-9C50-9B26353DA322"_cry_guid, // VideoAdvanced::SetLanguage
-			"D71E69BE-A424-451D-8840-A7BCFE53ADDD"_cry_guid, // VideoAdvanced::SetVariant
-			"20A1CC28-BE7C-4382-8F5C-FAD6955C25D2"_cry_guid, // VideoAdvanced::SetSkippable
-			"13B9D4C4-43B4-4602-9E42-E8A6F07B4974"_cry_guid, // VideoAdvanced::Info
-			"6A464499-0622-463D-8F43-57E805205A1C"_cry_guid, // VideoAdvanced::SetPauseDecodeWhenHidden (M7)
+			"27AF1B77-C05D-456D-B465-016FB958F9D9"_cry_guid, // CEVPlayer::PlayOnScreen
+			"BD64D321-5F54-4C88-BE59-9F89D90883E7"_cry_guid, // CEVPlayer::PlayOnMaterial
+			"35BF4E46-7F0D-49AC-A196-B57EAB16D689"_cry_guid, // CEVPlayer::Stop
+			"4276BD72-C99B-40B4-95C1-213C80FFEB98"_cry_guid, // CEVPlayer::UI::PlayToSurface
+			"4212CE2B-B8C1-44E0-A010-E1B1391AF471"_cry_guid, // CEVPlayer::UI::StopSurface
+			"70FA6405-329B-4335-AB42-5334E1F8DA79"_cry_guid, // CEVPlayer::UI::SurfaceInfo
+			"30F7ED4B-1FC5-43E9-952A-80A3847F199F"_cry_guid, // CEVPlayer::Advanced::Open
+			"4CA6690D-4E60-4EBC-8782-1B0C9F2414A0"_cry_guid, // CEVPlayer::Advanced::Close
+			"414E5002-C895-45FD-A347-81D12E7C8465"_cry_guid, // CEVPlayer::Advanced::Play
+			"AF12D09D-DD5A-440F-B6F8-D21D5139C43D"_cry_guid, // CEVPlayer::Advanced::Pause
+			"46CA5F4B-83E0-4C20-892D-F47737861B40"_cry_guid, // CEVPlayer::Advanced::Stop
+			"404EFDA7-98CF-461A-BC27-62B92AEF6787"_cry_guid, // CEVPlayer::Advanced::Seek
+			"4ACC3D98-043C-4CA7-A43C-9DB7D96F69BA"_cry_guid, // CEVPlayer::Advanced::SetLoop
+			"285B5336-FBD5-4D52-A878-40FD620E7932"_cry_guid, // CEVPlayer::Advanced::SetRate
+			"C24FFE00-8215-4B4C-80D5-3996D2650B39"_cry_guid, // CEVPlayer::Advanced::SetVolume
+			"888EAF9B-3128-4510-9C50-9B26353DA322"_cry_guid, // CEVPlayer::Advanced::SetLanguage
+			"D71E69BE-A424-451D-8840-A7BCFE53ADDD"_cry_guid, // CEVPlayer::Advanced::SetVariant
+			"20A1CC28-BE7C-4382-8F5C-FAD6955C25D2"_cry_guid, // CEVPlayer::Advanced::SetSkippable
+			"13B9D4C4-43B4-4602-9E42-E8A6F07B4974"_cry_guid, // CEVPlayer::Advanced::Info
+			"6A464499-0622-463D-8F43-57E805205A1C"_cry_guid, // CEVPlayer::Advanced::SetPauseDecodeWhenHidden (M7)
 		};
 		const CryGUID kCryVSResizedSignalGuid = "8431E4A5-BEA5-4461-B110-4B7883761FBC"_cry_guid;
 		const CryGUID kCryVSClosedSignalGuid  = "AAE0463C-E424-4A35-8737-00D3F22801F1"_cry_guid;
@@ -314,12 +314,12 @@ namespace CEVPlayer
 				{ EKind::Query, "E57C2BAD-C06D-479F-8FA6-1F26C709D041"_cry_guid, "Height", "Picture height in pixels, 0 until loaded.", CEV_NOPARAMS, EType::Int, "Height", false, 0, &FnHeight },
 				{ EKind::Query, "B6CA4AE6-2F74-4BB2-B153-BEF9AC675213"_cry_guid, "TextureId", "Renderer texture id of the output texture, 0 while there is none.", CEV_NOPARAMS, EType::Int, "TextureId", false, 0, &FnTextureId },
 				{ EKind::Query, "0CC4837F-F982-4246-9695-03991397069D"_cry_guid, "HasAlpha", "The video has an alpha channel.", CEV_NOPARAMS, EType::Bool, "HasAlpha", false, 0, &FnHasAlpha },
-				{ EKind::Query, "EAF2740F-37EB-47E9-BFAE-A538D53EC1AF"_cry_guid, "IsPremultiplied", "The output texture holds premultiplied alpha (always true).", CEV_NOPARAMS, EType::Bool, "IsPremultiplied", false, 0, &FnIsPremultiplied },
+				{ EKind::Query, "EAF2740F-37EB-47E9-BFAE-A538D53EC1AF"_cry_guid, "IsPremultiplied", "The output texture holds premultiplied alpha (true for the RGBA8 layout).", CEV_NOPARAMS, EType::Bool, "IsPremultiplied", false, 0, &FnIsPremultiplied },
 				{ EKind::Query, "B7A77A6C-E01F-4051-9B05-CA9596E6E49B"_cry_guid, "Language", "Audio language in use (descriptor name), empty without languages.", CEV_NOPARAMS, EType::String, "Language", false, 0, &FnLanguage },
 				{ EKind::Query, "6AB75D22-6C00-4168-B33D-F06FDFACA93E"_cry_guid, "Variant", "Variant in use: 0 = main video, n = n-th variant.", CEV_NOPARAMS, EType::Int, "Variant", false, 0, &FnVariant },
 				{ EKind::Query, "97C49A10-C7A1-40AC-BF8B-D7688F2CF190"_cry_guid, "SurfaceId", "Surface id of the player, empty for a player made by Create.", CEV_NOPARAMS, EType::String, "SurfaceId", false, 0, &FnSurfaceId },
 				{ EKind::Query, "1DE894B9-3DBD-45B8-8614-441706F53725"_cry_guid, "Generation", "Counts changes of the texture (id, size or layout): fetch TextureId / Width / Height again when it changes.", CEV_NOPARAMS, EType::Int, "Generation", false, 0, &FnGeneration },
-				{ EKind::Query, "40D5FCCC-EC86-45D5-9D1E-38DEFC23D6B9"_cry_guid, "PixelLayout", "Pixel layout of the texture: 0 = RGBA8 premultiplied (the only layout so far).", CEV_NOPARAMS, EType::Int, "PixelLayout", false, 0, &FnPixelLayout },
+				{ EKind::Query, "40D5FCCC-EC86-45D5-9D1E-38DEFC23D6B9"_cry_guid, "PixelLayout", "Pixel layout of the texture: 0 = RGBA8 premultiplied, 1 = packed YUV 4:2:0 (R8), 2 = packed YUVA 4:2:0 (R8); planar only while every consumer of the texture source contract accepts it.", CEV_NOPARAMS, EType::Int, "PixelLayout", false, 0, &FnPixelLayout },
 				{ EKind::Query, "803D34BF-61FB-4E84-BE3E-5A09CF51FE57"_cry_guid, "DecodeBackend", "Decoder in use: 0 = CPU (the only backend so far).", CEV_NOPARAMS, EType::Int, "DecodeBackend", false, 0, &FnDecodeBackend },
 				{ EKind::Query, "347FB1FF-D80B-4466-9F14-1A8D1DCDF6DB"_cry_guid, "FrameSerial", "Number of uploaded pictures as decimal text (never wraps); usable as a changed test.", CEV_NOPARAMS, EType::String, "FrameSerial", false, 0, &FnFrameSerial },
 				{ EKind::Query, "099454C4-CF34-4256-942F-FF8370DB3641"_cry_guid, "IsLoaded", "The video is loaded: size, duration and texture are valid.", CEV_NOPARAMS, EType::Bool, "IsLoaded", false, 0, &FnIsLoaded },

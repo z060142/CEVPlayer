@@ -733,6 +733,10 @@ namespace cev
 					? -1 : static_cast<int>(colour->matrix_coefficients);
 				v.colorRange = colour->range == mkvparser::Colour::kValueNotPresent
 					? -1 : static_cast<int>(colour->range);
+				v.chromaSitingHorz = colour->chroma_siting_horz == mkvparser::Colour::kValueNotPresent || colour->chroma_siting_horz < 0 || colour->chroma_siting_horz > 255
+					? -1 : static_cast<int>(colour->chroma_siting_horz);
+				v.chromaSitingVert = colour->chroma_siting_vert == mkvparser::Colour::kValueNotPresent || colour->chroma_siting_vert < 0 || colour->chroma_siting_vert > 255
+					? -1 : static_cast<int>(colour->chroma_siting_vert);
 			}
 			ctx.videoTrack = v.trackNumber;
 		}

@@ -21,6 +21,7 @@
 
 #include "CEVCore/ColorConvert.h"
 #include "CEVCore/DecodePool.h"
+#include "CEVCore/FrameRing.h"
 #include "CEVCore/IByteSource.h"
 #include "CEVCore/IClock.h"
 #include "CEVCore/Resampler.h"
@@ -43,7 +44,9 @@ namespace cev
 	struct PlayerConfig
 	{
 		uint32_t ringSlots = 4;              // frame ring size (>= 3 recommended: 1 held by the consumer)
-		bool outputRgba = true;              // convert to premultiplied RGBA on the worker
+		// Convert to premultiplied RGBA on the worker (initial value of SetOutputRgba()). Streams that are not packable
+		// (MediaInfo::packedLayout == false) always convert, whatever this says.
+		bool outputRgba = true;
 		bool decodeAudio = true;
 		// false: the video track (if any) is ignored entirely: no video decoder, no FrameRing / frame buffers, no
 		// video decode work, GetInfo().hasVideo == false (MediaInfo::videoSkipped tells that a track was ignored),
@@ -85,6 +88,9 @@ namespace cev
 		uint32_t videoPacketCount = 0;
 		ColorStandard colorStandard = ColorStandard::BT601; // resolved
 		ColorRange colorRange = ColorRange::Limited;
+		// M8: the frame ring uses the packed layout (4:2:0, even width): FrameView::packed is valid for every frame.
+		bool packedLayout = false;
+		ChromaSiting chromaSiting = ChromaSiting::Left; // from the container (ResolveChromaSiting)
 	};
 
 	// The frame returned by GetFrame(): valid until the next Update() that returns true (or Unload()).
@@ -92,8 +98,14 @@ namespace cev
 	{
 		const uint8_t* plane[4] = {nullptr, nullptr, nullptr, nullptr}; // Y, U, V, A (A null without alpha)
 		int stride[4] = {0, 0, 0, 0};
-		const uint8_t* rgba = nullptr;       // premultiplied RGBA8, tightly packed rows, null if !outputRgba
-		int rgbaStride = 0;
+		const uint8_t* rgba = nullptr;       // premultiplied RGBA8, tightly packed rows; null when this frame was not
+		int rgbaStride = 0;                  // converted (SetOutputRgba(false), or committed before it was switched on)
+		// M8 packed layout (MediaInfo::packedLayout): one buffer of packedWidth x packedHeight bytes, tight rows, and
+		// the plane rectangles inside it (rectA empty without alpha). packed == nullptr when the ring is not packed.
+		const uint8_t* packed = nullptr;
+		int packedWidth = 0;
+		int packedHeight = 0;
+		PlaneRect rectY, rectU, rectV, rectA;
 		int width = 0;
 		int height = 0;
 		int chromaShiftX = 1;
@@ -171,6 +183,19 @@ namespace cev
 		bool Update();
 		bool GetFrame(FrameView& out) const; // false before the first frame was presented
 		void NoteUpload(uint64_t bytes);     // for Stats::uploadBytes
+
+		// ---- RGBA output on demand (consumer thread, M8) ----
+		// Whether the worker converts frames to RGBA. Takes effect at frame boundaries without reloading or touching the
+		// clock / audio: on -> the current frame is converted at once on the calling thread (one conversion; its buffer
+		// may be allocated here) and every frame committed from now on carries RGBA (frames already queued may not:
+		// check FrameView::rgba); off -> no conversion any more, the RGBA buffers are freed (those of queued frames when
+		// their slot is reused). Allocation happens only around a switch, never on the steady per-frame path.
+		// Before Ready the value is remembered for the next Load(). A loaded stream that is not packable always
+		// converts: off then returns Unsupported (the value stays on).
+		Status SetOutputRgba(bool enabled);
+		bool GetOutputRgba() const;
+		// Slots that own an RGBA buffer right now (diagnostics / tests).
+		uint32_t RgbaBufferCount() const;
 
 		// ---- audio (audio thread) ----
 		// Fills dst with up to `frames` interleaved float frames (GetInfo().audioChannels) and returns the

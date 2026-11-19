@@ -49,6 +49,8 @@ namespace cev
 		{
 			clock = cfg.externalClock != nullptr ? cfg.externalClock : &ownClock;
 			avOffset = ClampOffset(cfg.avOffsetSeconds);
+			requestedRgba.store(cfg.outputRgba, std::memory_order_relaxed);
+			rgbaWanted.store(cfg.outputRgba, std::memory_order_relaxed);
 			stats.SetEnabled(cfg.enableStats);
 		}
 
@@ -121,6 +123,10 @@ namespace cev
 		double avOffset = 0.0;                 // seconds, see PlayerCore::SetAvOffset()
 		uint32_t loopCount = 0;
 		uint64_t serial = 0;
+
+		// ---------------------------------------------------------------- RGBA on demand (M8)
+		std::atomic<bool> requestedRgba{true};  // SetOutputRgba() value (also before / between loads)
+		std::atomic<bool> rgbaWanted{true};     // in effect: requested, or forced for a ring that is not packed
 
 		// ---------------------------------------------------------------- visibility (M7)
 		// consumer -> worker
@@ -216,10 +222,21 @@ namespace cev
 			return false;
 		}
 
-		bool ConvertSlot(FrameRing::Slot& slot)
+		// Converts the slot to RGBA when RGBA is wanted (allocating the slot's buffer the first time after a switch),
+		// otherwise frees its buffer. Called by the owner of the slot (worker: Writing, consumer: Held). Returns true
+		// when the slot now holds this frame's RGBA.
+		bool ConvertSlot(uint32_t index)
 		{
-			if (!format.withRgba)
-				return true;
+			FrameRing::Slot& slot = ring.GetSlot(index);
+			if (!rgbaWanted.load(std::memory_order_acquire))
+			{
+				if (slot.rgba != nullptr)
+					ring.ReleaseRgba(index);
+				slot.rgbaValid = false;
+				return false;
+			}
+			if (!ring.EnsureRgba(index))
+				return false; // out of memory: the frame has no RGBA (FrameView::rgba null)
 			YuvaImage img;
 			for (int i = 0; i < 4; ++i)
 			{
@@ -231,6 +248,7 @@ namespace cev
 			img.chromaShiftX = format.chromaShiftX;
 			img.chromaShiftY = format.chromaShiftY;
 			ConvertYuvaToRgbaPremultiplied(img, info.colorStandard, info.colorRange, slot.rgba, slot.rgbaStride);
+			slot.rgbaValid = true;
 			return true;
 		}
 
@@ -311,7 +329,11 @@ namespace cev
 				format.chromaShiftX = di.chromaShiftX;
 				format.chromaShiftY = di.chromaShiftY;
 				format.hasAlpha = v.hasAlpha;
-				format.withRgba = cfg.outputRgba;
+				// RGBA buffers at Init only when RGBA is wanted; a stream that cannot be packed always converts (M8).
+				const bool wantRgba = requestedRgba.load(std::memory_order_acquire) || !format.Packable();
+				rgbaWanted.store(wantRgba, std::memory_order_release);
+				format.withRgba = wantRgba;
+				info.chromaSiting = ResolveChromaSiting(v.chromaSitingHorz, v.chromaSitingVert);
 				info.width = di.width;
 				info.height = di.height;
 
@@ -329,7 +351,8 @@ namespace cev
 					ring.Abandon(slot);
 					return Fail(Status::InvalidData, StatusDetail::FirstFrame);
 				}
-				ConvertSlot(ring.GetSlot(static_cast<uint32_t>(slot)));
+				info.packedLayout = ring.IsPacked();
+				ConvertSlot(static_cast<uint32_t>(slot));
 				ring.Commit(slot, epoch, demux->VideoPts(idx));
 				vPos = idx + 1;
 				vEof.store(vPos >= count, std::memory_order_relaxed);
@@ -567,13 +590,13 @@ namespace cev
 				{
 					if (timing)
 						tCopy = Steady::now();
-					ConvertSlot(s);
+					const bool converted = ConvertSlot(static_cast<uint32_t>(slot));
 					if (timing)
 					{
 						t2 = Steady::now();
 						const uint64_t luma = static_cast<uint64_t>(format.width) * static_cast<uint64_t>(format.height);
 						const uint64_t chroma = 2ull * static_cast<uint64_t>(format.ChromaWidth()) * static_cast<uint64_t>(format.ChromaHeight());
-						stats.NoteCopy(luma + chroma + (format.hasAlpha ? luma : 0ull), format.withRgba ? luma * 4ull : 0ull);
+						stats.NoteCopy(luma + chroma + (format.hasAlpha ? luma : 0ull), converted ? luma * 4ull : 0ull);
 					}
 					if (ring.Commit(slot, epoch, demux->VideoPts(idx)) && timing)
 						stats.RecordDecoded(MsBetween(t0, t1), MsBetween(t1, tCopy), MsBetween(tCopy, t2), ring.InFlightCount());
@@ -956,6 +979,9 @@ namespace cev
 				d.stats.NoteDropped(dropped);
 			if (slot >= 0)
 			{
+				// A frame committed just before RGBA was switched on: convert it here (Held, this thread owns it).
+				if (d.rgbaWanted.load(std::memory_order_acquire) && !d.ring.GetSlot(static_cast<uint32_t>(slot)).rgbaValid)
+					d.ConvertSlot(static_cast<uint32_t>(slot));
 				newFrame = true;
 				++d.serial;
 				d.stats.NotePresented();
@@ -1025,8 +1051,15 @@ namespace cev
 			out.plane[i] = s.plane[i];
 			out.stride[i] = s.stride[i];
 		}
-		out.rgba = s.rgba;
-		out.rgbaStride = s.rgbaStride;
+		out.rgba = s.rgbaValid ? s.rgba : nullptr;
+		out.rgbaStride = s.rgbaValid ? s.rgbaStride : 0;
+		out.packed = s.packed;
+		out.packedWidth = d.ring.PackedWidth();
+		out.packedHeight = d.ring.PackedHeight();
+		out.rectY = d.ring.PackedPlane(0);
+		out.rectU = d.ring.PackedPlane(1);
+		out.rectV = d.ring.PackedPlane(2);
+		out.rectA = d.ring.PackedPlane(3);
 		out.width = d.format.width;
 		out.height = d.format.height;
 		out.chromaShiftX = d.format.chromaShiftX;
@@ -1037,6 +1070,47 @@ namespace cev
 	}
 
 	void PlayerCore::NoteUpload(uint64_t bytes) { m_impl->stats.NoteUpload(bytes); }
+
+	Status PlayerCore::SetOutputRgba(bool enabled)
+	{
+		Impl& d = *m_impl;
+		d.requestedRgba.store(enabled, std::memory_order_release);
+		if (d.loadState.load(std::memory_order_acquire) != LoadState::Ready || !d.hasVideo)
+			return Status::Ok; // remembered: the load step reads it
+		if (!d.ring.IsPacked())
+			return enabled ? Status::Ok : Status::Unsupported; // separate planes: RGBA is the only output
+		if (d.rgbaWanted.load(std::memory_order_acquire) == enabled)
+			return Status::Ok;
+		d.rgbaWanted.store(enabled, std::memory_order_release);
+		const int cur = d.ring.Current(); // Held: only this thread touches it
+		if (enabled)
+		{
+			// The frame on screen gets its RGBA now (one conversion on this thread), so a consumer that needs RGBA8
+			// never waits for the next frame.
+			if (cur >= 0 && !d.ring.GetSlot(static_cast<uint32_t>(cur)).rgbaValid && !d.ConvertSlot(static_cast<uint32_t>(cur)))
+				return Status::OutOfMemory;
+		}
+		else
+		{
+			if (cur >= 0)
+				d.ring.ReleaseRgba(static_cast<uint32_t>(cur));
+			d.ring.ReleaseFreeRgba(); // Ready / Writing slots: freed by the worker when it reuses them
+		}
+		return Status::Ok;
+	}
+
+	bool PlayerCore::GetOutputRgba() const
+	{
+		const Impl& d = *m_impl;
+		if (d.loadState.load(std::memory_order_acquire) == LoadState::Ready && d.hasVideo)
+			return d.rgbaWanted.load(std::memory_order_acquire);
+		return d.requestedRgba.load(std::memory_order_acquire);
+	}
+
+	uint32_t PlayerCore::RgbaBufferCount() const
+	{
+		return m_impl->ring.IsInitialized() ? m_impl->ring.RgbaBufferCount() : 0u;
+	}
 
 	uint32_t PlayerCore::ReadAudio(float* dst, uint32_t frames)
 	{

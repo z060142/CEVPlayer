@@ -199,7 +199,7 @@ namespace CEVPlayer
 
 		//! Number of FlowGraph node classes (the composite nodes of FlowApiNodes.cpp).
 		uint32_t FlowNodeCount();
-		//! Name of the n-th FlowGraph node class ("Video:PlayOnScreen", ...), nullptr past the end.
+		//! Name of the n-th FlowGraph node class ("CEVPlayer:PlayOnScreen", ...), nullptr past the end.
 		const char* FlowNodeClassName(uint32_t index);
 
 		//! Decimal text of a frame serial (FrameSerial query, NewFrame event): no wrap.

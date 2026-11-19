@@ -53,6 +53,15 @@ namespace cev
 		return matroskaRange == 2 ? ColorRange::Full : ColorRange::Limited;
 	}
 
+	ChromaSiting ResolveChromaSiting(int horz, int vert)
+	{
+		if (horz == 2 && vert == 2)
+			return ChromaSiting::Center;
+		if (horz == 1 && vert == 1)
+			return ChromaSiting::TopLeft;
+		return ChromaSiting::Left; // (1,2), not tagged, unspecified or not expressible
+	}
+
 	void ConvertYuvaToRgbaPremultiplied(const YuvaImage& src, ColorStandard standard, ColorRange range,
 		uint8_t* dst, int dstStride)
 	{
