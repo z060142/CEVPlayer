@@ -55,21 +55,14 @@ add_sources("NoUberFile"
 		"Render/RenderBridge.h"
 )
 add_sources("NoUberFile"
-    SOURCE_GROUP "Compat"
-		"Compat/LegacyPlayback.cpp"
-		"Compat/LegacyPlayback.h"
-)
-add_sources("NoUberFile"
-    SOURCE_GROUP "FlowNodes"
-		"FlowNodes/FlowNodes.cpp"
-)
-add_sources("NoUberFile"
     SOURCE_GROUP "Bindings"
 		"Bindings/ApiTable.cpp"
 		"Bindings/ApiPlayers.cpp"
 		"Bindings/ApiTest.cpp"
 		"Bindings/ApiTest.h"
 		"Bindings/FlowApiNodes.cpp"
+		"Bindings/FlowTest.cpp"
+		"Bindings/FlowTest.h"
 		"Bindings/ApiTable.h"
 		"Bindings/ApiPlayers.h"
 		"Bindings/CryVSEnv.h"
@@ -86,14 +79,7 @@ if(EXISTS "${CRYENGINE_DIR}/Code/CryEngine/CryCommon/CryVS")
 	)
 endif()
 add_sources("NoUberFile"
-    SOURCE_GROUP "Input"
-		"Input/InputDispatcher.cpp"
-		"Input/InputDispatcher.h"
-)
-add_sources("NoUberFile"
     SOURCE_GROUP "Components"
-		"Components/TextureVideoPlayerComponent.cpp"
-		"Components/TextureVideoPlayerComponent.h"
 		"Components/VideoPlayerComponent.cpp"
 		"Components/VideoPlayerComponent.h"
 		"Components/ILightComponent.h"

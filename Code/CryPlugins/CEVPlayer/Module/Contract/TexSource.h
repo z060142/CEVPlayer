@@ -129,6 +129,10 @@ namespace CEVPlayer
 
 		//! cev_surfaces: one log line per surface (snapshot and aggregated hints).
 		void LogSurfaces();
+		//! Number of registered surfaces (the count cev_surfaces prints).
+		uint32_t SurfaceCount();
+		//! CryTexSourceApi::version this build exports.
+		uint32_t ApiVersion();
 	}
 }
 #endif

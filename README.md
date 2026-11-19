@@ -5,7 +5,9 @@ plug-in (**EditorCEVPlayer**) with a video asset type, an importer and a tool wi
 
 The original plug-in is by **Ilya Chernetsov** ([afrostalin/CEVPlayer](https://github.com/afrostalin/CEVPlayer), Libav based,
 CRYENGINE 5.3 - 5.6). This branch (`rebuild`) is a rewrite of the decoding, rendering and audio layers for CRYENGINE 5.7.1
-and adds the editor tooling; the plug-in keeps its name, its console commands (`vp_*`) and its FlowGraph nodes. Licence:
+and adds the editor tooling; the plug-in keeps its name. The original FlowGraph nodes, the TextureVideoPlayer component,
+the `vp_*` console commands and the `IVideoPlugin::PlayVideoTo*` functions were removed in M6b without aliases (levels and
+flow graphs that use them must be rebuilt with the nodes below). Licence:
 Boost Software License 1.0, see [LICENSE](LICENSE). Third-party libraries (libvpx, libwebm, libogg, libvorbis, libopus,
 SDL2 from the engine) keep their own licences, see `Code/SDKs/CEVPlayer/*/`.
 
@@ -16,13 +18,16 @@ Status: **stage 1**, see [Limitations](#limitations-of-stage-1). Project trackin
 Runtime (`Code/CryPlugins/CEVPlayer`)
 
 * WebM playback without Libav / FFmpeg: libwebm demuxer, libvpx (VP8 / VP9, with alpha), libvorbis / libopus.
-* Players on screen (fullscreen, letterbox / fill) or on a texture (`$video_player_*`), several at a time, shared decode pool.
+* Players on screen (fullscreen, letterbox / fill), on a material slot or in a named **surface** that UIs show by its
+  surface id, several at a time, shared decode pool.
 * Three audio routes per video (`.cevvideo` descriptor): `embedded` (audio track inside the WebM, SDL audio device),
   `mixed` (external per-language audio WebM files) and `cue` (a CryAudio trigger plays the sound, the picture follows
   its playback position; needs the optional engine patch for exact sync, otherwise it falls back to a clock).
 * Languages, markers, A/V offset and variants (resolution steps) in the descriptor.
-* FlowGraph nodes (the old three plus the generated `CEVPlayer:Video:*` set), a Schematyc component, a script API table,
-  the legacy `IVideoPlugin::PlayVideoToMainWindow` API.
+* FlowGraph nodes in three categories: `Video` (PlayOnScreen, PlayOnMaterial), `VideoUI` (PlayToSurface, SurfaceInfo,
+  SurfaceEvents) and `VideoAdvanced` (Open, Transport, Settings, Info, Events); a Schematyc component `Video Player`; a
+  script API table (`Module/Bindings/ApiTable.cpp`, one function per entry); the C++ player API (`IVideoPlugin`,
+  `IVideoPlayer`) and the texture source contract export `CryTexSource_v1` (docs/design/M6-ui-source.md).
 
 Editor (`Code/Sandbox/Plugins/EditorCEVPlayer`)
 
@@ -96,13 +101,16 @@ Runtime plug-in
 |---|---|
 | `cev_play <path> [loop]` / `cev_stop` / `cev_pause` / `cev_resume` / `cev_seek <s>` / `cev_lang <name>` | play and control a fullscreen test video (`.webm` or `.cevvideo`) |
 | `cev_list` | list all players (state, time, uploads) |
-| `cev_apitest [path]` | self test of the script API table |
+| `cev_play_surface <id> <path> [loop]`, `cev_surfaces` | play into a surface player; list the surfaces of the texture source contract |
+| `cev_info` | interface version, capability bits, contract version, number of surfaces and players |
+| `cev_apitest [path]`, `cev_flowtest [pathA] [pathB]`, `cev_contract_selftest` | self tests of the API table, the FlowGraph nodes and the texture source contract |
+| `cev_run_script <file>` | development: runs console lines one per frame, immediately (`wait <seconds>`, `#` comments) |
 | `cev_stats` | 1 = log / draw decode statistics per player |
 | `cev_log`, `cev_decodeThreads` | verbose log; decode worker threads (0 = automatic) |
 | `cev_audio_enable`, `cev_muteOnFocusLoss`, `cev_disableEmbeddedAudio` | audio switches |
 | `cev_variant` | variant of a `.cevvideo` (-1 = automatic) |
 | `cev_cueForceFallback` | 1 = cue route ignores the optional engine patch |
-| `vp_play <name>` / `vp_pause` / `vp_resume` / `vp_stop`, `vp_debug_log`, `vp_debug_draw`, `vp_disableLogs` | legacy commands of the original plug-in |
+| `cev_volume` | master volume of all videos |
 
 Sandbox plug-in (automation and tests; the commands run on the main thread)
 

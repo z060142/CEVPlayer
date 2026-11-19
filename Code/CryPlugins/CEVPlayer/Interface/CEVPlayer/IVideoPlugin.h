@@ -4,42 +4,18 @@
 #pragma once
 
 #include <CrySystem/ICryPlugin.h>
-#include "IVideoPluginListeners.h"
 #include "IVideoPlayer.h"
 
 namespace CEVPlayer
 {
-	enum class EVideoType : int
-	{
-		ToMainWindow = 0,
-		ToTexture,
-	};
-
 	struct IVideoPlugin : public Cry::IEnginePlugin
 	{
 		CRYINTERFACE_DECLARE_GUID(IVideoPlugin, "{4DCA4F01-AE95-4735-AADA-50E270418BB8}"_cry_guid);
 	public:
 		// ---------------------------------------------------------------------------------------------
-		// Legacy API (unchanged names, signatures and vtable order). Implemented on top of IVideoPlayer.
-		// ---------------------------------------------------------------------------------------------
-
-		//! Stream video to main window
-		virtual void PlayVideoToMainWindow(const char* videoName, bool preload = false, bool looped = false, int audioTrack = 0,
-			bool isSkippable = false, bool canBePaused = false, IVideoPlayerEventListener * pVideoPlayerListener = nullptr) = 0;
-		//! Stream video to texture only
-		virtual void PlayVideoToTexture(const char* videoName, const char* textureName, bool preload = false, bool looped = false, IVideoPlayerEventListener* pListener = nullptr) = 0;
-
-		//! Pause video - textureName argument used only for pausing video streamed to texture
-		virtual void PauseVideo(EVideoType videoType, const char* textureName = nullptr) = 0;
-
-		//! Resume video - textureName argument used only for pausing video streamed to texture
-		virtual void ResumeVideo(EVideoType videoType, const char* textureName = nullptr) = 0;
-
-		//! Stop video - textureName argument used only for pausing video streamed to texture
-		virtual void StopVideo(EVideoType videoType, const char* textureName = nullptr) = 0;
-
-		// ---------------------------------------------------------------------------------------------
-		// Player API (see IVideoPlayer.h). Appended after the legacy virtuals: do not reorder.
+		// Player API (see IVideoPlayer.h). Do not reorder. The legacy virtuals of the original plug-in
+		// (PlayVideoToMainWindow, PlayVideoToTexture, Pause/Resume/StopVideo, RemoveVideoListener) were removed in M6b
+		// (interface version 5): rebuild every module that calls IVideoPlugin against this header.
 		// ---------------------------------------------------------------------------------------------
 
 		//! kVideoPlayerInterfaceVersion of the plug-in binary. Check it before using the functions below.
@@ -60,15 +36,6 @@ namespace CEVPlayer
 		//! Main thread only (other threads: warning, nothing happens).
 		virtual void DestroyPlayer(IVideoPlayer* pPlayer) = 0;
 		virtual uint32_t GetPlayerCount() const = 0;
-
-		// ---------------------------------------------------------------------------------------------
-		// Appended in player interface version 2 (kVideoPlayerInterfaceVersion; versions 3 and 4 appended no plug-in virtuals): do not reorder.
-		// ---------------------------------------------------------------------------------------------
-
-		//! Detaches `pListener` from every legacy video (main window, queued, texture videos). Legacy events are
-		//! delivered later than the call that caused them (at the plug-in's dispatch point), so call this from the
-		//! destructor of every IVideoPlayerEventListener you passed to PlayVideoTo*. Main thread only.
-		virtual void RemoveVideoListener(IVideoPlayerEventListener* pListener) = 0;
 
 		// ---------------------------------------------------------------------------------------------
 		// Appended in player interface version 5: do not reorder.

@@ -28,10 +28,16 @@
 #include "Bindings/ApiPlayers.h"
 #include "Bindings/ApiTable.h"
 
-SERIALIZATION_ENUM_BEGIN_NESTED2(CEVPlayer, Api, EOutputMode, "Output Mode")
+SERIALIZATION_ENUM_BEGIN_NESTED2(CEVPlayer, Api, EOutputMode, "Output")
+	SERIALIZATION_ENUM(CEVPlayer::Api::EOutputMode::Surface, "Surface", "Surface (for UIs)")
 	SERIALIZATION_ENUM(CEVPlayer::Api::EOutputMode::Screen, "Screen", "Screen")
 	SERIALIZATION_ENUM(CEVPlayer::Api::EOutputMode::Material, "Material", "Material slot")
-	SERIALIZATION_ENUM(CEVPlayer::Api::EOutputMode::Texture, "Texture", "Named texture")
+SERIALIZATION_ENUM_END()
+
+SERIALIZATION_ENUM_BEGIN_NESTED2(CEVPlayer, Api, EDecodeMode, "Decode")
+	SERIALIZATION_ENUM(CEVPlayer::Api::EDecodeMode::Auto, "Auto", "Auto")
+	SERIALIZATION_ENUM(CEVPlayer::Api::EDecodeMode::Gpu, "GPU", "GPU")
+	SERIALIZATION_ENUM(CEVPlayer::Api::EDecodeMode::Cpu, "CPU", "CPU")
 SERIALIZATION_ENUM_END()
 
 SERIALIZATION_ENUM_BEGIN_NESTED(CEVPlayer, EVideoFit, "Screen Fit")
@@ -51,25 +57,29 @@ namespace CEVPlayer
 			{
 				string video;
 				Api::EOutputMode outputMode = Api::EOutputMode::Screen;
-				string name;                       // Texture: texture name; Material: material name (empty = entity material)
+				string surfaceId;                  // Surface: the surface id UIs use
+				string material;                   // Material: material name (empty = entity material)
 				int32 slot = 0;
 				EVideoFit fit = EVideoFit::Letterbox;
 				string language;
 				bool loop = false;
 				bool autoplay = false;
 				bool skippable = false;
+				Api::EDecodeMode decode = Api::EDecodeMode::Auto;
 
 				void Serialize(Serialization::IArchive& archive)
 				{
 					archive(Serialization::ResourceFilePath(video, "Video files (*.webm;*.cevvideo)|*.webm;*.cevvideo", "Videos"), "video", "Video");
-					archive(outputMode, "outputMode", "Output Mode");
-					archive(name, "name", "Name");
-					archive(slot, "slot", "Slot Index");
+					archive(outputMode, "outputMode", "Output");
+					archive(surfaceId, "surfaceId", "SurfaceID");
+					archive(material, "material", "Material");
+					archive(slot, "slot", "Slot");
 					archive(fit, "fit", "Screen Fit");
 					archive(language, "language", "Language");
 					archive(loop, "loop", "Loop");
 					archive(autoplay, "autoplay", "Autoplay");
 					archive(skippable, "skippable", "Skippable");
+					archive(decode, "decode", "Decode");
 				}
 			};
 
@@ -139,7 +149,7 @@ namespace CEVPlayer
 						return false;
 					if (m_handle != 0 && mEnv->pApi->Find(m_handle, false) != nullptr)
 						return true;
-					m_handle = mEnv->pApi->Create(m_props.outputMode == Api::EOutputMode::Texture ? m_props.name.c_str() : nullptr, true);
+					m_handle = m_props.outputMode == Api::EOutputMode::Surface ? mEnv->pApi->CreateForSurface(m_props.surfaceId.c_str(), true) : mEnv->pApi->Create(true);
 					if (m_handle == 0)
 						return false;
 					mEnv->pApi->Subscribe(m_handle, this);
@@ -147,8 +157,10 @@ namespace CEVPlayer
 					const SValue loop[1] = { SValue::FromBool(m_props.loop) };
 					const SValue language[1] = { SValue::FromString(m_props.language.c_str()) };
 					const SValue skippable[1] = { SValue::FromBool(m_props.skippable) };
-					const SValue output[5] = { SValue::FromInt(static_cast<int>(m_props.outputMode)), SValue::FromString(m_props.name.c_str()),
+					const SValue decode[1] = { SValue::FromInt(static_cast<int>(m_props.decode)) };
+					const SValue output[5] = { SValue::FromInt(static_cast<int>(m_props.outputMode)), SValue::FromString(m_props.material.c_str()),
 						SValue::FromInt(m_props.slot), SValue::FromInt(-1), SValue::FromInt(static_cast<int>(m_props.fit)) };
+					Call(*FindByName("SetDecode"), m_handle, decode, 1, nullptr);
 					Call(*FindByName("SetLoop"), m_handle, loop, 1, nullptr);
 					Call(*FindByName("SetLanguage"), m_handle, language, 1, nullptr);
 					Call(*FindByName("SetSkippable"), m_handle, skippable, 1, nullptr);
@@ -285,7 +297,7 @@ namespace CEVPlayer
 				pFactory->SetName("VideoPlayer");
 				pFactory->SetNamespace("CEVPlayer");
 				pFactory->SetAuthor("CEVPlayer");
-				pFactory->SetDescription("Plays a .webm video or .cevvideo descriptor to the screen, a material slot or a named texture");
+				pFactory->SetDescription("Plays a .webm video or .cevvideo descriptor into a surface for UIs, to the screen or to a material slot");
 				registry.RegisterComponentFactory(pFactory);
 
 				uint32_t functions = 0;

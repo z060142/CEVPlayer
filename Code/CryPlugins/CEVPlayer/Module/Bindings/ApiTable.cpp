@@ -14,6 +14,7 @@
 #include <CryRenderer/IRenderer.h>
 
 #include "ApiPlayers.h"
+#include "Player/VideoPlayerImpl.h"
 
 namespace CEVPlayer
 {
@@ -27,6 +28,16 @@ namespace CEVPlayer
 		const CryGUID kOutputModeTypeGuid     = "B1A59049-6497-4430-8AE7-52035260856D"_cry_guid;
 		const CryGUID kVideoFileNameTypeGuid  = "DA1FFCAF-AF64-482B-BF62-B2C6002197F2"_cry_guid;
 		const CryGUID kFitTypeGuid            = "4DF842EF-5FF7-4794-B8E8-180FB499CEEA"_cry_guid;
+		const CryGUID kDecodeModeTypeGuid     = "14025090-A62F-4DC1-9A6E-47A9F50D5278"_cry_guid;
+		// Retired (see ApiTable.h): 6215D8DE-93E8-4236-9DB5-9DDCFD4F1C0D (TextureName), 2819FAC7-8B52-4BA3-9FA7-25BE56E317AD
+		// (InterfaceVersion), 23441E42-DE20-4EA3-A312-F6D624D5D83C (Caps).
+
+		std::string SerialText(uint64_t serial)
+		{
+			char buffer[32];
+			std::snprintf(buffer, sizeof(buffer), "%llu", static_cast<unsigned long long>(serial));
+			return buffer;
+		}
 
 		// ============================================================================================ SValue
 		SValue SValue::As(EType to) const
@@ -75,7 +86,13 @@ namespace CEVPlayer
 		{
 			bool FnCreate(const SCall& c)
 			{
-				const int handle = mEnv->pApi->Create(c.args[0].s.c_str());
+				const int handle = mEnv->pApi->Create();
+				*c.pResult = SValue::FromInt(handle);
+				return handle != 0;
+			}
+			bool FnCreateForSurface(const SCall& c)
+			{
+				const int handle = mEnv->pApi->CreateForSurface(c.args[0].s.c_str());
 				*c.pResult = SValue::FromInt(handle);
 				return handle != 0;
 			}
@@ -105,6 +122,20 @@ namespace CEVPlayer
 			bool FnSetVolume(const SCall& c) { c.pPlayer->SetVolume(c.args[0].f); return true; }
 			bool FnSetVariant(const SCall& c) { c.pPlayer->SetVariant(c.args[0].i); return true; }
 			bool FnSetSkippable(const SCall& c) { mEnv->pApi->SetSkippable(c.handle, c.args[0].b); return true; }
+			bool FnUnbindMaterial(const SCall& c) { c.pPlayer->UnbindMaterial(nullptr); return true; }
+			bool FnSetDecode(const SCall& c)
+			{
+				const int mode = c.args[0].i;
+				if (mode < static_cast<int>(EDecodeMode::Auto) || mode > static_cast<int>(EDecodeMode::Cpu))
+				{
+					LogWarning("api: SetDecode(%d): unknown mode (0 = Auto, 1 = GPU, 2 = CPU), ignored", mode);
+					return false;
+				}
+				if (static_cast<EDecodeMode>(mode) == EDecodeMode::Gpu)
+					LogWarning("api: SetDecode(GPU) on handle %d: hardware decode is not available in this build, the CPU decoder is used", c.handle);
+				mEnv->pApi->SetDecodeMode(c.handle, mode);
+				return true;
+			}
 
 			bool FnSetOutput(const SCall& c)
 			{
@@ -123,9 +154,12 @@ namespace CEVPlayer
 
 				switch (static_cast<EOutputMode>(mode))
 				{
-				case EOutputMode::Texture:
-					if (!name.empty() && stricmp(NormalizeTextureName(name.c_str()).c_str(), player.GetTextureName()) != 0)
-						LogWarning("api: SetOutput(Texture, <%s>): the texture name of a player is chosen by Create (<%s>) and cannot change", name.c_str(), player.GetTextureName());
+				case EOutputMode::Surface:
+					if (player.GetSurfaceId()[0] == '\0')
+					{
+						LogWarning("api: SetOutput(Surface) only works for a player made by CreateForSurface (handle %d has no surface id)", c.handle);
+						return false;
+					}
 					return true;
 				case EOutputMode::Screen:
 					player.SetFullscreen(true, static_cast<EVideoFit>(fit));
@@ -155,7 +189,7 @@ namespace CEVPlayer
 					return player.BindMaterial(pMaterial, subMaterial, slot);
 				}
 				default:
-					LogWarning("api: SetOutput: unknown mode %d (0 = Texture, 1 = Screen, 2 = Material)", mode);
+					LogWarning("api: SetOutput: unknown mode %d (0 = Surface, 1 = Screen, 2 = Material)", mode);
 					return false;
 				}
 			}
@@ -166,34 +200,44 @@ namespace CEVPlayer
 			bool FnWidth(const SCall& c) { *c.pResult = SValue::FromInt(c.pPlayer->GetWidth()); return true; }
 			bool FnHeight(const SCall& c) { *c.pResult = SValue::FromInt(c.pPlayer->GetHeight()); return true; }
 			bool FnTextureId(const SCall& c) { *c.pResult = SValue::FromInt(c.pPlayer->GetTextureId()); return true; }
-			bool FnTextureName(const SCall& c) { *c.pResult = SValue::FromString(c.pPlayer->GetTextureName()); return true; }
 			bool FnHasAlpha(const SCall& c) { *c.pResult = SValue::FromBool(c.pPlayer->HasAlpha()); return true; }
 			bool FnIsPremultiplied(const SCall& c) { *c.pResult = SValue::FromBool(c.pPlayer->IsPremultiplied()); return true; }
 			bool FnLanguage(const SCall& c) { *c.pResult = SValue::FromString(c.pPlayer->GetLanguage()); return true; }
 			bool FnVariant(const SCall& c) { *c.pResult = SValue::FromInt(c.pPlayer->GetVariant()); return true; }
-			bool FnInterfaceVersion(const SCall& c) { *c.pResult = SValue::FromInt(static_cast<int>(kVideoPlayerInterfaceVersion)); return true; }
-			bool FnCaps(const SCall& c) { *c.pResult = SValue::FromInt(static_cast<int>(kPluginCaps)); return true; }
+			bool FnSurfaceId(const SCall& c) { *c.pResult = SValue::FromString(c.pPlayer->GetSurfaceId()); return true; }
+			bool FnGeneration(const SCall& c) { *c.pResult = SValue::FromInt(static_cast<int>(c.pPlayer->GetGeneration())); return true; }
+			bool FnPixelLayout(const SCall& c) { *c.pResult = SValue::FromInt(static_cast<int>(c.pPlayer->GetPixelLayout())); return true; }
+			bool FnDecodeBackend(const SCall& c) { *c.pResult = SValue::FromInt(static_cast<int>(c.pPlayer->GetDecodeBackend())); return true; }
+			bool FnFrameSerial(const SCall& c) { *c.pResult = SValue::FromString(SerialText(c.pPlayer->GetFrameSerial()).c_str()); return true; }
+			bool FnIsLoaded(const SCall& c) { *c.pResult = SValue::FromBool(c.pPlayer->IsLoaded()); return true; }
+			bool FnIsLooping(const SCall& c) { *c.pResult = SValue::FromBool(c.pPlayer->IsLooping()); return true; }
+			bool FnHasAudio(const SCall& c) { *c.pResult = SValue::FromBool(c.pPlayer->HasAudio()); return true; }
+			// every IVideoPlayer of this plug-in is a CVideoPlayerImpl (made by CPlayerManager)
+			bool FnRate(const SCall& c) { *c.pResult = SValue::FromFloat(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetRate()); return true; }
+			bool FnVolume(const SCall& c) { *c.pResult = SValue::FromFloat(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetVolume()); return true; }
+			bool FnPath(const SCall& c) { *c.pResult = SValue::FromString(c.pPlayer->GetPath()); return true; }
 
 			// ======================================================================================== parameters
-			const SParam kCreateParams[]      = { { EType::String, "TextureName", "Name of the output texture, normally \"$something\"; empty = generated \"$cev_video_<w>x<h>_<k>\" (see the TextureName query once loaded)", 0, "", 'in00' } };
+			const SParam kCreateForSurfaceParams[] = { { EType::String, "SurfaceID", "Surface id: 1 to 63 of A-Z a-z 0-9 _ . : -, compared case-insensitively; UIs find the video by it", 0, "", 'in00' } };
 			const SParam kLoadParams[]        = { { EType::String, "Path", "CryPak path of a .webm video or a .cevvideo descriptor, e.g. Videos/intro.webm", 0, "", 'in00' } };
 			const SParam kSeekParams[]        = { { EType::Float, "Seconds", "Target time in seconds", 0, nullptr, 'in00' } };
 			const SParam kSetLoopParams[]     = { { EType::Bool, "Loop", "Restart at 0 when the end is reached", 0, nullptr, 'in00' } };
 			const SParam kSetRateParams[]     = { { EType::Float, "Rate", "Playback speed, 0.25 .. 4 (1 = normal; values outside are clamped)", 1.0, nullptr, 'in00' } };
 			const SParam kSetLanguageParams[] = { { EType::String, "Language", "Audio language as named in the .cevvideo descriptor; empty = default choice", 0, "", 'in00' } };
-			const SParam kSetVolumeParams[]   = { { EType::Float, "Volume", "Player volume 0..1 (multiplied with the global volumes cev_volume / vp_audio_volume)", 1.0, nullptr, 'in00' } };
+			const SParam kSetVolumeParams[]   = { { EType::Float, "Volume", "Player volume 0..1 (multiplied with the global volume cev_volume)", 1.0, nullptr, 'in00' } };
 			const SParam kSetOutputParams[]   =
 			{
-				{ EType::Int,    "Mode", "0 = Texture only (the named texture), 1 = Screen (fullscreen on the top layer), 2 = Material (bind to a texture slot of a material)", 0, nullptr, 'in00' },
-				{ EType::String, "Name", "Mode Material: material name (empty = the entity's own material where there is one). Mode Texture: informational, the texture name is chosen by Create", 0, "", 'in01' },
+				{ EType::Int,    "Mode", "0 = Surface only (players made by CreateForSurface), 1 = Screen (fullscreen on the top layer), 2 = Material (bind to a texture slot of a material)", 0, nullptr, 'in00' },
+				{ EType::String, "Name", "Mode Material: material name (empty = the entity's own material where there is one); not used by the other modes", 0, "", 'in01' },
 				{ EType::Int,    "Slot", "Mode Material: texture slot (EEfResTextures value, 0 = diffuse)", 0, nullptr, 'in02' },
 				{ EType::Int,    "SubMaterial", "Mode Material: sub-material index, -1 = the material itself", -1.0, nullptr, 'in03' },
 				{ EType::Int,    "Fit", "Mode Screen: 0 = Fill (stretch), 1 = Fit (keep aspect, scene visible in the bars), 2 = Letterbox (keep aspect, black bars)", 2.0, nullptr, 'in04' },
 			};
 			const SParam kSetVariantParams[]  = { { EType::Int, "Variant", "-2 = follow the cvar cev_variant, -1 = automatic, 0 = main video, n = n-th variant of the .cevvideo descriptor", -2.0, nullptr, 'in00' } };
 			const SParam kSetSkippableParams[] = { { EType::Bool, "Skippable", "A key / mouse / gamepad button press stops the video while it plays and sends the Skipped event", 0, nullptr, 'in00' } };
+			const SParam kSetDecodeParams[]   = { { EType::Int, "Mode", "0 = Auto, 1 = GPU, 2 = CPU (recorded only: this build always decodes on the CPU)", 0, nullptr, 'in00' } };
 
-			const SParam kNewFrameParams[]    = { { EType::Int, "Serial", "Number of the uploaded picture (counts up, wraps at 2^31)", 0, nullptr, 'seri' } };
+			const SParam kNewFrameParams[]    = { { EType::String, "Serial", "Number of the uploaded picture as decimal text (counts up, never wraps)", 0, "", 'seri' } };
 			const SParam kMarkerParams[]      =
 			{
 				{ EType::String, "Name", "Marker name from the .cevvideo descriptor", 0, "", 'name' },
@@ -210,21 +254,24 @@ namespace CEVPlayer
 			// ======================================================================================== the table
 			const SEntry kControls[] =
 			{
-				{ EKind::Control, "B2A87BA0-054C-4A88-9153-1433F8B9D5A5"_cry_guid, "Create", "Creates a player and returns its handle. Call Load next; Destroy it when done (a node that created players destroys them with itself).", CEV_ARRAY(kCreateParams), EType::Int, "Handle", false, eEntry_NoPlayer | eEntry_Standalone, &FnCreate },
+				{ EKind::Control, "B2A87BA0-054C-4A88-9153-1433F8B9D5A5"_cry_guid, "Create", "Creates a player without a surface id (for the Screen / Material outputs) and returns its handle. Call Load next; Destroy it when done.", CEV_NOPARAMS, EType::Int, "Handle", false, eEntry_NoPlayer | eEntry_Standalone, &FnCreate },
+				{ EKind::Control, "89616E06-B1CA-4D3F-BCFE-22A63D3EBA9D"_cry_guid, "CreateForSurface", "Creates a player identified by a surface id (UIs use its texture by that id) and returns its handle; fails when the id is invalid or already in use. Call Load next; Destroy it when done.", CEV_ARRAY(kCreateForSurfaceParams), EType::Int, "Handle", false, eEntry_NoPlayer | eEntry_Standalone, &FnCreateForSurface },
 				{ EKind::Control, "21F8A1C1-39AF-4937-BC2A-DA9818DA8555"_cry_guid, "Destroy", "Destroys the player and invalidates its handle.", CEV_NOPARAMS, EType::Void, nullptr, false, eEntry_Standalone, &FnDestroy },
 				{ EKind::Control, "AA69D241-E1A4-4424-8139-E55F5E6A2F5D"_cry_guid, "Load", "Starts loading a .webm video or a .cevvideo descriptor. Asynchronous: the Ready event (or Error) follows. Play may be called right away, it starts when the video is ready.", CEV_ARRAY(kLoadParams), EType::Void, nullptr, true, 0, &FnLoad },
 				{ EKind::Control, "CC294648-3872-4574-B532-8599A1EF0872"_cry_guid, "Play", "Plays from Stopped / Paused / Ended; queued while the video is loading.", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnPlay },
 				{ EKind::Control, "9A5627F9-47EE-40F7-A272-1C3E21562BD6"_cry_guid, "Pause", "Pauses playback.", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnPause },
 				{ EKind::Control, "1750FB12-2102-4635-98D3-361F88B7F73F"_cry_guid, "Resume", "Continues a paused video.", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnResume },
-				{ EKind::Control, "40BDAADD-C428-4A47-A16C-930B74F4EC42"_cry_guid, "Stop", "Stops and goes back to time 0. A Screen output is hidden until the next Play; a texture / material output keeps showing the first frame.", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnStop },
+				{ EKind::Control, "40BDAADD-C428-4A47-A16C-930B74F4EC42"_cry_guid, "Stop", "Stops and goes back to time 0. A Screen output is hidden until the next Play; a surface / material output keeps showing the first frame.", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnStop },
 				{ EKind::Control, "C89FA6A6-1EDF-4BDA-A6A6-5C08915A887C"_cry_guid, "Seek", "Jumps to a time in seconds.", CEV_ARRAY(kSeekParams), EType::Void, nullptr, false, 0, &FnSeek },
 				{ EKind::Control, "ACDCF5FB-070D-439A-B430-A92609F06348"_cry_guid, "SetLoop", "Sets looping.", CEV_ARRAY(kSetLoopParams), EType::Void, nullptr, false, 0, &FnSetLoop },
 				{ EKind::Control, "510FE2B6-D098-4C1A-9C7E-D74B77A1D22F"_cry_guid, "SetRate", "Sets the playback speed.", CEV_ARRAY(kSetRateParams), EType::Void, nullptr, false, 0, &FnSetRate },
 				{ EKind::Control, "EB59C123-4D68-43F3-A979-65C544B6BA1C"_cry_guid, "SetLanguage", "Selects the audio language of a .cevvideo descriptor (reloads the media in place while playing).", CEV_ARRAY(kSetLanguageParams), EType::Void, nullptr, false, 0, &FnSetLanguage },
 				{ EKind::Control, "737D69DA-7715-4384-8B6A-3F5C95E6F48D"_cry_guid, "SetVolume", "Sets the player volume.", CEV_ARRAY(kSetVolumeParams), EType::Void, nullptr, false, 0, &FnSetVolume },
-				{ EKind::Control, "B68F6467-1C13-491C-B0F3-BFF0D3CBF1C6"_cry_guid, "SetOutput", "Chooses where the picture goes: only the texture, fullscreen on the screen, or a texture slot of a material.", CEV_ARRAY(kSetOutputParams), EType::Void, nullptr, false, 0, &FnSetOutput },
+				{ EKind::Control, "B68F6467-1C13-491C-B0F3-BFF0D3CBF1C6"_cry_guid, "SetOutput", "Chooses where the picture goes: only the surface texture, fullscreen on the screen, or a texture slot of a material.", CEV_ARRAY(kSetOutputParams), EType::Void, nullptr, false, 0, &FnSetOutput },
 				{ EKind::Control, "079109C0-A530-4D82-BF32-5B8AF724C720"_cry_guid, "SetVariant", "Chooses the variant (resolution) of a .cevvideo descriptor.", CEV_ARRAY(kSetVariantParams), EType::Void, nullptr, false, 0, &FnSetVariant },
 				{ EKind::Control, "76A06A36-55E3-46A3-A2F0-651F74507C41"_cry_guid, "SetSkippable", "Makes the video skippable: a key / mouse / gamepad button press stops it while it plays and sends the Skipped event.", CEV_ARRAY(kSetSkippableParams), EType::Void, nullptr, false, 0, &FnSetSkippable },
+				{ EKind::Control, "0EABF916-13B4-4588-B90A-29C6951B3B99"_cry_guid, "SetDecode", "Chooses the decoder: Auto, GPU or CPU. Recorded only in this build: the video is always decoded on the CPU (GPU logs a warning).", CEV_ARRAY(kSetDecodeParams), EType::Void, nullptr, false, 0, &FnSetDecode },
+				{ EKind::Control, "C3E284F2-F49E-4554-B15F-0A8A3DBC4FCB"_cry_guid, "UnbindMaterial", "Removes every material binding of the player (the Material output).", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnUnbindMaterial },
 			};
 
 			const SEntry kQueries[] =
@@ -235,13 +282,21 @@ namespace CEVPlayer
 				{ EKind::Query, "1C5B665E-E1C1-49C8-8CC7-3C5D428F198B"_cry_guid, "Width", "Picture width in pixels, 0 until loaded.", CEV_NOPARAMS, EType::Int, "Width", false, 0, &FnWidth },
 				{ EKind::Query, "E57C2BAD-C06D-479F-8FA6-1F26C709D041"_cry_guid, "Height", "Picture height in pixels, 0 until loaded.", CEV_NOPARAMS, EType::Int, "Height", false, 0, &FnHeight },
 				{ EKind::Query, "B6CA4AE6-2F74-4BB2-B153-BEF9AC675213"_cry_guid, "TextureId", "Renderer texture id of the output texture, 0 while there is none.", CEV_NOPARAMS, EType::Int, "TextureId", false, 0, &FnTextureId },
-				{ EKind::Query, "6215D8DE-93E8-4236-9DB5-9DDCFD4F1C0D"_cry_guid, "TextureName", "Name the output texture is registered under (usable in materials and Flash).", CEV_NOPARAMS, EType::String, "TextureName", false, 0, &FnTextureName },
 				{ EKind::Query, "0CC4837F-F982-4246-9695-03991397069D"_cry_guid, "HasAlpha", "The video has an alpha channel.", CEV_NOPARAMS, EType::Bool, "HasAlpha", false, 0, &FnHasAlpha },
 				{ EKind::Query, "EAF2740F-37EB-47E9-BFAE-A538D53EC1AF"_cry_guid, "IsPremultiplied", "The output texture holds premultiplied alpha (always true).", CEV_NOPARAMS, EType::Bool, "IsPremultiplied", false, 0, &FnIsPremultiplied },
 				{ EKind::Query, "B7A77A6C-E01F-4051-9B05-CA9596E6E49B"_cry_guid, "Language", "Audio language in use (descriptor name), empty without languages.", CEV_NOPARAMS, EType::String, "Language", false, 0, &FnLanguage },
 				{ EKind::Query, "6AB75D22-6C00-4168-B33D-F06FDFACA93E"_cry_guid, "Variant", "Variant in use: 0 = main video, n = n-th variant.", CEV_NOPARAMS, EType::Int, "Variant", false, 0, &FnVariant },
-				{ EKind::Query, "2819FAC7-8B52-4BA3-9FA7-25BE56E317AD"_cry_guid, "InterfaceVersion", "Version of the player interface of this plug-in (IVideoPlayer.h).", CEV_NOPARAMS, EType::Int, "Version", false, eEntry_NoPlayer, &FnInterfaceVersion },
-				{ EKind::Query, "23441E42-DE20-4EA3-A312-F6D624D5D83C"_cry_guid, "Caps", "Capability bits: 1 Alpha, 2 Premultiplied, 4 MultiResolution, 8 Variants.", CEV_NOPARAMS, EType::Int, "Caps", false, eEntry_NoPlayer, &FnCaps },
+				{ EKind::Query, "97C49A10-C7A1-40AC-BF8B-D7688F2CF190"_cry_guid, "SurfaceId", "Surface id of the player, empty for a player made by Create.", CEV_NOPARAMS, EType::String, "SurfaceId", false, 0, &FnSurfaceId },
+				{ EKind::Query, "1DE894B9-3DBD-45B8-8614-441706F53725"_cry_guid, "Generation", "Counts changes of the texture (id, size or layout): fetch TextureId / Width / Height again when it changes.", CEV_NOPARAMS, EType::Int, "Generation", false, 0, &FnGeneration },
+				{ EKind::Query, "40D5FCCC-EC86-45D5-9D1E-38DEFC23D6B9"_cry_guid, "PixelLayout", "Pixel layout of the texture: 0 = RGBA8 premultiplied (the only layout so far).", CEV_NOPARAMS, EType::Int, "PixelLayout", false, 0, &FnPixelLayout },
+				{ EKind::Query, "803D34BF-61FB-4E84-BE3E-5A09CF51FE57"_cry_guid, "DecodeBackend", "Decoder in use: 0 = CPU (the only backend so far).", CEV_NOPARAMS, EType::Int, "DecodeBackend", false, 0, &FnDecodeBackend },
+				{ EKind::Query, "347FB1FF-D80B-4466-9F14-1A8D1DCDF6DB"_cry_guid, "FrameSerial", "Number of uploaded pictures as decimal text (never wraps); usable as a changed test.", CEV_NOPARAMS, EType::String, "FrameSerial", false, 0, &FnFrameSerial },
+				{ EKind::Query, "099454C4-CF34-4256-942F-FF8370DB3641"_cry_guid, "IsLoaded", "The video is loaded: size, duration and texture are valid.", CEV_NOPARAMS, EType::Bool, "IsLoaded", false, 0, &FnIsLoaded },
+				{ EKind::Query, "20DE7AD5-1A14-436C-921B-315869454C7B"_cry_guid, "IsLooping", "Looping is on.", CEV_NOPARAMS, EType::Bool, "IsLooping", false, 0, &FnIsLooping },
+				{ EKind::Query, "1809C0FC-D74C-444B-BB5F-B5D852FCE18A"_cry_guid, "HasAudio", "The loaded video has audio.", CEV_NOPARAMS, EType::Bool, "HasAudio", false, 0, &FnHasAudio },
+				{ EKind::Query, "AD99F4C8-E215-466F-A561-92370F82314E"_cry_guid, "Rate", "Playback speed last set (1 = normal).", CEV_NOPARAMS, EType::Float, "Rate", false, 0, &FnRate },
+				{ EKind::Query, "B683DEC0-4EA3-4B01-9DEE-2A85987BABEE"_cry_guid, "Volume", "Player volume last set (0..1).", CEV_NOPARAMS, EType::Float, "Volume", false, 0, &FnVolume },
+				{ EKind::Query, "6A378344-3AD7-4639-BC35-2254E21D51D9"_cry_guid, "Path", "Path given to the last Load, empty before.", CEV_NOPARAMS, EType::String, "Path", false, 0, &FnPath },
 			};
 
 			const SEntry kEvents[] =
@@ -399,6 +454,15 @@ namespace CEVPlayer
 			note(kOutputModeTypeGuid, "output mode type");
 			note(kVideoFileNameTypeGuid, "video file name type");
 			note(kFitTypeGuid, "video fit type");
+			note(kDecodeModeTypeGuid, "decode mode type");
+
+			// retired GUIDs must never come back
+			static const CryGUID retired[] =
+			{
+				"6215D8DE-93E8-4236-9DB5-9DDCFD4F1C0D"_cry_guid, // TextureName
+				"2819FAC7-8B52-4BA3-9FA7-25BE56E317AD"_cry_guid, // InterfaceVersion
+				"23441E42-DE20-4EA3-A312-F6D624D5D83C"_cry_guid, // Caps
+			};
 
 			const SSpan spans[3] = { Controls(), Queries(), Events() };
 			for (uint32_t k = 0; k < 3; ++k)
@@ -407,6 +471,14 @@ namespace CEVPlayer
 				{
 					++total;
 					note(e.guid, e.name);
+					for (const CryGUID& r : retired)
+					{
+						if (r == e.guid)
+						{
+							LogWarning("api table: <%s> uses the retired GUID %s", e.name, r.ToDebugString());
+							++problems;
+						}
+					}
 					if (e.name == nullptr || e.name[0] == '\0')
 					{
 						LogWarning("api table: an entry has no name");

@@ -6,10 +6,10 @@
 #include "Plugin.h"
 #include "Console.h"
 
-#include "Components/TextureVideoPlayerComponent.h"
 #include "Components/VideoPlayerComponent.h"
 #include "Bindings/ApiTable.h"
 #include "Bindings/ApiTest.h"
+#include "Bindings/FlowTest.h"
 #include "Contract/ContractTest.h"
 #include "Contract/TexSource.h"
 #if CEV_HAVE_CRYVS
@@ -42,17 +42,15 @@ namespace CEVPlayer
 	{
 		Schematyc::CEnvRegistrationScope scope = registrar.Scope(IEntity::GetEntityScopeGUID());
 		{
-			// Texture video player component
-			{
-				Schematyc::CEnvRegistrationScope componentScope = scope.Register(SCHEMATYC_MAKE_ENV_COMPONENT(CTextureVideoPlayerComponent));
-				CTextureVideoPlayerComponent::Register(componentScope);
-			}
 			// Video Player component (functions and signals generated from the API table)
 			{
 				Schematyc::CEnvRegistrationScope componentScope = scope.Register(SCHEMATYC_MAKE_ENV_COMPONENT(CVideoPlayerComponent));
 				CVideoPlayerComponent::Register(componentScope);
+				unsigned controls = 0;
+				for (const Api::SEntry& e : Api::Controls())
+					controls += (e.flags & Api::eEntry_Standalone) == 0 ? 1u : 0u;
 				LogAlways("Schematyc: registered component 'Video Player' (%u control and %u query functions, %u signals)",
-					static_cast<unsigned>(Api::Controls().size()) - 2u, static_cast<unsigned>(Api::Queries().size()), static_cast<unsigned>(Api::Events().size()));
+					controls, static_cast<unsigned>(Api::Queries().size()), static_cast<unsigned>(Api::Events().size()));
 			}
 		}
 	}
@@ -75,13 +73,9 @@ namespace CEVPlayer
 
 		UnregisterConsole();
 
-		mEnv->pInputDispatcher = nullptr;
-		m_pInputDispatcher.reset();
 		mEnv->pApi = nullptr;
 		m_pApi.reset();
-		mEnv->pLegacy = nullptr;
 		mEnv->pManager = nullptr;
-		m_pLegacy.reset();
 		m_pManager.reset();
 		cev::DecodePool::ShutdownShared(); // idempotent: no worker thread may outlive this module
 	}
@@ -92,15 +86,13 @@ namespace CEVPlayer
 		// needs them.
 		Contract::Open(); // the CryTexSource_v1 export starts answering for surface players
 		m_pManager = std::make_unique<CPlayerManager>();
-		m_pLegacy = std::make_unique<CLegacyPlayback>(*m_pManager);
 		mEnv->pManager = m_pManager.get();
-		mEnv->pLegacy = m_pLegacy.get();
 		m_pApi = std::make_unique<Api::CApiPlayers>(*m_pManager);
 		mEnv->pApi = m_pApi.get();
 
 		RegisterConsole();
 		Api::SelfCheck(); // duplicate GUIDs / names in the API table -> warning (assert in debug)
-		LogAlways("API table: %u FlowGraph node classes generated (CEVPlayer:Video:*)", Api::FlowNodeCount());
+		LogAlways("FlowGraph: %u node classes (Video:*, VideoUI:*, VideoAdvanced:*)", Api::FlowNodeCount());
 
 		if (gEnv->pSystem != nullptr)
 		{
@@ -139,7 +131,9 @@ namespace CEVPlayer
 		if (m_pApi)
 			m_pApi->Update(); // Skipped events, records destroyed from inside a callback
 		Api::TickApiTest();
+		Api::TickFlowTest();
 		Contract::TickSelfTest();
+		TickRunScript(); // development test driver (cev_run_script)
 		DevProbesBeforeRender(); // measurement only (S0)
 	}
 
@@ -157,15 +151,15 @@ namespace CEVPlayer
 #endif
 		// The script API goes first: it removes its player listeners and the skip input listener while the players
 		// still exist (the manager destroys them below).
+		ShutdownRunScript();
+		Api::ShutdownFlowTest(); // its graph owns players: before the API registry goes
 		Api::ShutdownApiTest();
 		Contract::ShutdownSelfTest();
 		if (m_pApi)
 			m_pApi->Shutdown();
 		DevProbesShutdown(); // measurement probes (S0): their textures and the cev_bench_play player
-		// Order matters: the legacy layer owns players of the manager, the manager releases the textures (the
-		// renderer is still alive at ESYSTEM_EVENT_FULL_SHUTDOWN / FAST_SHUTDOWN) and the audio device.
-		if (m_pLegacy)
-			m_pLegacy->Shutdown();
+		// The manager releases the textures (the renderer is still alive at ESYSTEM_EVENT_FULL_SHUTDOWN /
+		// FAST_SHUTDOWN) and the audio device.
 		if (m_pManager)
 			m_pManager->Shutdown();
 		Contract::Close(); // the export stays callable until the process ends: query 0, hint ignored
@@ -173,30 +167,6 @@ namespace CEVPlayer
 		// workers before the module can be unloaded.
 		cev::DecodePool::ShutdownShared();
 		LogDebug("bridge shut down, decode pool released");
-	}
-
-	void CVideoPlugin::RegisterLegacyInput()
-	{
-		if (m_pInputDispatcher != nullptr || gEnv->pGameFramework == nullptr || gEnv->pGameFramework->GetIActionMapManager() == nullptr)
-			return;
-
-		m_pInputDispatcher = std::make_unique<CInputDispatcher>();
-		mEnv->pInputDispatcher = m_pInputDispatcher.get();
-
-		CLegacyPlayback* const pLegacy = m_pLegacy.get();
-		m_pInputDispatcher->RegisterAction("video_plugin", "pause_ingame_video", [pLegacy](int activationMode, float value) { pLegacy->OnActionPause2DVideo((EInputState)activationMode, value); });
-		m_pInputDispatcher->RegisterAction("video_plugin", "skip_ingame_video", [pLegacy](int activationMode, float value) { pLegacy->OnActionSkip2DVideo((EInputState)activationMode, value); });
-
-		m_pInputDispatcher->BindAction("video_plugin", "pause_ingame_video", "Shift", eAID_KeyboardMouse, EKeyId::eKI_Space);
-		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "Enter", eAID_KeyboardMouse, EKeyId::eKI_Enter);
-		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "Escape", eAID_KeyboardMouse, EKeyId::eKI_Escape);
-		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "Space", eAID_KeyboardMouse, EKeyId::eKI_Escape);
-		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_a", eAID_KeyboardMouse, EKeyId::eKI_XI_A);
-		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_b", eAID_KeyboardMouse, EKeyId::eKI_XI_B);
-		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_x", eAID_KeyboardMouse, EKeyId::eKI_XI_X);
-		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_y", eAID_KeyboardMouse, EKeyId::eKI_XI_Y);
-		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_start", eAID_KeyboardMouse, EKeyId::eKI_XI_Start);
-		m_pInputDispatcher->BindAction("video_plugin", "skip_ingame_video", "xi_back", eAID_KeyboardMouse, EKeyId::eKI_XI_Back);
 	}
 
 	void CVideoPlugin::OnSystemEvent(ESystemEvent event, UINT_PTR wparam, UINT_PTR lparam)
@@ -219,7 +189,6 @@ namespace CEVPlayer
 		{
 		case ESYSTEM_EVENT_GAME_POST_INIT:
 		{
-			RegisterLegacyInput();
 			if (m_pManager)
 				m_pManager->RegisterLevelListener();
 #if CEV_HAVE_CRYVS
@@ -244,117 +213,15 @@ namespace CEVPlayer
 			break;
 		}
 		case ESYSTEM_EVENT_LEVEL_UNLOAD:
-			if (m_pLegacy)
-			{
-				// Flow graphs / entities of the level die: nobody may be called back for the videos that go on
-				// (main window videos), and texture videos end with the level.
-				m_pLegacy->DetachListeners();
-				m_pLegacy->ClearTextureVideos();
-			}
 			if (m_pApi)
 				m_pApi->DestroyScriptOwned(); // players of flow graph nodes / scripts: their graphs are gone, nothing may stay on screen
 			break;
-		case ESYSTEM_EVENT_GAME_PAUSED:
-			if (m_pLegacy)
-				m_pLegacy->PauseAllTextureVideos(true);
-			break;
-		case ESYSTEM_EVENT_GAME_RESUMED:
-			if (m_pLegacy)
-				m_pLegacy->PauseAllTextureVideos(false);
-			break;
 		case ESYSTEM_EVENT_EDITOR_GAME_MODE_CHANGED:
 		{
-			if (wparam == 0 && m_pLegacy) // Clear when exit from game mode
-			{
-				m_pLegacy->DetachListeners(); // the game mode's flow graphs are destroyed now
-				m_pLegacy->ClearTextureVideos();
-			}
 			if (wparam == 0 && m_pApi)
 				m_pApi->DestroyScriptOwned(); // the flow graphs of the game mode are reset: their Screen players must not stay on screen
 			break;
 		}
-		default:
-			break;
-		}
-	}
-
-	// ---------------------------------------------------------------------------------------------- legacy API
-	void CVideoPlugin::PlayVideoToMainWindow(const char* videoName, bool preload, bool looped, int audioTrack, bool isSkippable, bool canBePaused, IVideoPlayerEventListener* pVideoPlayerListener)
-	{
-		if (!CheckMainThread("PlayVideoToMainWindow") || gEnv->pSystem->IsQuitting())
-			return;
-
-		if (m_pLegacy)
-		{
-			m_pLegacy->Play2DVideo(pVideoPlayerListener, videoName, preload, looped, audioTrack, isSkippable, canBePaused);
-		}
-		else
-		{
-			LogError("<CVideoPlugin> Can't play 2D video, plug-in is not initialized!");
-		}
-	}
-
-	void CVideoPlugin::PlayVideoToTexture(const char* videoName, const char* textureName, bool preload, bool looped, IVideoPlayerEventListener* pListener)
-	{
-		if (!CheckMainThread("PlayVideoToTexture") || gEnv->pSystem->IsQuitting())
-			return;
-
-		if (m_pLegacy)
-		{
-			m_pLegacy->PlayVideo(pListener, videoName, textureName, preload, looped);
-		}
-		else
-		{
-			LogError("<CVideoPlugin> Can't play texture video, plug-in is not initialized!");
-		}
-	}
-
-	void CVideoPlugin::PauseVideo(EVideoType videoType, const char* textureName)
-	{
-		if (!m_pLegacy || !CheckMainThread("PauseVideo"))
-			return;
-		switch (videoType)
-		{
-		case EVideoType::ToMainWindow:
-			m_pLegacy->Pause2DVideo();
-			break;
-		case EVideoType::ToTexture:
-			m_pLegacy->PauseVideo(textureName);
-			break;
-		default:
-			break;
-		}
-	}
-
-	void CVideoPlugin::ResumeVideo(EVideoType videoType, const char* textureName)
-	{
-		if (!m_pLegacy || !CheckMainThread("ResumeVideo"))
-			return;
-		switch (videoType)
-		{
-		case EVideoType::ToMainWindow:
-			m_pLegacy->Resume2DVideo();
-			break;
-		case EVideoType::ToTexture:
-			m_pLegacy->ResumeVideo(textureName);
-			break;
-		default:
-			break;
-		}
-	}
-
-	void CVideoPlugin::StopVideo(EVideoType videoType, const char* textureName)
-	{
-		if (!m_pLegacy || !CheckMainThread("StopVideo"))
-			return;
-		switch (videoType)
-		{
-		case EVideoType::ToMainWindow:
-			m_pLegacy->Stop2DVideo();
-			break;
-		case EVideoType::ToTexture:
-			m_pLegacy->StopVideo(textureName);
-			break;
 		default:
 			break;
 		}
@@ -374,14 +241,6 @@ namespace CEVPlayer
 			return;
 		if (m_pManager)
 			m_pManager->DestroyPlayer(pPlayer); // only compares the pointer with the live players: safe after shutdown
-	}
-
-	void CVideoPlugin::RemoveVideoListener(IVideoPlayerEventListener* pListener)
-	{
-		if (!CheckMainThread("RemoveVideoListener"))
-			return;
-		if (m_pLegacy)
-			m_pLegacy->RemoveVideoListener(pListener);
 	}
 
 	IVideoPlayer* CVideoPlugin::CreatePlayerForSurface(const char* surfaceId)

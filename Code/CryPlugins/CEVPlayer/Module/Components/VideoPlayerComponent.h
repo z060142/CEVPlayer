@@ -1,6 +1,6 @@
 // Schematyc entity component "Video Player": one player per entity, configured by properties, driven by functions
-// and signals that are generated from the API table (Bindings/ApiTable.h). The legacy TextureVideoPlayer component
-// stays as it is.
+// and signals that are generated from the API table (Bindings/ApiTable.h). Output Surface makes a surface player
+// (UIs show it by its SurfaceID), Screen plays fullscreen, Material binds the texture to a material slot.
 #pragma once
 
 #include <string>
@@ -51,7 +51,7 @@ namespace CEVPlayer
 		// signals (one type per table event, GUIDs and payload names come from the table)
 		struct SReadySignal { SReadySignal() = default; };
 		struct SStartedSignal { SStartedSignal() = default; };
-		struct SNewFrameSignal { SNewFrameSignal() = default; int32 serial = 0; };
+		struct SNewFrameSignal { SNewFrameSignal() = default; Schematyc::CSharedString serial; };
 		struct SMarkerSignal { SMarkerSignal() = default; Schematyc::CSharedString name; float time = 0.f; };
 		struct SLoopedSignal { SLoopedSignal() = default; };
 		struct SEndedSignal { SEndedSignal() = default; };
@@ -61,13 +61,15 @@ namespace CEVPlayer
 		// properties
 		VideoFileName            m_video;
 		Api::EOutputMode         m_outputMode = Api::EOutputMode::Screen;
-		Schematyc::CSharedString m_name;       // Texture: the texture name ("$video_1"); Material: material name (empty = this entity's material)
+		Schematyc::CSharedString m_surfaceId;  // Surface: the surface id UIs use
+		Schematyc::CSharedString m_material;   // Material: material name (empty = this entity's material)
 		int32                    m_slot = 0;   // Material: texture slot (0 = diffuse)
 		EVideoFit                m_fit = EVideoFit::Letterbox; // Screen
 		Schematyc::CSharedString m_language;
 		bool                     m_loop = false;
 		bool                     m_autoplay = false;
 		bool                     m_skippable = false;
+		Api::EDecodeMode         m_decode = Api::EDecodeMode::Auto;
 
 	private:
 		bool EnsurePlayer();

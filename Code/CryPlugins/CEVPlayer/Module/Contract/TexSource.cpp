@@ -242,6 +242,17 @@ namespace CEVPlayer
 			return true;
 		}
 
+		uint32_t SurfaceCount()
+		{
+			SExclusive lock;
+			return s_pSurfaces != nullptr ? static_cast<uint32_t>(s_pSurfaces->size()) : 0u;
+		}
+
+		uint32_t ApiVersion()
+		{
+			return s_api.version;
+		}
+
 		void LogSurfaces()
 		{
 			std::vector<SSurface> copy;

@@ -13,8 +13,6 @@ namespace CEVPlayer
 	constexpr uint32_t kPluginCaps = eVideoCap_Alpha | eVideoCap_Premultiplied | eVideoCap_Variants;
 
 	class CPlayerManager;
-	class CLegacyPlayback;
-	class CInputDispatcher;
 	namespace Api { class CApiPlayers; }
 
 #define TITLE "[CEVPlayer] "
@@ -27,20 +25,14 @@ namespace CEVPlayer
 	{
 		// Pointers (owned by CVideoPlugin)
 		CPlayerManager* pManager = nullptr;
-		CLegacyPlayback* pLegacy = nullptr;
-		CInputDispatcher* pInputDispatcher = nullptr;
 		Api::CApiPlayers* pApi = nullptr;  // handle registry of the script API (FlowGraph / Schematyc / CryVS)
 
 		// Console variables (bound to the cvar system, written on the main thread, read anywhere)
-		int m_bDebugLog = 0;      // vp_debug_log (legacy)
-		int m_bDebugDraw = 0;     // vp_debug_draw (legacy): same text overlay as cev_stats
-		int m_bDisableLog = 0;    // vp_disableLogs
-		float m_audioVolume = 1.f; // vp_audio_volume (global volume 0..1)
 		int m_cevLog = 0;         // cev_log: 1 = verbose
 		int m_cevStats = 0;       // cev_stats: 1 = stats line every second (log + on screen)
 		int m_cevDecodeThreads = 0; // cev_decodeThreads: 0 = auto
 		int m_cevAudioEnable = 1; // cev_audio_enable
-		float m_cevVolume = 1.f;  // cev_volume (master volume 0..1, multiplied with vp_audio_volume)
+		float m_cevVolume = 1.f;  // cev_volume (master volume 0..1)
 		int m_cevMuteOnFocusLoss = 1; // cev_muteOnFocusLoss
 		int m_cevDisableEmbeddedAudio = 0; // cev_disableEmbeddedAudio: never initialise the SDL audio subsystem
 		int m_cevCueForceFallback = 0; // cev_cueForceFallback: 1 = the cue route ignores the engine patch and follows the video clock
@@ -60,9 +52,9 @@ namespace CEVPlayer
 	//! anything. nullptr / empty -> empty string.
 	std::string NormalizeTextureName(const char* name, bool* pChanged = nullptr);
 
-#define Log(...) do { if(mEnv && !mEnv->m_bDisableLog) { CryLog (TITLE __VA_ARGS__); } } while(0)
-#define LogDebug(...) do { if(mEnv && (mEnv->m_bDebugLog || mEnv->m_cevLog)) { CryLog (TITLE __VA_ARGS__); } } while(0)
-#define LogAlways(...) do { if(mEnv && !mEnv->m_bDisableLog) { CryLogAlways (TITLE __VA_ARGS__);} } while(0)
-#define LogWarning(...) do { if(mEnv && !mEnv->m_bDisableLog) { CryWarning(VALIDATOR_MODULE_RENDERER, VALIDATOR_WARNING, TITLE __VA_ARGS__);} } while(0)
-#define LogError(...) do { if(mEnv && !mEnv->m_bDisableLog) { CryWarning(VALIDATOR_MODULE_RENDERER, VALIDATOR_ERROR, TITLE __VA_ARGS__);} } while(0)
+#define Log(...) do { if(mEnv) { CryLog (TITLE __VA_ARGS__); } } while(0)
+#define LogDebug(...) do { if(mEnv && mEnv->m_cevLog) { CryLog (TITLE __VA_ARGS__); } } while(0)
+#define LogAlways(...) do { if(mEnv) { CryLogAlways (TITLE __VA_ARGS__);} } while(0)
+#define LogWarning(...) do { if(mEnv) { CryWarning(VALIDATOR_MODULE_RENDERER, VALIDATOR_WARNING, TITLE __VA_ARGS__);} } while(0)
+#define LogError(...) do { if(mEnv) { CryWarning(VALIDATOR_MODULE_RENDERER, VALIDATOR_ERROR, TITLE __VA_ARGS__);} } while(0)
 }

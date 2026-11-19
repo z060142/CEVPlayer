@@ -9,7 +9,7 @@
 // any source rate / channel count plays. The voice's AudioClock is advanced by every callback with the full
 // block size (also for silence), which is what makes it the playback clock of its player.
 //
-// Mixing (audio thread) neither allocates nor logs. Gain = voice volume x cev_volume x vp_audio_volume, muted
+// Mixing (audio thread) neither allocates nor logs. Gain = voice volume x cev_volume, muted
 // while the main window has no focus and cev_muteOnFocusLoss is set; changes are ramped over one block.
 #pragma once
 

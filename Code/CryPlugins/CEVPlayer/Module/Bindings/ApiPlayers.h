@@ -4,6 +4,7 @@
 #pragma once
 
 #include <map>
+#include <string>
 #include <memory>
 #include <vector>
 
@@ -37,12 +38,27 @@ namespace CEVPlayer
 			CApiPlayers(const CApiPlayers&) = delete;
 			CApiPlayers& operator=(const CApiPlayers&) = delete;
 
-			//! Creates a player (nullptr / empty = generated texture name). Returns its handle, 0 on failure.
+			//! Creates a player without a surface id (generated texture name). Returns its handle, 0 on failure.
 			//! `componentOwned`: the caller (a Schematyc / CryVS component) owns the player and destroys it itself with
 			//! the component; DestroyScriptOwned() leaves such a player alone.
-			int Create(const char* textureName, bool componentOwned = false);
-			//! Destroys the player and invalidates the handle. False (with a warning) for an invalid handle.
+			int Create(bool componentOwned = false);
+			//! Creates a surface player (CPlayerManager::CreatePlayerForSurface). 0 on failure: LastErrorCode() /
+			//! LastErrorMessage() then tell why (cev::Status::InvalidArgument = invalid id, InvalidState = id in use).
+			int CreateForSurface(const char* surfaceId, bool componentOwned = false);
+			//! Handle of the live surface player `surfaceId`, whoever made it (a node, a component, cev_play_surface, the
+			//! texture source contract). A player that has no handle yet gets an ATTACHED record: it is not owned, Destroy
+			//! on it only forgets the handle and DestroyScriptOwned leaves the player alone. 0 when there is no such
+			//! surface (no warning).
+			int AttachSurface(const char* surfaceId);
+			//! Destroys the player and invalidates the handle (an attached handle is only forgotten). False (with a
+			//! warning) for an invalid handle.
 			bool Destroy(int handle);
+			//! Why the last Create / CreateForSurface failed (cev::Status value, 0 = it did not fail) and a short text.
+			int LastErrorCode() const { return m_lastErrorCode; }
+			const char* LastErrorMessage() const { return m_lastErrorMessage.c_str(); }
+			//! SetDecode: the decoder choice of a player (EDecodeMode value). Recorded only, the backend is the CPU.
+			void SetDecodeMode(int handle, int mode);
+			int GetDecodeMode(int handle) const;
 			//! The player behind a handle, nullptr (and a warning when `warn`) for an invalid one.
 			IVideoPlayer* Find(int handle, bool warn = true);
 			uint32_t Count() const { return static_cast<uint32_t>(m_records.size()); }
@@ -84,6 +100,9 @@ namespace CEVPlayer
 				bool skippable = false;
 				bool skipPending = false;
 				bool componentOwned = false;
+				bool attached = false;      //!< AttachSurface: the player belongs to someone else
+				uint32_t playerId = 0;      //!< CVideoPlayerImpl::Id(): tells a reused address from the player we know
+				int decodeMode = 0;
 				std::vector<IEventSink*> sinks;
 
 				void OnReady(IVideoPlayer& player) override;
@@ -96,6 +115,8 @@ namespace CEVPlayer
 			};
 
 			SRecord* FindRecord(int handle, bool warn);
+			int AddRecord(IVideoPlayer* pPlayer, bool componentOwned, bool attached);
+			bool IsAlive(const SRecord& record) const;
 			void Dispatch(SRecord& record, uint32_t event, const SValue* args, uint32_t argCount);
 			void Retire(std::unique_ptr<SRecord> pRecord);
 			void UpdateInputListener();
@@ -107,6 +128,8 @@ namespace CEVPlayer
 			int m_nextHandle = 1;
 			bool m_inputRegistered = false;
 			bool m_shutdown = false;
+			int m_lastErrorCode = 0;
+			std::string m_lastErrorMessage;
 		};
 	}
 }

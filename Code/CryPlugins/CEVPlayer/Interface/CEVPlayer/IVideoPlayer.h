@@ -48,7 +48,8 @@ namespace CEVPlayer
 	//! 3: IVideoPlayerListener::OnMarker, IVideoPlayer::SetLanguage / GetLanguage, Load() accepts .cevvideo.
 	//! 4: IVideoPlayer::SetVariant / GetVariant (per player variant choice of a .cevvideo descriptor).
 	//! 5: IVideoPlugin::CreatePlayerForSurface / FindPlayerBySurface, IVideoPlayer::GetSurfaceId / GetGeneration /
-	//!    GetPixelLayout / GetDecodeBackend.
+	//!    GetPixelLayout / GetDecodeBackend. M6b (same version, never released before): the legacy IVideoPlugin
+	//!    virtuals were removed.
 	constexpr uint32_t kVideoPlayerInterfaceVersion = 5;
 
 	//! IVideoPlayer::GetPixelLayout(). Values match the CTS_LAYOUT_* values of the texture source contract.
@@ -113,7 +114,7 @@ namespace CEVPlayer
 		//! Loading failed, or a loaded video failed during playback (errorCode is a cev::Status value, message is a
 		//! static string). The player is in the Error state afterwards.
 		virtual void OnError(IVideoPlayer& player, int errorCode, const char* message) { (void)player; (void)errorCode; (void)message; }
-		// ---- appended in version 1 as defaulted callbacks (used by the legacy wrappers) ----
+		// ---- appended in version 1 as defaulted callbacks ----
 		virtual void OnPaused(IVideoPlayer& player) { (void)player; }
 		virtual void OnResumed(IVideoPlayer& player) { (void)player; }
 		virtual void OnStopped(IVideoPlayer& player) { (void)player; }
@@ -158,7 +159,7 @@ namespace CEVPlayer
 		virtual void Seek(double seconds) = 0;
 		virtual void SetLoop(bool loop) = 0;
 		virtual void SetRate(float rate) = 0;     //!< playback speed, clamped to 0.25 .. 4 (rate <= 0 / NaN ignored)
-		virtual void SetVolume(float volume) = 0; //!< 0..1, multiplied with the global volumes (cev_volume, vp_audio_volume)
+		virtual void SetVolume(float volume) = 0; //!< 0..1, multiplied with the global volume cev_volume
 
 		// ---- queries ----
 		virtual EVideoPlayerState GetState() const = 0;

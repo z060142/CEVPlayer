@@ -98,6 +98,9 @@ namespace CEVPlayer
 		void TakeUploadTiming(float& avgMs, float& p99Ms, uint32_t& samples);
 		uint64_t LastUploadBytes() const { return m_lastUploadBytes; }
 		EVideoFit Fit() const { return m_fit; }
+		//! Values last given to SetRate / SetVolume (API table queries Rate / Volume).
+		float GetRate() const { return m_rate; }
+		float GetVolume() const { return m_volume; }
 		cev::PlayerCore& Core() { return *m_core; }
 		//! "audio" while an audio voice drives the clock (AudioClock), "cue" while the playback position of the cue
 		//! trigger does, otherwise "internal" (wall clock / video clock).

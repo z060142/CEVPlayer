@@ -9,7 +9,7 @@
 #   --delay N            wait N seconds after startup before the first command   (default 2)
 #   --exec "c1;c2;..."   console commands to run, in order. Separate with ';'.
 #                        Include `wait_seconds N` entries yourself to space them out,
-#                        e.g. --exec "vp_play vp8_vorbis;wait_seconds 5;vp_stop"
+#                        e.g. --exec "cev_play Videos/vp8_vorbis.webm;wait_seconds 5;cev_stop"
 #   --project FILE       .cryproject (default $CEV_PROJECT, else D:/coding11/_testproject/CEVTest/CEVTest.cryproject)
 #   --timeout N          hard timeout in seconds; the process is killed and the run FAILs
 #                        (default 300; the very first run on a tree is slower (~1 min: rc.exe converts
@@ -215,7 +215,7 @@ done
 
 echo "-- exit code: $rc   wall time: ${dur}s"
 echo "-- CEVPlayer / plugin lines:"
-grep -E "Loading plug-in CEVPlayer|Unloading CEVPlayer|\[CEVPlayer\]|flownode 'CEVPlayer|Executing console command 'vp_|Executing console command 'cev_" "$log" 2>/dev/null \
+grep -E "Loading plug-in CEVPlayer|Unloading CEVPlayer|\[CEVPlayer\]|flownode 'Video|Executing console command 'cev_" "$log" 2>/dev/null \
   | grep -v -E "<CVideoPlayer> (---|Header|Pos|Size|Track|TimeCode|Position)" | head -40 | sed "s/^/   | /"
 nerr=$(grep -c "\[Error\]" "$log" 2>/dev/null); nwarn=$(grep -c "\[Warning\]" "$log" 2>/dev/null)
 echo "-- log: ${nerr:-0} [Error] ($(grep -c -F '[CVARS]' "$log" 2>/dev/null) of them stock [CVARS] group noise), ${nwarn:-0} [Warning]; other errors:"
