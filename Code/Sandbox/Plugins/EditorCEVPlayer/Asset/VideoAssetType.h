@@ -16,7 +16,9 @@ namespace CEVEditor
 		const char* GetFileExtension() const override { return "cevvideo"; }
 		bool CanBeEdited() const override { return true; }
 		CAssetEditor* Edit(CAsset* pAsset) const override;
-		bool IsImported() const override { return false; }                       // the source is not "imported" in the engine's sense (docs/research/04 §2.4)
+		// E1: the source copy next to the asset (Details sourcePath) is registered as the engine's source file (SetSourceFile), so the
+		// Asset Browser offers Reimport and CVideoAssetImporter::ReimportAsset runs with the stored import settings.
+		bool IsImported() const override { return true; }
 		// MUST be false: otherwise the asset generator runs rc.exe for every .cevvideo without a .cryasset (docs/research/04 §2.5).
 		bool CanAutoRepairMetadata() const override { return false; }
 		bool RenameAsset(CAsset* pAsset, const char* szNewName) const override;

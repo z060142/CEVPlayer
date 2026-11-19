@@ -3,12 +3,17 @@
 // IOfflineOps); their completion callback runs on the main thread (a Qt queued call into this object). The runner is
 // owned by the plug-in and joins its threads on destruction (cancelling them first); no thread is ever detached.
 //
+// Every job the user started also gets a CProgressNotification of the editor's notification center (progress, then done /
+// failed); the panel keeps the full log of each job. Quick automatic checks (media info, source check, FFmpeg detection)
+// pass notify = false so that opening an asset does not fill the notification center.
+//
 // Thread rules: Submit / Cancel* / CancelAndWait are main thread calls. A job function must not touch Qt, the engine
 // (gEnv) or the asset manager; it reports through the SOpContext (progress / log are marshalled to the main thread).
 #pragma once
 
 #include <atomic>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -19,6 +24,8 @@
 #include <QString>
 
 #include "Offline/IOfflineOps.h"
+
+class CProgressNotification;
 
 namespace CEVEditor
 {
@@ -49,7 +56,8 @@ namespace CEVEditor
 		//! Starts `work` on a new thread. `onDone` (optional) runs on the main thread once the job has finished.
 		//! `owner` (optional, e.g. the GUID of an asset) lets the asset operations that move or delete files wait for
 		//! the jobs that have those files open (CancelAndWait). Returns the job id.
-		int Submit(const QString& title, TWork work, TDone onDone = TDone(), const std::string& owner = std::string());
+		//! `notify`: show the job in the editor's notification center (CProgressNotification).
+		int Submit(const QString& title, TWork work, TDone onDone = TDone(), const std::string& owner = std::string(), bool notify = true);
 		void Cancel(int id);
 		void CancelAll();
 		//! True while a job of `owner` has not finished its work function (its files may still be open).
@@ -84,10 +92,12 @@ namespace CEVEditor
 		};
 
 		void Finish(int id, const SOpResult& result, const TDone& onDone);
+		void UpdateNotification(int id);
 
 		mutable std::mutex m_mutex;
 		std::vector<std::unique_ptr<SJob>> m_jobs;
 		int m_nextId = 1;
 		std::atomic<bool> m_shuttingDown{ false };
+		std::map<int, std::unique_ptr<CProgressNotification>> m_notifications; //!< main thread only
 	};
 }

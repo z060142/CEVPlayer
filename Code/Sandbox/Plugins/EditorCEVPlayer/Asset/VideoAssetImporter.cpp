@@ -117,4 +117,21 @@ namespace CEVEditor
 		}
 		return { result.pAsset };
 	}
+
+	void CVideoAssetImporter::ReimportAsset(CAsset* pAsset)
+	{
+		if (pAsset == nullptr)
+			return;
+		std::string error;
+		const std::string name = pAsset->GetName().c_str();
+		const int result = ReimportWithStoredSettings(*pAsset, error, [name](bool ok)
+		{
+			if (ok)
+				CryLogAlways("[CEVEditor] reimport of '%s' done (stored import settings)", name.c_str());
+		});
+		if (result == 0)
+			CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_ERROR, "[CEVEditor] reimport of '%s' failed: %s", name.c_str(), error.c_str());
+		else if (result == 2)
+			CryLogAlways("[CEVEditor] reimport of '%s' started (FFmpeg job with the stored import settings)", name.c_str());
+	}
 }

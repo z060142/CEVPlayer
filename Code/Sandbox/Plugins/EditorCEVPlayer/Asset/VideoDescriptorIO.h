@@ -6,8 +6,17 @@
 #include <string>
 #include <vector>
 
+namespace yasli { class Archive; }
+
 namespace CEVEditor
 {
+	//! Context of SDescriptor::Serialize (yasli::Context): the folder of the descriptor (relative to Assets, trailing slash), so
+	//! that the language files are shown / chosen as game paths and stored relative to the descriptor.
+	struct SDescriptorSerializeContext
+	{
+		std::string folderRel;
+	};
+
 	struct SDescriptor
 	{
 		struct SLanguage
@@ -18,6 +27,8 @@ namespace CEVEditor
 			std::string trigger;
 			std::string pauseTrigger;
 			std::string resumeTrigger;
+
+			void Serialize(yasli::Archive& ar);
 		};
 		struct SVariant
 		{
@@ -29,6 +40,8 @@ namespace CEVEditor
 		{
 			std::string name;
 			double time = 0.0;
+
+			void Serialize(yasli::Archive& ar);
 		};
 
 		std::string route = "embedded";     // embedded | mixed | cue
@@ -44,6 +57,10 @@ namespace CEVEditor
 		std::vector<SMarker> markers;
 
 		int FindLanguage(const std::string& name) const;
+		//! The fields the user edits in the info panel's property tree: audio route, A/V offset, default language, languages
+		//! (name, embedded, external file, ACE triggers), markers. The video, the root triggers and the variants are not part
+		//! of it (they keep their values on input).
+		void Serialize(yasli::Archive& ar);
 	};
 
 	//! Reads the descriptor file (absolute UTF-8 path). Needs gEnv->pSystem (XML parser of the engine).

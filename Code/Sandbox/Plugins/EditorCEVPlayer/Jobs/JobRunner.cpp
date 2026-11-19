@@ -10,6 +10,9 @@
 #include <QThread>
 #include <QTimer>
 
+#include <IEditor.h>
+#include <Notifications/NotificationCenter.h>
+
 namespace CEVEditor
 {
 	namespace
@@ -44,9 +47,33 @@ namespace CEVEditor
 			if (job->thread.joinable())
 				job->thread.join();
 		}
+		// the notifications belong to the editor's notification center: only touch them while it is there
+		if (GetIEditor() == nullptr || GetIEditor()->GetNotificationCenter() == nullptr)
+		{
+			for (auto& n : m_notifications)
+				n.second.release();
+		}
+		m_notifications.clear();
 	}
 
-	int CJobRunner::Submit(const QString& title, TWork work, TDone onDone, const std::string& owner)
+	void CJobRunner::UpdateNotification(int id)
+	{
+		auto it = m_notifications.find(id);
+		if (it == m_notifications.end())
+			return;
+		float progress = 0.f;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			for (auto& job : m_jobs)
+			{
+				if (job->info.id == id)
+					progress = job->progress;
+			}
+		}
+		it->second->SetProgress(std::min(progress, 0.99f)); // 1.0 marks it complete: only Finish does that
+	}
+
+	int CJobRunner::Submit(const QString& title, TWork work, TDone onDone, const std::string& owner, bool notify)
 	{
 		int id = 0;
 		SJob* pJob = nullptr;
@@ -98,6 +125,7 @@ namespace CEVEditor
 								job->changePending = false;
 						}
 					}
+					UpdateNotification(id);
 					Q_EMIT JobChanged(id);
 				}, Qt::QueuedConnection);
 			};
@@ -136,6 +164,8 @@ namespace CEVEditor
 				return;
 			QMetaObject::invokeMethod(this, [this, id, result, onDone]() { Finish(id, result, onDone); }, Qt::QueuedConnection);
 		});
+		if (notify && GetIEditor() != nullptr && GetIEditor()->GetNotificationCenter() != nullptr)
+			m_notifications[id] = std::make_unique<CProgressNotification>(title, tr("running"), true);
 		// queued: Submit may run inside a signal handler of a panel that listens to JobChanged
 		QMetaObject::invokeMethod(this, [this, id]() { Q_EMIT JobChanged(id); }, Qt::QueuedConnection);
 		return id;
@@ -158,6 +188,15 @@ namespace CEVEditor
 		}
 		if (!result.message.empty())
 			Q_EMIT JobLog(id, QString::fromUtf8(result.message.c_str()));
+		auto it = m_notifications.find(id);
+		if (it != m_notifications.end())
+		{
+			// the first line of the result: the full text stays in the job log of the info panel
+			QString text = QString::fromUtf8(result.message.c_str()).section('\n', 0, 0);
+			const QString state = result.status == EOpStatus::Ok ? tr("done") : result.status == EOpStatus::Cancelled ? tr("cancelled") : tr("FAILED");
+			it->second->SetMessage(text.isEmpty() ? state : state + ": " + text);
+			m_notifications.erase(it); // the destructor sets the progress to 1 (complete)
+		}
 		Q_EMIT JobChanged(id);
 		if (onDone)
 			onDone(result);

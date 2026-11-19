@@ -11,6 +11,13 @@
 #include <CrySystem/ISystem.h>
 #include <CrySystem/XML/IXml.h>
 
+#include <CrySerialization/IArchive.h>
+#include <CrySerialization/STL.h>
+#include <CrySerialization/StringList.h>
+#include <CrySerialization/Decorators/Range.h>
+#include <CrySerialization/Decorators/Resources.h>
+#include <CrySerialization/Decorators/ResourcesAudio.h>
+
 namespace CEVEditor
 {
 	namespace
@@ -379,5 +386,94 @@ namespace CEVEditor
 		for (SDescriptor::SVariant& v : desc.variants)
 			changes += ReplacePrefix(v.file, oldPrefix, newPrefix) ? 1 : 0;
 		return changes;
+	}
+
+	// ---------------------------------------------------------------------------------------------------------------
+	// Property tree (yasli) serialization of the edited fields. Strings go through CryString temporaries (what the decorators
+	// take); a value is written back only on input.
+	namespace
+	{
+		void SerializeString(yasli::Archive& ar, std::string& value, const char* name, const char* label)
+		{
+			string v = value.c_str();
+			ar(v, name, label);
+			if (ar.isInput())
+				value = v.c_str();
+		}
+
+		void SerializeTrigger(yasli::Archive& ar, std::string& value, const char* name, const char* label)
+		{
+			string v = value.c_str();
+			ar(Serialization::AudioTrigger(v), name, label); // the selector is registered by the Audio Controls Editor
+			if (ar.isInput())
+				value = v.c_str();
+		}
+
+		bool StartsWithNoCase(const std::string& text, const std::string& prefix)
+		{
+			return !prefix.empty() && text.size() >= prefix.size() && _strnicmp(text.c_str(), prefix.c_str(), prefix.size()) == 0;
+		}
+	}
+
+	void SDescriptor::SLanguage::Serialize(yasli::Archive& ar)
+	{
+		SerializeString(ar, name, "name", "^Name");
+		ar(embedded, "embedded", "Embedded audio track");
+		// the file is stored relative to the descriptor; the picker shows / takes a game path
+		const SDescriptorSerializeContext* const pContext = ar.context<SDescriptorSerializeContext>();
+		const std::string folder = pContext != nullptr ? pContext->folderRel : std::string();
+		string path = (file.empty() || file.find('/') != std::string::npos) ? string(file.c_str()) : string((folder + file).c_str());
+		if (ar.isEdit())
+			ar(Serialization::ResourceFilePath(path, "Audio (webm, wav, ogg)|*.webm;*.wav;*.ogg"), "file", "External audio file");
+		else
+			ar(path, "file", "External audio file");
+		if (ar.isInput())
+		{
+			std::string p = path.c_str();
+			for (char& ch : p)
+			{
+				if (ch == '\\')
+					ch = '/';
+			}
+			if (StartsWithNoCase(p, folder) && p.find('/', folder.size()) == std::string::npos)
+				p = p.substr(folder.size());
+			file = p;
+		}
+		SerializeTrigger(ar, trigger, "trigger", "Start trigger");
+		SerializeTrigger(ar, pauseTrigger, "pauseTrigger", "Pause trigger");
+		SerializeTrigger(ar, resumeTrigger, "resumeTrigger", "Resume trigger");
+	}
+
+	void SDescriptor::SMarker::Serialize(yasli::Archive& ar)
+	{
+		SerializeString(ar, name, "name", "^Name");
+		ar(Serialization::Range(time, 0.0, 1.0e6), "time", "^Time (s)");
+	}
+
+	void SDescriptor::Serialize(yasli::Archive& ar)
+	{
+		Serialization::StringList routes;
+		routes.push_back("embedded");
+		routes.push_back("mixed");
+		routes.push_back("cue");
+		Serialization::StringListValue routeValue(routes, route.c_str());
+		ar(routeValue, "route", "Audio route");
+		if (ar.isInput())
+			route = routeValue.c_str();
+
+		ar(Serialization::Range(avOffsetMs, -5000.0, 5000.0), "avOffsetMs", "A/V offset (ms)");
+		ar.doc("Positive: the picture is shown later than the sound by this much.");
+
+		Serialization::StringList names;
+		names.push_back("");
+		for (const SLanguage& l : languages)
+			names.push_back(l.name.c_str());
+		Serialization::StringListValue defaultValue(names, defaultLanguage.c_str());
+		ar(defaultValue, "defaultLanguage", "Default language");
+		if (ar.isInput())
+			defaultLanguage = defaultValue.c_str();
+
+		ar(languages, "languages", "Languages");
+		ar(markers, "markers", "Markers");
 	}
 }

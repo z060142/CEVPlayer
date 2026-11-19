@@ -5,12 +5,14 @@
 #include <chrono>
 
 #include <QApplication>
+#include <QDialogButtonBox>
 #include <QEventLoop>
-#include <QFileDialog>
-#include <QMessageBox>
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QTimer>
+
+#include <Controls/QuestionDialog.h>
+#include <FileDialogs/SystemFileDialog.h>
 
 #include <CrySystem/ISystem.h>
 
@@ -28,6 +30,23 @@ namespace CEVEditor
 	namespace
 	{
 		CFfmpegService* g_pService = nullptr;
+
+		//! The engine's question dialog with the three answers of "FFmpeg needed" (it only knows standard buttons: their texts
+		//! are replaced).
+		class CFfmpegNeededDialog : public CQuestionDialog
+		{
+		public:
+			CFfmpegNeededDialog(const QString& text, bool canDownload, QWidget* pParent)
+				: CQuestionDialog(pParent)
+			{
+				const QDialogButtonBox::StandardButtons buttons = (canDownload ? QDialogButtonBox::Yes : QDialogButtonBox::NoButton) | QDialogButtonBox::Open | QDialogButtonBox::Cancel;
+				SetupQuestion(QObject::tr("FFmpeg needed"), text, buttons, canDownload ? QDialogButtonBox::Yes : QDialogButtonBox::Open);
+				if (QPushButton* const pDownload = m_buttons->button(QDialogButtonBox::Yes))
+					pDownload->setText(QObject::tr("Download minimal build"));
+				if (QPushButton* const pChoose = m_buttons->button(QDialogButtonBox::Open))
+					pChoose->setText(QObject::tr("Choose ffmpeg.exe..."));
+			}
+		};
 
 		std::string Join(const std::vector<std::string>& items)
 		{
@@ -179,11 +198,13 @@ namespace CEVEditor
 	CFfmpegService::CFfmpegService()
 	{
 		g_pService = this;
-		m_status.configuredPath = Trimmed(LoadEditorSetting(SettingKey::kFfmpegPath));
+		m_status.configuredPath = FfmpegPathSetting(); // the preferences are loaded later: ReloadConfiguredPath follows
+		gCevEditorPreferences.signalSettingsChanged.Connect(this, &CFfmpegService::ReloadConfiguredPath); // "reset to default"
 	}
 
 	CFfmpegService::~CFfmpegService()
 	{
+		gCevEditorPreferences.signalSettingsChanged.DisconnectObject(this);
 		g_pService = nullptr;
 		m_cv.notify_all();
 	}
@@ -204,7 +225,7 @@ namespace CEVEditor
 	{
 		const SFfmpegStatus s = Status();
 		return "FFmpeg is not available (" + (s.message.empty() ? std::string("not detected") : s.message) +
-			"). Locate ffmpeg.exe in the FFmpeg section of the video editor's info panel, or use the console command cev_editor_ffmpeg_path <path>.";
+			"). Set ffmpeg.exe in Edit > Preferences > CEVPlayer / FFmpeg, or use the console command cev_editor_ffmpeg_path <path>.";
 	}
 
 	bool CFfmpegService::WaitForExe(const std::atomic<bool>* cancel, std::string& exe, std::string& error)
@@ -306,20 +327,44 @@ namespace CEVEditor
 			const SFfmpegStatus s = Status();
 			CryLogAlways("[CEVEditor] %s", DescribeStatus(s).c_str());
 			Q_EMIT Changed();
-		}, "ffmpeg");
+		}, "ffmpeg", false); // automatic and quick: no notification
 	}
 
 	void CFfmpegService::SetPath(const std::string& path)
 	{
-		const std::string value = Trimmed(path);
-		std::string error;
-		if (!SaveEditorSetting(SettingKey::kFfmpegPath, value, error))
-			CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_WARNING, "[CEVEditor] the FFmpeg path is used for this session only: %s", error.c_str());
+		SetFfmpegPathSetting(Trimmed(path)); // the preference page; its change notification (if any) ends up in ReloadConfiguredPath
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
-			m_status.configuredPath = value;
+			m_status.configuredPath = FfmpegPathSetting();
 		}
 		StartDetect(true);
+	}
+
+	void CFfmpegService::ReloadConfiguredPath()
+	{
+		const std::string value = FfmpegPathSetting();
+		bool detect = false;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_status.configuredPath == value)
+				return;
+			m_status.configuredPath = value;
+			detect = m_status.state != SFfmpegStatus::EState::Unknown; // not detected yet: the first detection uses it
+		}
+		CryLogAlways("[CEVEditor] FFmpeg path preference: %s", value.empty() ? "(none)" : value.c_str());
+		if (detect)
+			StartDetect(true);
+		else
+			Q_EMIT Changed();
+	}
+
+	void OnFfmpegPreferenceChanged()
+	{
+		if (CFfmpegService* const pService = CFfmpegService::Get())
+		{
+			// from inside the Preferences window's serialization: later, from the event loop
+			QTimer::singleShot(0, pService, [pService]() { pService->ReloadConfiguredPath(); });
+		}
 	}
 
 	// ---------------------------------------------------------------------------------------------------------------
@@ -431,8 +476,11 @@ namespace CEVEditor
 
 	bool CFfmpegService::ChooseExecutableModal(QWidget* pParent)
 	{
-		const QString start = QString::fromUtf8(ConfiguredPath().c_str());
-		const QString file = QFileDialog::getOpenFileName(pParent, tr("Choose ffmpeg.exe"), start, tr("ffmpeg (ffmpeg.exe);;All files (*)"));
+		CSystemFileDialog::RunParams params;
+		params.title = tr("Choose ffmpeg.exe");
+		params.initialFile = QString::fromUtf8(ConfiguredPath().c_str());
+		params.extensionFilters << CExtensionFilter(tr("ffmpeg"), "exe");
+		const QString file = CSystemFileDialog::RunImportFile(params, pParent);
 		if (file.isEmpty())
 			return false;
 		SetPath(std::string(file.toUtf8().constData()));
@@ -443,7 +491,7 @@ namespace CEVEditor
 		QString text = tr("This file cannot be used:\n%1").arg(QString::fromUtf8(s.message.c_str()));
 		for (const std::string& r : s.rejected)
 			text += QString("\n") + QString::fromUtf8(r.c_str());
-		QMessageBox::warning(pParent, tr("FFmpeg"), text);
+		CQuestionDialog::SWarning(tr("FFmpeg"), text, QDialogButtonBox::Ok, QDialogButtonBox::Ok, pParent);
 		return false;
 	}
 
@@ -467,23 +515,20 @@ namespace CEVEditor
 			{
 				text += tr("\n\nThe download is not available: %1\nChoose an ffmpeg.exe (it needs libvpx-vp9, libopus and the webm muxer).").arg(QString::fromUtf8(disabledReason.c_str()));
 			}
-			QMessageBox box(QMessageBox::Question, tr("FFmpeg needed"), text, QMessageBox::NoButton, pParent);
-			QPushButton* const pDownload = disabledReason.empty() ? box.addButton(tr("Download minimal build"), QMessageBox::AcceptRole) : nullptr;
-			QPushButton* const pChoose = box.addButton(tr("Choose ffmpeg.exe..."), QMessageBox::ActionRole);
-			box.addButton(QMessageBox::Cancel);
-			box.exec();
-			if (box.clickedButton() == pChoose)
+			CFfmpegNeededDialog box(text, disabledReason.empty(), pParent);
+			const QDialogButtonBox::StandardButton answer = box.Execute();
+			if (answer == QDialogButtonBox::Open)
 			{
 				if (ChooseExecutableModal(pParent))
 					return true;
 			}
-			else if (pDownload != nullptr && box.clickedButton() == pDownload)
+			else if (answer == QDialogButtonBox::Yes && disabledReason.empty())
 			{
 				std::string error;
 				const int jobId = StartDownload(error);
 				if (jobId == 0)
 				{
-					QMessageBox::warning(pParent, tr("FFmpeg"), QString::fromUtf8(error.c_str()));
+					CQuestionDialog::SWarning(tr("FFmpeg"), QString::fromUtf8(error.c_str()), QDialogButtonBox::Ok, QDialogButtonBox::Ok, pParent);
 					continue;
 				}
 				QProgressDialog dialog(tr("Downloading FFmpeg ..."), tr("Cancel"), 0, 100, pParent);
@@ -514,7 +559,7 @@ namespace CEVEditor
 				dialog.close();
 				if (!ok)
 				{
-					QMessageBox::warning(pParent, tr("FFmpeg download"), tr("The download was not installed:\n%1").arg(message));
+					CQuestionDialog::SWarning(tr("FFmpeg download"), tr("The download was not installed:\n%1").arg(message), QDialogButtonBox::Ok, QDialogButtonBox::Ok, pParent);
 					continue;
 				}
 				WaitDetectModal(pParent);
