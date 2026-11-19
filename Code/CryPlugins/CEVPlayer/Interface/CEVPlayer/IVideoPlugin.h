@@ -69,5 +69,18 @@ namespace CEVPlayer
 		//! delivered later than the call that caused them (at the plug-in's dispatch point), so call this from the
 		//! destructor of every IVideoPlayerEventListener you passed to PlayVideoTo*. Main thread only.
 		virtual void RemoveVideoListener(IVideoPlayerEventListener* pListener) = 0;
+
+		// ---------------------------------------------------------------------------------------------
+		// Appended in player interface version 5: do not reorder.
+		// ---------------------------------------------------------------------------------------------
+
+		//! Creates an empty player identified by a surface id (characters A-Z a-z 0-9 _ . : -, 1 to 63 of them,
+		//! compared case-insensitively). The id stays the same across Load(), language, variant and size changes;
+		//! other plug-ins find the player by it through the texture source contract (docs/design/M6-ui-source.md
+		//! section 3). Returns nullptr (and logs an error) when the id is invalid or already used, or when the
+		//! plug-in is shutting down. Lifetime as CreatePlayer; destroy it with DestroyPlayer. Main thread only.
+		virtual IVideoPlayer* CreatePlayerForSurface(const char* surfaceId) = 0;
+		//! The live player created with this surface id (case-insensitive), nullptr if there is none. Main thread only.
+		virtual IVideoPlayer* FindPlayerBySurface(const char* surfaceId) const = 0;
 	};
 }

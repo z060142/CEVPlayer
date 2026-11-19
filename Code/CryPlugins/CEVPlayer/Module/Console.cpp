@@ -13,6 +13,8 @@
 #include <CryRenderer/IRenderAuxGeom.h>
 
 #include "Bindings/ApiTest.h"
+#include "Contract/ContractTest.h"
+#include "Contract/TexSource.h"
 #include "Compat/LegacyPlayback.h"
 #include "Player/PlayerManager.h"
 
@@ -319,6 +321,35 @@ namespace CEVPlayer
 			Api::StartApiTest(args != nullptr && args->GetArgCount() > 1 ? args->GetArg(1) : nullptr);
 		}
 
+		void CmdPlaySurface(IConsoleCmdArgs* args)
+		{
+			if (args == nullptr || mEnv->pManager == nullptr)
+				return;
+			if (args->GetArgCount() < 2)
+			{
+				LogAlways("usage: cev_play_surface <id> <path> [loop]   (without a path: destroy that surface player)");
+				return;
+			}
+			bool loop = false;
+			if (args->GetArgCount() > 3)
+			{
+				const char* const arg = args->GetArg(3);
+				loop = std::strcmp(arg, "1") == 0 || stricmp(arg, "true") == 0 || stricmp(arg, "loop") == 0;
+			}
+			mEnv->pManager->ConsolePlaySurface(args->GetArg(1), args->GetArgCount() > 2 ? args->GetArg(2) : nullptr, loop);
+		}
+
+		void CmdSurfaces(IConsoleCmdArgs*)
+		{
+			Contract::LogSurfaces();
+		}
+
+		void CmdContractSelfTest(IConsoleCmdArgs* args)
+		{
+			Contract::StartSelfTest(args != nullptr && args->GetArgCount() > 1 ? args->GetArg(1) : nullptr,
+				args != nullptr && args->GetArgCount() > 2 ? args->GetArg(2) : nullptr);
+		}
+
 		void CmdList(IConsoleCmdArgs*)
 		{
 			if (mEnv->pManager != nullptr)
@@ -366,6 +397,9 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_lang", CmdLang, VF_NULL, "Select the audio language of the video started by cev_play. cev_lang <name> (without a name: show the current one)");
 		REGISTER_COMMAND("cev_apitest", CmdApiTest, VF_NULL, "Self test of the script API table: creates a player through the table functions, plays [path] (default Videos/vp9_alpha.webm), checks state / time after 2 s, stops and destroys it, logs PASS / FAIL");
 		REGISTER_COMMAND("cev_list", CmdList, VF_NULL, "List all CEVPlayer players with state, time and upload count");
+		REGISTER_COMMAND("cev_play_surface", CmdPlaySurface, VF_NULL, "Play a video into a surface player (texture $cev:<id>). cev_play_surface <id> <path> [loop]; without a path the surface player is destroyed");
+		REGISTER_COMMAND("cev_surfaces", CmdSurfaces, VF_NULL, "List the surfaces of the texture source contract: snapshot and aggregated consumer hints");
+		REGISTER_COMMAND("cev_contract_selftest", CmdContractSelfTest, VF_NULL, "Self test of the texture source contract through the CryTexSource_v1 export. cev_contract_selftest [pathA] [pathB] (two videos of different sizes), logs PASS / FAIL");
 		// development-only measurement commands (S0)
 		REGISTER_COMMAND("cev_probe_r8", DevProbe::CmdProbeR8, VF_NULL, "Measurement: cev_probe_r8 <w> <h> creates an eTF_R8 dynamic texture, updates it every frame and draws it top left (no arguments = off)");
 		REGISTER_COMMAND("cev_probe_sync", DevProbe::CmdProbeSync, VF_NULL, "Measurement: cev_probe_sync 1|0, a 64x64 RGBA texture filled each frame with a colour coding the frame index, next to aux blocks of the same colour");
@@ -402,7 +436,7 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_apitest", "cev_list", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "vp_play", "vp_pause", "vp_resume", "vp_stop" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "vp_play", "vp_pause", "vp_resume", "vp_stop" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 

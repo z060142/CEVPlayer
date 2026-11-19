@@ -14,6 +14,7 @@
 #include <Cry3DEngine/IMaterial.h>
 
 #include "Audio/AudioMixer.h"
+#include "Contract/TexSource.h"
 #include "Player/CryPakByteSource.h"
 #include "Player/PlayerManager.h"
 #include "Render/RenderBridge.h"
@@ -69,12 +70,21 @@ namespace CEVPlayer
 		}
 	}
 
-	CVideoPlayerImpl::CVideoPlayerImpl(CPlayerManager& manager, uint32_t id, const char* textureName)
+	CVideoPlayerImpl::CVideoPlayerImpl(CPlayerManager& manager, uint32_t id, const char* textureName, const char* surfaceId)
 		: m_manager(manager)
 		, m_id(id)
 	{
 		m_core = std::make_unique<cev::PlayerCore>(MakeConfig(manager)); // replaced by BuildCores() at every Load()
-		if (textureName != nullptr && textureName[0] != '\0')
+		if (surfaceId != nullptr && surfaceId[0] != '\0')
+		{
+			// The engine texture name of a surface player is an internal detail; it never changes with the media.
+			m_surfaceId = surfaceId;
+			m_textureName = std::string("$cev:") + surfaceId;
+			m_autoName = false;
+			Contract::RegisterSurface(m_surfaceId.c_str());
+			m_surfaceRegistered = true;
+		}
+		else if (textureName != nullptr && textureName[0] != '\0')
 		{
 			bool changed = false;
 			m_textureName = NormalizeTextureName(textureName, &changed);
@@ -155,6 +165,7 @@ namespace CEVPlayer
 			m_listeners.erase(it);
 	}
 
+	// Main thread only: listener callbacks reach entity / flow graph / Schematyc code.
 	void CVideoPlayerImpl::DispatchEvents()
 	{
 		if (m_eventCount == 0 || m_destroyed)
@@ -201,6 +212,7 @@ namespace CEVPlayer
 		return LoadInternal(path, false);
 	}
 
+	// Main thread only: opens files (CryPak) and reads cvars.
 	bool CVideoPlayerImpl::LoadInternal(const char* path, bool reload)
 	{
 		if (m_destroyed)
@@ -994,6 +1006,7 @@ namespace CEVPlayer
 		}
 		m_pTexture = pTexture;
 		m_textureId = pTexture->GetTextureID();
+		m_textureChanged = true;
 		LogDebug("player %u: texture <%s> id %d %dx%d", m_id, m_textureName.c_str(), m_textureId, m_info.width, m_info.height);
 		m_textureWidth = m_info.width;
 		m_textureHeight = m_info.height;
@@ -1023,6 +1036,7 @@ namespace CEVPlayer
 		{
 			RenderBridge::ReleaseTexture(m_pTexture);
 			m_pTexture = nullptr;
+			m_textureChanged = true;
 		}
 		m_textureId = 0;
 		m_textureWidth = 0;
@@ -1087,6 +1101,7 @@ namespace CEVPlayer
 			++m_uploadMsCount;
 			m_lastUploadBytes = static_cast<uint64_t>(view.width) * static_cast<uint64_t>(view.height) * 4u;
 			++m_uploads;
+			++m_contentSerial;
 			m_frameSerial = view.serial;
 			m_core->NoteUpload(static_cast<uint64_t>(view.width) * static_cast<uint64_t>(view.height) * 4u);
 			m_needUpload = false;
@@ -1203,10 +1218,58 @@ namespace CEVPlayer
 	}
 
 	// ------------------------------------------------------------------------------------------------ frame step
-	void CVideoPlayerImpl::Tick()
+	void CVideoPlayerImpl::Tick(float dt)
 	{
+		(void)dt; // the cores run on their own clocks (audio / steady clock); kept for the load-time tick (M10)
 		if (m_destroyed)
 			return;
+		TickBody();
+		if (m_surfaceRegistered)
+			PublishSnapshot();
+	}
+
+	void CVideoPlayerImpl::PublishSnapshot()
+	{
+		// No engine call here (rule 10): only members of this player.
+		if (m_textureChanged)
+		{
+			m_textureChanged = false;
+			++m_generation;
+			++m_contentSerial;
+		}
+		CryTexSourceInfo info = {};
+		info.size = sizeof(info);
+		info.textureId = m_textureId;
+		info.width = GetWidth();
+		info.height = GetHeight();
+		const EVideoPlayerState state = GetState();
+		info.flags = 1u /* premultiplied */ | (HasAlpha() ? 2u : 0u) | (state == EVideoPlayerState::Playing ? 4u : 0u);
+		info.contentSerial = m_contentSerial;
+		info.generation = m_generation;
+		info.layout = CTS_LAYOUT_RGBA8;
+		switch (m_phase)
+		{
+		case EPhase::None:    info.state = 0; break;
+		case EPhase::Loading: info.state = 1; break;
+		case EPhase::Failed:  info.state = 6; info.errorCode = static_cast<int32_t>(m_loadStatus); break;
+		case EPhase::Ready:
+			switch (state)
+			{
+			case EVideoPlayerState::Playing: info.state = 3; break;
+			case EVideoPlayerState::Paused:  info.state = 4; break;
+			case EVideoPlayerState::Ended:   info.state = 5; break;
+			default:                         info.state = 2; break;
+			}
+			break;
+		}
+		info.timeSeconds = GetTime();
+		info.durationSeconds = GetDuration();
+		info.loopCount = m_seenLoops;
+		Contract::PublishSnapshot(m_surfaceId.c_str(), info);
+	}
+
+	void CVideoPlayerImpl::TickBody()
+	{
 		if (m_releasePending && HasRenderResources())
 			ReleaseTexture(false);
 
@@ -1336,6 +1399,11 @@ namespace CEVPlayer
 	void CVideoPlayerImpl::PrepareDestroy()
 	{
 		m_destroyed = true;
+		if (m_surfaceRegistered)
+		{
+			m_surfaceRegistered = false; // CryTexSource query returns 0 for this id from now on
+			Contract::UnregisterSurface(m_surfaceId.c_str());
+		}
 		m_listeners.clear();
 		m_eventCount = 0;
 		m_playPending = false;

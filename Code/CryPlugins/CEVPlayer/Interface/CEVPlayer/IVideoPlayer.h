@@ -1,7 +1,8 @@
-// CEVPlayer public player API (interface version 4).
+// CEVPlayer public player API (interface version 5).
 //
-// This header is the contract for other plug-ins (CryXTUI, game code, ...): it contains no CRYENGINE includes
-// and no implementation details. Obtain the factory through IVideoPlugin (CEVPlayer/IVideoPlugin.h):
+// This header is for game code that links CEVPlayer directly. Other plug-ins connect through the texture source
+// contract of docs/design/M6-ui-source.md section 3 (exported function CryTexSource_v1) instead of this header.
+// It contains no CRYENGINE includes and no implementation details. Obtain the factory through IVideoPlugin (CEVPlayer/IVideoPlugin.h):
 //
 //     IVideoPlugin* pPlugin = gEnv->pSystem->GetIPluginManager()->QueryPlugin<CEVPlayer::IVideoPlugin>();
 //     CEVPlayer::IVideoPlayer* pPlayer = pPlugin->CreatePlayer("$my_video");
@@ -46,7 +47,21 @@ namespace CEVPlayer
 	//! Version of this header. Bumped when a virtual is appended / a struct is extended.
 	//! 3: IVideoPlayerListener::OnMarker, IVideoPlayer::SetLanguage / GetLanguage, Load() accepts .cevvideo.
 	//! 4: IVideoPlayer::SetVariant / GetVariant (per player variant choice of a .cevvideo descriptor).
-	constexpr uint32_t kVideoPlayerInterfaceVersion = 4;
+	//! 5: IVideoPlugin::CreatePlayerForSurface / FindPlayerBySurface, IVideoPlayer::GetSurfaceId / GetGeneration /
+	//!    GetPixelLayout / GetDecodeBackend.
+	constexpr uint32_t kVideoPlayerInterfaceVersion = 5;
+
+	//! IVideoPlayer::GetPixelLayout(). Values match the CTS_LAYOUT_* values of the texture source contract.
+	enum class EVideoPixelLayout : uint32_t
+	{
+		RGBA8 = 0, //!< one RGBA8 texture, premultiplied (the only layout so far)
+	};
+
+	//! IVideoPlayer::GetDecodeBackend().
+	enum class EVideoDecodeBackend : uint32_t
+	{
+		Cpu = 0, //!< libvpx on the CPU (the only backend so far)
+	};
 
 	//! Bits returned by IVideoPlugin::GetVideoPlayerCaps().
 	enum EVideoPlayerCaps : uint32_t
@@ -202,5 +217,14 @@ namespace CEVPlayer
 		virtual void SetVariant(int variant) = 0;
 		//! Variant in use: 0 = main video (also without a descriptor), n = n-th <Variant>.
 		virtual int GetVariant() const = 0;
+
+		// ---- appended in version 5 (surface ids) ----
+		//! Surface id given to IVideoPlugin::CreatePlayerForSurface, "" for players made by CreatePlayer.
+		virtual const char* GetSurfaceId() const = 0;
+		//! Counts changes of the texture (texture id, size or layout). It is advanced by the player itself, also
+		//! when the renderer hands out the same id again; usable as a "fetch the texture again" test.
+		virtual uint32_t GetGeneration() const = 0;
+		virtual EVideoPixelLayout GetPixelLayout() const = 0;     //!< always RGBA8 so far
+		virtual EVideoDecodeBackend GetDecodeBackend() const = 0; //!< always Cpu so far
 	};
 }

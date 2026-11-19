@@ -10,6 +10,8 @@
 #include "Components/VideoPlayerComponent.h"
 #include "Bindings/ApiTable.h"
 #include "Bindings/ApiTest.h"
+#include "Contract/ContractTest.h"
+#include "Contract/TexSource.h"
 #if CEV_HAVE_CRYVS
 #include "Bindings/CryVSEnv.h"
 #endif
@@ -88,6 +90,7 @@ namespace CEVPlayer
 	{
 		// Nothing here touches the renderer (it may not exist yet): textures are created at the first tick that
 		// needs them.
+		Contract::Open(); // the CryTexSource_v1 export starts answering for surface players
 		m_pManager = std::make_unique<CPlayerManager>();
 		m_pLegacy = std::make_unique<CLegacyPlayback>(*m_pManager);
 		mEnv->pManager = m_pManager.get();
@@ -123,11 +126,20 @@ namespace CEVPlayer
 
 	void CVideoPlugin::UpdateBeforeRender()
 	{
+		// dt comes from the time source the manager used before (engine async time); the manager's tick reads no
+		// engine timer itself (it also runs from the load-time callback later, M10).
+		const float now = gEnv->pTimer != nullptr ? gEnv->pTimer->GetAsyncCurTime() : 0.f;
+		const float dt = m_lastUpdateTime < 0.f ? 0.f : now - m_lastUpdateTime;
+		m_lastUpdateTime = now;
 		if (m_pManager)
-			m_pManager->UpdateBeforeRender();
+		{
+			m_pManager->CheckLevelLoadingTimeout(); // main thread only
+			m_pManager->UpdateBeforeRender(dt);
+		}
 		if (m_pApi)
 			m_pApi->Update(); // Skipped events, records destroyed from inside a callback
 		Api::TickApiTest();
+		Contract::TickSelfTest();
 		DevProbesBeforeRender(); // measurement only (S0)
 	}
 
@@ -146,6 +158,7 @@ namespace CEVPlayer
 		// The script API goes first: it removes its player listeners and the skip input listener while the players
 		// still exist (the manager destroys them below).
 		Api::ShutdownApiTest();
+		Contract::ShutdownSelfTest();
 		if (m_pApi)
 			m_pApi->Shutdown();
 		DevProbesShutdown(); // measurement probes (S0): their textures and the cev_bench_play player
@@ -155,6 +168,7 @@ namespace CEVPlayer
 			m_pLegacy->Shutdown();
 		if (m_pManager)
 			m_pManager->Shutdown();
+		Contract::Close(); // the export stays callable until the process ends: query 0, hint ignored
 		// Every player is gone now (the manager released them and its pool reference): join the shared decode
 		// workers before the module can be unloaded.
 		cev::DecodePool::ShutdownShared();
@@ -368,6 +382,20 @@ namespace CEVPlayer
 			return;
 		if (m_pLegacy)
 			m_pLegacy->RemoveVideoListener(pListener);
+	}
+
+	IVideoPlayer* CVideoPlugin::CreatePlayerForSurface(const char* surfaceId)
+	{
+		if (!CheckMainThread("CreatePlayerForSurface"))
+			return nullptr;
+		return m_pManager ? m_pManager->CreatePlayerForSurface(surfaceId) : nullptr;
+	}
+
+	IVideoPlayer* CVideoPlugin::FindPlayerBySurface(const char* surfaceId) const
+	{
+		if (!CheckMainThread("FindPlayerBySurface"))
+			return nullptr;
+		return m_pManager ? m_pManager->FindPlayerBySurface(surfaceId) : nullptr;
 	}
 
 	uint32_t CVideoPlugin::GetPlayerCount() const

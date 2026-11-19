@@ -60,6 +60,8 @@ namespace CEVPlayer
 		virtual void DestroyPlayer(IVideoPlayer* pPlayer) override;
 		virtual uint32_t GetPlayerCount() const override;
 		virtual void RemoveVideoListener(IVideoPlayerEventListener* pListener) override;
+		virtual IVideoPlayer* CreatePlayerForSurface(const char* surfaceId) override;
+		virtual IVideoPlayer* FindPlayerBySurface(const char* surfaceId) const override;
 		// ~IVideoPlugin
 	protected:
 		void        RegisterComponents(Schematyc::IEnvRegistrar& registrar);
@@ -71,5 +73,6 @@ namespace CEVPlayer
 		std::unique_ptr<CLegacyPlayback> m_pLegacy;
 		std::unique_ptr<CInputDispatcher> m_pInputDispatcher;
 		bool m_listenerRegistered = false;
+		float m_lastUpdateTime = -1.f; // engine async time of the previous UpdateBeforeRender (dt for the manager)
 	};
 }
