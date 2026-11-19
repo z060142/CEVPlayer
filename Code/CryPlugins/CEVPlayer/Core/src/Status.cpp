@@ -18,6 +18,8 @@ namespace cev
 		case Status::DecodeError: return "DecodeError";
 		case Status::Cancelled: return "Cancelled";
 		case Status::LoadFailed: return "LoadFailed";
+		case Status::Busy: return "Busy";
+		case Status::BackendFailed: return "BackendFailed";
 		}
 		return "Unknown";
 	}

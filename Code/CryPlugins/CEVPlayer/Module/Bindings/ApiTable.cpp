@@ -159,9 +159,9 @@ namespace CEVPlayer
 					LogWarning("api: SetDecode(%d): unknown mode (0 = Auto, 1 = GPU, 2 = CPU), ignored", mode);
 					return false;
 				}
-				if (static_cast<EDecodeMode>(mode) == EDecodeMode::Gpu)
-					LogWarning("api: SetDecode(GPU) on handle %d: hardware decode is not available in this build, the CPU decoder is used", c.handle);
 				mEnv->pApi->SetDecodeMode(c.handle, mode);
+				// every IVideoPlayer of this plug-in is a CVideoPlayerImpl; the choice applies at the next Load / Play from stopped
+				static_cast<CVideoPlayerImpl*>(c.pPlayer)->SetDecodeRequest(mode);
 				return true;
 			}
 
@@ -264,7 +264,7 @@ namespace CEVPlayer
 			};
 			const SParam kSetVariantParams[]  = { { EType::Int, "Variant", "-2 = follow the cvar cev_variant, -1 = automatic, 0 = main video, n = n-th variant of the .cevvideo descriptor", -2.0, nullptr, 'in00' } };
 			const SParam kSetSkippableParams[] = { { EType::Bool, "Skippable", "A key / mouse / gamepad button press stops the video while it plays and sends the Skipped event", 0, nullptr, 'in00' } };
-			const SParam kSetDecodeParams[]   = { { EType::Int, "Mode", "0 = Auto, 1 = GPU, 2 = CPU (recorded only: this build always decodes on the CPU)", 0, nullptr, 'in00' } };
+			const SParam kSetDecodeParams[]   = { { EType::Int, "Mode", "0 = Auto (GPU for videos at least cev_decodeAutoMinHeight tall), 1 = GPU (Media Foundation, CPU fallback), 2 = CPU", 0, nullptr, 'in00' } };
 			const SParam kSetPauseDecodeWhenHiddenParams[] = { { EType::Bool, "Pause", "true (default) = a surface no UI shows only decodes, and stops decoding after cev_hiddenStopSeconds; false = it keeps decoding and uploading", 1.0, nullptr, 'in00' } };
 
 			const SParam kNewFrameParams[]    = { { EType::String, "Serial", "Number of the uploaded picture as decimal text (counts up, never wraps)", 0, "", 'seri' } };
@@ -300,7 +300,7 @@ namespace CEVPlayer
 				{ EKind::Control, "B68F6467-1C13-491C-B0F3-BFF0D3CBF1C6"_cry_guid, "SetOutput", "Chooses where the picture goes: only the surface texture, fullscreen on the screen, or a texture slot of a material.", CEV_ARRAY(kSetOutputParams), EType::Void, nullptr, false, 0, &FnSetOutput },
 				{ EKind::Control, "079109C0-A530-4D82-BF32-5B8AF724C720"_cry_guid, "SetVariant", "Chooses the variant (resolution) of a .cevvideo descriptor.", CEV_ARRAY(kSetVariantParams), EType::Void, nullptr, false, 0, &FnSetVariant },
 				{ EKind::Control, "76A06A36-55E3-46A3-A2F0-651F74507C41"_cry_guid, "SetSkippable", "Makes the video skippable: a key / mouse / gamepad button press stops it while it plays and sends the Skipped event.", CEV_ARRAY(kSetSkippableParams), EType::Void, nullptr, false, 0, &FnSetSkippable },
-				{ EKind::Control, "0EABF916-13B4-4588-B90A-29C6951B3B99"_cry_guid, "SetDecode", "Chooses the decoder: Auto, GPU or CPU. Recorded only in this build: the video is always decoded on the CPU (GPU logs a warning).", CEV_ARRAY(kSetDecodeParams), EType::Void, nullptr, false, 0, &FnSetDecode },
+				{ EKind::Control, "0EABF916-13B4-4588-B90A-29C6951B3B99"_cry_guid, "SetDecode", "Chooses the decoder: Auto, GPU (Media Foundation hardware decode, falls back to the CPU with a warning) or CPU (libvpx). Applies at the next Load or Play from stopped.", CEV_ARRAY(kSetDecodeParams), EType::Void, nullptr, false, 0, &FnSetDecode },
 				{ EKind::Control, "C3E284F2-F49E-4554-B15F-0A8A3DBC4FCB"_cry_guid, "UnbindMaterial", "Removes every material binding of the player (the Material output).", CEV_NOPARAMS, EType::Void, nullptr, false, 0, &FnUnbindMaterial },
 				{ EKind::Control, "19B4033E-18B4-4488-B0B2-C1B42FD5C2E4"_cry_guid, "SetPauseDecodeWhenHidden", "Surface players: while no UI shows the surface, decode only (nothing is copied, converted or uploaded) and stop decoding after cev_hiddenStopSeconds; the clock, the sound and the events go on. On by default. Screen / Material outputs are always visible.", CEV_ARRAY(kSetPauseDecodeWhenHiddenParams), EType::Void, nullptr, false, 0, &FnSetPauseDecodeWhenHidden },
 			};
@@ -320,7 +320,7 @@ namespace CEVPlayer
 				{ EKind::Query, "97C49A10-C7A1-40AC-BF8B-D7688F2CF190"_cry_guid, "SurfaceId", "Surface id of the player, empty for a player made by Create.", CEV_NOPARAMS, EType::String, "SurfaceId", false, 0, &FnSurfaceId },
 				{ EKind::Query, "1DE894B9-3DBD-45B8-8614-441706F53725"_cry_guid, "Generation", "Counts changes of the texture (id, size or layout): fetch TextureId / Width / Height again when it changes.", CEV_NOPARAMS, EType::Int, "Generation", false, 0, &FnGeneration },
 				{ EKind::Query, "40D5FCCC-EC86-45D5-9D1E-38DEFC23D6B9"_cry_guid, "PixelLayout", "Pixel layout of the texture: 0 = RGBA8 premultiplied, 1 = packed YUV 4:2:0 (R8), 2 = packed YUVA 4:2:0 (R8); planar only while every consumer of the texture source contract accepts it.", CEV_NOPARAMS, EType::Int, "PixelLayout", false, 0, &FnPixelLayout },
-				{ EKind::Query, "803D34BF-61FB-4E84-BE3E-5A09CF51FE57"_cry_guid, "DecodeBackend", "Decoder in use: 0 = CPU (the only backend so far).", CEV_NOPARAMS, EType::Int, "DecodeBackend", false, 0, &FnDecodeBackend },
+				{ EKind::Query, "803D34BF-61FB-4E84-BE3E-5A09CF51FE57"_cry_guid, "DecodeBackend", "Decoder in use: 0 = CPU (libvpx), 1 = GPU (Media Foundation).", CEV_NOPARAMS, EType::Int, "DecodeBackend", false, 0, &FnDecodeBackend },
 				{ EKind::Query, "347FB1FF-D80B-4466-9F14-1A8D1DCDF6DB"_cry_guid, "FrameSerial", "Number of uploaded pictures as decimal text (never wraps); usable as a changed test.", CEV_NOPARAMS, EType::String, "FrameSerial", false, 0, &FnFrameSerial },
 				{ EKind::Query, "099454C4-CF34-4256-942F-FF8370DB3641"_cry_guid, "IsLoaded", "The video is loaded: size, duration and texture are valid.", CEV_NOPARAMS, EType::Bool, "IsLoaded", false, 0, &FnIsLoaded },
 				{ EKind::Query, "20DE7AD5-1A14-436C-921B-315869454C7B"_cry_guid, "IsLooping", "Looping is on.", CEV_NOPARAMS, EType::Bool, "IsLooping", false, 0, &FnIsLooping },

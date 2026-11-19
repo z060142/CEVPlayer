@@ -64,7 +64,8 @@ namespace CEVPlayer
 	//! IVideoPlayer::GetDecodeBackend().
 	enum class EVideoDecodeBackend : uint32_t
 	{
-		Cpu = 0, //!< libvpx on the CPU (the only backend so far)
+		Cpu = 0, //!< libvpx on the CPU
+		Gpu = 1, //!< Media Foundation hardware decode (VP9) on a private D3D11 device, read back into memory (M9)
 	};
 
 	//! Bits returned by IVideoPlugin::GetVideoPlayerCaps().
@@ -229,6 +230,6 @@ namespace CEVPlayer
 		//! when the renderer hands out the same id again; usable as a "fetch the texture again" test.
 		virtual uint32_t GetGeneration() const = 0;
 		virtual EVideoPixelLayout GetPixelLayout() const = 0;     //!< layout of the texture right now (RGBA8 unless negotiated)
-		virtual EVideoDecodeBackend GetDecodeBackend() const = 0; //!< always Cpu so far
+		virtual EVideoDecodeBackend GetDecodeBackend() const = 0; //!< backend in use (Cpu before Ready; may turn Cpu once if the GPU fails)
 	};
 }

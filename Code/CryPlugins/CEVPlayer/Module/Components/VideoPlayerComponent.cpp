@@ -297,7 +297,7 @@ namespace CEVPlayer
 		desc.AddMember(&CVideoPlayerComponent::m_loop, 'loop', "loop", "Loop", "Restart at 0 when the end is reached", false);
 		desc.AddMember(&CVideoPlayerComponent::m_autoplay, 'auto', "autoplay", "Autoplay", "Load and play when the game starts", false);
 		desc.AddMember(&CVideoPlayerComponent::m_skippable, 'skip', "skippable", "Skippable", "A key / mouse / gamepad button press stops the video and sends Skipped", false);
-		desc.AddMember(&CVideoPlayerComponent::m_decode, 'deco', "decode", "Decode", "Decoder: Auto, GPU or CPU (this build always decodes on the CPU; GPU logs a warning)", Api::EDecodeMode::Auto);
+		desc.AddMember(&CVideoPlayerComponent::m_decode, 'deco', "decode", "Decode", "Decoder: Auto (GPU for tall videos when available), GPU (Media Foundation, CPU fallback) or CPU (libvpx)", Api::EDecodeMode::Auto);
 		desc.AddMember(&CVideoPlayerComponent::m_pauseDecodeWhenHidden, 'pdwh', "pausedecodewhenhidden", "PauseDecodeWhenHidden", "Output Surface: while no UI shows the surface only decode, and stop decoding after cev_hiddenStopSeconds", true);
 	}
 

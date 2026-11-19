@@ -116,7 +116,8 @@ namespace CEVPlayer
 		void UnregisterSurface(const char* name);
 		//! End of the surface player's own tick: replaces the snapshot (info.size is ignored, the full struct is
 		//! stored) and counts one update of the source for the hint expiry.
-		void PublishSnapshot(const char* name, const CryTexSourceInfo& info);
+		//! `decode`: short text for cev_surfaces (backend in use), may be null.
+		void PublishSnapshot(const char* name, const CryTexSourceInfo& info, const char* decode = nullptr);
 
 		//! Hints of all live consumers of one name, aggregated per rule 5.
 		struct SHintSummary

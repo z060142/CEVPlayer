@@ -604,6 +604,8 @@ namespace CEVPlayer
 
 		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log and draw a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");
 		REGISTER_CVAR2("cev_decodeThreads", &mEnv->m_cevDecodeThreads, 0, VF_NULL, "Decode worker threads of the shared pool and libvpx threads per video; 0 = automatic. Applies to new pools / players");
+		REGISTER_CVAR2("cev_decodeMode", &mEnv->m_cevDecodeMode, 0, VF_NULL, "Video decoder of players without an explicit SetDecode: 0 = Auto (GPU when available and the video is at least cev_decodeAutoMinHeight tall), 1 = GPU (Media Foundation, falls back to the CPU), 2 = CPU (libvpx). Applies at the next Load / Play from stopped");
+		REGISTER_CVAR2("cev_decodeAutoMinHeight", &mEnv->m_cevDecodeAutoMinHeight, 1080, VF_NULL, "Decode = Auto uses the GPU for videos at least this many pixels tall");
 		REGISTER_CVAR2("cev_log", &mEnv->m_cevLog, 0, VF_NULL, "1 = verbose CEVPlayer log");
 		REGISTER_CVAR2("cev_audio_enable", &mEnv->m_cevAudioEnable, 1, VF_NULL, "0 = no audio output from videos (audio is not even decoded for players created afterwards)");
 
@@ -627,7 +629,7 @@ namespace CEVPlayer
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 
-		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds", "cev_allowPlanar" };
+		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_decodeMode", "cev_decodeAutoMinHeight", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds", "cev_allowPlanar" };
 		for (const char* name : variables)
 			pConsole->UnregisterVariable(name, true);
 	}

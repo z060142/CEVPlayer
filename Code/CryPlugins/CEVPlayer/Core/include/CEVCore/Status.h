@@ -20,6 +20,8 @@ namespace cev
 		DecodeError,    // codec reported an error for one packet
 		Cancelled,      // operation aborted by Unload()/destruction
 		LoadFailed,     // Load() finished with an error, see PlayerCore::GetLoadError()
+		Busy,           // try again later (decoder backend queue full, nothing was consumed)
+		BackendFailed,  // a decoder backend cannot continue (device removed, ...): switch to another one
 	};
 
 	// Optional second code that says where inside an operation the failure happened.

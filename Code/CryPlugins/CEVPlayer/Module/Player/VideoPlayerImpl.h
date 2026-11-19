@@ -70,7 +70,7 @@ namespace CEVPlayer
 		const char* GetSurfaceId() const override { return m_surfaceId.c_str(); }
 		uint32_t GetGeneration() const override { return m_generation; }
 		EVideoPixelLayout GetPixelLayout() const override { return m_layout; }
-		EVideoDecodeBackend GetDecodeBackend() const override { return EVideoDecodeBackend::Cpu; }
+		EVideoDecodeBackend GetDecodeBackend() const override;
 
 		// ---- manager side (main thread) ----
 		uint32_t Id() const { return m_id; }
@@ -115,6 +115,14 @@ namespace CEVPlayer
 		//! M7: pause the video decoding while no consumer of the surface sees the picture (default on). Players without
 		//! a surface id, fullscreen and material outputs always count as visible.
 		void SetPauseDecodeWhenHidden(bool enable) { m_pauseDecodeWhenHidden = enable; }
+		//! M9: SetDecode (cev::DecodeMode value: 0 Auto, 1 GPU, 2 CPU; -1 = follow cev_decodeMode). Takes effect at the
+		//! next Load / Play from Stopped or Ended (a playing video is never reloaded for it).
+		void SetDecodeRequest(int mode) { m_decodeRequest = mode; }
+		int EffectiveDecodeMode() const;
+		//! Backend in use with the fallback reason (default values before Ready).
+		cev::DecodeBackendInfo DecodeInfo() const;
+		//! "gpu", "gpu+cpu-alpha", "cpu" or "cpu (reason)" for logs and cev_surfaces.
+		void DecodeText(char* buffer, size_t size, bool withReason) const;
 		bool GetPauseDecodeWhenHidden() const { return m_pauseDecodeWhenHidden; }
 		//! Contract control MUTE: silences the voice without touching the volume value.
 		void SetMuted(bool muted);
@@ -290,6 +298,10 @@ namespace CEVPlayer
 		uint32_t m_hintConsumers = 0;
 		uint8_t m_lastVisibility = 0;     // cev::VideoVisibility of the previous tick (stats window reset on change)
 		bool m_startedAfterReload = false; // Play() reloaded for another variant: OnLoaded sends Started
+		// M9 decoder choice
+		int m_decodeRequest = -1;          // SetDecode(), -1 = cev_decodeMode
+		int m_loadedDecodeMode = 2;        // mode the current core was loaded with
+		bool m_backendHardware = false;    // hardware decode at the last check (fallback warning during playback)
 
 		// presentation
 		ITexture* m_pTexture = nullptr; // one reference owned by this player (RenderBridge::ReleaseTexture)

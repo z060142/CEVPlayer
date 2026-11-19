@@ -151,7 +151,7 @@ namespace CEVPlayer
 			Material,     //!< bind the texture to a texture slot of a material
 		};
 
-		//! SetDecode modes (parameter "Mode"). Only recorded so far: the backend is always the CPU decoder.
+		//! SetDecode modes (parameter "Mode"); same values as cev::DecodeMode and cev_decodeMode.
 		enum class EDecodeMode : int
 		{
 			Auto = 0,

@@ -82,6 +82,8 @@ set(CEV_CORE_SOURCES
 	src/DescriptorPlan.cpp
 	src/FrameRing.cpp
 	src/IByteSource.cpp
+	src/LibvpxBackend.cpp
+	src/MfVideoBackend.cpp
 	src/PlayerCore.cpp
 	src/Resampler.cpp
 	src/Stats.cpp
@@ -103,11 +105,17 @@ set(CEV_CORE_HEADERS
 	include/CEVCore/Stats.h
 	include/CEVCore/Status.h
 	include/CEVCore/VideoDecoder.h
+	include/CEVCore/VideoDecoderBackend.h
 	include/CEVCore/WebmDemuxer.h)
 
 add_library(CEVPlayerCore STATIC ${CEV_CORE_SOURCES} ${CEV_CORE_HEADERS})
 target_include_directories(CEVPlayerCore PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include" PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
 target_link_libraries(CEVPlayerCore PUBLIC libvpx libwebm libvorbis libogg libopus)
+if(WIN32)
+	# M9 Media Foundation hardware decode backend (Windows SDK only; src/MfVideoBackend.cpp). The engine side module
+	# (Module/CMakeLists.txt) gets them through this PUBLIC link as well.
+	target_link_libraries(CEVPlayerCore PUBLIC mfplat mfuuid d3d11 dxgi)
+endif()
 if(CEV_CORE_STANDALONE AND NOT MSVC)
 	find_package(Threads REQUIRED)
 	target_link_libraries(CEVPlayerCore PUBLIC Threads::Threads)

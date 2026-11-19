@@ -56,7 +56,7 @@ namespace CEVPlayer
 			//! Why the last Create / CreateForSurface failed (cev::Status value, 0 = it did not fail) and a short text.
 			int LastErrorCode() const { return m_lastErrorCode; }
 			const char* LastErrorMessage() const { return m_lastErrorMessage.c_str(); }
-			//! SetDecode: the decoder choice of a player (EDecodeMode value). Recorded only, the backend is the CPU.
+			//! SetDecode: the decoder choice of a player (EDecodeMode value), also given to the player (SetDecodeRequest).
 			void SetDecodeMode(int handle, int mode);
 			int GetDecodeMode(int handle) const;
 			//! The handle exists and its player was made through Create / CreateForSurface by a script (not owned by a

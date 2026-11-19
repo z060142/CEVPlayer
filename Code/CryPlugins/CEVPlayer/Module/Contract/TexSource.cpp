@@ -43,6 +43,7 @@ namespace CEVPlayer
 				bool ownedByOpen = false; // made by `open` (M7): `close` destroys it
 				bool closing = false;     // `close` queued: query returns 0, a new `open` starts over
 				std::string openSrc;      // src of the last accepted `open`
+				char decode[64] = {};     // M9: decoder in use (cev_surfaces only)
 			};
 
 			SRWLOCK s_lock = SRWLOCK_INIT;
@@ -377,12 +378,13 @@ namespace CEVPlayer
 			}
 		}
 
-		void PublishSnapshot(const char* name, const CryTexSourceInfo& info)
+		void PublishSnapshot(const char* name, const CryTexSourceInfo& info, const char* decode)
 		{
 			SExclusive lock;
 			SSurface* const s = FindLocked(name);
 			if (s == nullptr)
 				return;
+			cry_strcpy(s->decode, decode != nullptr ? decode : "");
 			s->info = info;
 			s->info.size = sizeof(CryTexSourceInfo);
 			++s->updates;
@@ -430,9 +432,10 @@ namespace CEVPlayer
 			{
 				const CryTexSourceInfo& i = s.info;
 				const SHintSummary h = SummarizeLocked(s);
-				LogAlways("  <%s> tex=%d %dx%d flags=0x%x serial=%llu gen=%u layout=%u state=%u err=%d t=%.2f/%.2f loops=%u updates=%u owner=%s%s | hints: consumers=%u visible=%d px=%dx%d accept=0x%x",
+				LogAlways("  <%s> tex=%d %dx%d flags=0x%x serial=%llu gen=%u layout=%u state=%u err=%d t=%.2f/%.2f loops=%u updates=%u owner=%s%s decode=%s | hints: consumers=%u visible=%d px=%dx%d accept=0x%x",
 					s.name, i.textureId, i.width, i.height, i.flags, static_cast<unsigned long long>(i.contentSerial), i.generation, i.layout, i.state,
 					i.errorCode, i.timeSeconds, i.durationSeconds, i.loopCount, s.updates, s.ownedByOpen ? "open" : "level", s.closing ? " (closing)" : "",
+					s.decode[0] != 0 ? s.decode : "-",
 					h.consumers, h.visible ? 1 : 0, h.pixelWidth, h.pixelHeight, h.acceptLayouts);
 				if (i.layout != CTS_LAYOUT_RGBA8)
 					LogAlways("     planes Y(%d,%d %dx%d) U(%d,%d %dx%d) V(%d,%d %dx%d) A(%d,%d %dx%d) matrix=%u range=%u siting=%u",

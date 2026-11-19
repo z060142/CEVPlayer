@@ -934,7 +934,7 @@ namespace CEVPlayer
 						OutputPortConfig<bool>("HasAlpha", _HELP("The video has an alpha channel.")),
 						OutputPortConfig<string>("Language", _HELP("Audio language in use, empty without languages.")),
 						OutputPortConfig<int>("Variant", _HELP("Variant in use: 0 = main video, n = n-th variant.")),
-						OutputPortConfig<int>("DecodeBackend", _HELP("Decoder in use: 0 = CPU.")),
+						OutputPortConfig<int>("DecodeBackend", _HELP("Decoder in use: 0 = CPU, 1 = GPU.")),
 						OutputPortConfig<string>("FrameSerial", _HELP("Number of uploaded pictures as decimal text.")),
 						OutputPortConfig<string>("SurfaceId", _HELP("Surface id of the player, empty for Screen / Material players.")),
 						OutputPortConfig_Void("Error", _HELP("Get was rejected (invalid handle); see the log.")),
