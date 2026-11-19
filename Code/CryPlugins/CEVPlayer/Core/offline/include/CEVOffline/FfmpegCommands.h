@@ -66,6 +66,9 @@ namespace cev
 				bool twoPass = false;
 				int cpuUsed = 2;                 // libvpx -cpu-used (0 slowest .. 8 fastest); 4..8 is realtime-ish
 				double inputFrameRate = 0.0;     // PNG sequence: -framerate N before -i (0: ffmpeg default of 25)
+				// Frame rate of the source (TranscodeToWebm() / MakeVariant() fill it from the probe): the keyframe
+				// interval is -g KeyframeIntervalFrames(rate) (inputFrameRate when this is 0; 60 frames when both are 0).
+				double sourceFrameRate = 0.0;
 				int inputStartNumber = -1;       // PNG sequence: -start_number N before -i (>= 0; -1: ffmpeg looks at the first 5 numbers)
 				std::string inputVideoDecoder;   // forced input decoder, e.g. "libvpx-vp9" (needed to decode WebM alpha)
 				// Output colour: RGB / unknown sources are converted with this matrix by the scale filter and the stream is
@@ -92,6 +95,10 @@ namespace cev
 				bool alphaOutput = false;                  // the output carries alpha (yuva420p)
 				bool Empty() const { return commands.empty(); }
 			};
+
+			// Keyframe interval of the encodes (M7): round(frameRate x 2 s), at least 1; 60 when the rate is unknown (<= 0).
+			// Bounds the catch-up of a player that becomes visible again (docs/design/M6-ui-source.md section 5.3).
+			int KeyframeIntervalFrames(double frameRate);
 
 			// TranscodeToWebm: VP9 (+ Opus) in WebM. Alpha: yuva420p + -auto-alt-ref 0 (libvpx-vp9 alpha requirement).
 			TranscodePlan BuildTranscodeToWebm(const std::string& src, const std::string& dst, const WebmTranscodeOptions& options);

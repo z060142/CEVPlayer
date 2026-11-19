@@ -810,6 +810,24 @@ namespace
 			CHECK(BuildMakeVariant("in.webm", "out.webm", 0, o).Empty());
 			CHECK(BuildMakeVariant("", "out.webm", 360, o).Empty());
 		}
+		// M7: keyframe interval -g = round(frame rate x 2 s), at least 1, 60 when the rate is unknown; no -keyint_min
+		{
+			CHECK(KeyframeIntervalFrames(30.0) == 60 && KeyframeIntervalFrames(29.97) == 60 && KeyframeIntervalFrames(23.976) == 48);
+			CHECK(KeyframeIntervalFrames(60.0) == 120 && KeyframeIntervalFrames(0.2) == 1 && KeyframeIntervalFrames(0.0) == 60 && KeyframeIntervalFrames(-5.0) == 60);
+			WebmTranscodeOptions o;
+			std::vector<std::string> a = BuildTranscodeToWebm("in.mp4", "out.webm", o).commands[0].args;
+			CHECK(ArgAfter(a, "-g") == "60" && !HasArg(a, "-keyint_min")); // unknown rate
+			CHECK(IndexOf(a, "-g") > IndexOf(a, "-c:v") && IndexOf(a, "-g") < IndexOf(a, "-f"));
+			o.sourceFrameRate = 25.0;
+			CHECK(ArgAfter(BuildTranscodeToWebm("in.mp4", "out.webm", o).commands[0].args, "-g") == "50");
+			CHECK(ArgAfter(BuildMakeVariant("in.webm", "v.webm", 360, o).commands[0].args, "-g") == "50"); // variants too
+			o.twoPass = true;
+			const TranscodePlan p2 = BuildTranscodeToWebm("in.mp4", "out.webm", o);
+			CHECK(ArgAfter(p2.commands[0].args, "-g") == "50" && ArgAfter(p2.commands[1].args, "-g") == "50");
+			WebmTranscodeOptions png;
+			png.inputFrameRate = 24.0; // PNG sequence: the rate given for the input
+			CHECK(ArgAfter(BuildTranscodeToWebm("C:/seq/f_%04d.png", "out.webm", png).commands[0].args, "-g") == "48");
+		}
 	}
 
 	void TestSourceProbeParsing()

@@ -99,6 +99,9 @@ namespace cev
 		uint32_t FindVideoKeyframe(double seconds) const;
 		// Index of the last audio packet with pts <= seconds (0 when none).
 		uint32_t FindAudioPacket(double seconds) const;
+		// Longest distance between two keyframes of the video track, the last one measured to the end of the stream
+		// (the worst catch-up after a hidden player becomes visible again, M7). 0 without video.
+		double MaxKeyframeIntervalSeconds() const;
 
 	private:
 		static Status OpenImpl(std::unique_ptr<IByteSource> source, std::unique_ptr<WebmDemuxer>& out,

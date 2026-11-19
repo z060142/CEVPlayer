@@ -137,7 +137,7 @@ namespace cev
 			else if (forced > 0)
 				out.forcedOutOfRange = true;
 		}
-		else if (autoPick)
+		else if (autoPick && outputHeight > 0) // unknown height (0): the main video
 		{
 			// smallest variant not below the output; none big enough: the main video (the biggest picture)
 			for (size_t i = 0; i < variants.size(); ++i)

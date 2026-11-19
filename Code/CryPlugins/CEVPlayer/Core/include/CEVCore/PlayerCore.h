@@ -201,6 +201,7 @@ namespace cev
 		void SetStatsEnabled(bool enabled);  // runtime toggle (PlayerConfig::enableStats is the initial value)
 		StatsSnapshot GetStats() const;
 		void ResetStats();
+		void ResetStatsWindow();             // only the avg / max / p99 window, counters stay
 		bool VideoBufferedFrame() const;     // a decoded frame is queued and not yet presented
 		bool DecoderAtEnd() const;           // all packets of all streams were decoded
 		bool VideoDecoderAtEnd() const;      // all video packets decoded (or no video)

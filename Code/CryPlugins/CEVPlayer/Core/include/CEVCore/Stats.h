@@ -63,9 +63,12 @@ namespace cev
 		void NoteCopy(uint64_t copyBytes, uint64_t colorBytes);
 		void NoteDecodeOnly();
 		void NoteCatchUp(float ms, uint32_t frames);
+		uint64_t DecodeOnlyCount() const { return m_decodeOnly.load(std::memory_order_relaxed); }
 
 		StatsSnapshot Snapshot() const;
 		void Reset();
+		//! Clears only the per-frame window (avg / max / p99), not the counters (M7: per visibility state).
+		void ResetWindow();
 
 	private:
 		struct Entry

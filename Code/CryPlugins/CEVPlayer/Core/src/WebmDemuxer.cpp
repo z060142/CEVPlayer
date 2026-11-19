@@ -926,6 +926,24 @@ namespace cev
 		return m_source->Read(r.offset, dst, r.size);
 	}
 
+	double WebmDemuxer::MaxKeyframeIntervalSeconds() const
+	{
+		if (m_videoPackets.empty())
+			return 0.0;
+		int64_t worst = 0;
+		int64_t lastKey = m_videoPackets.front().ptsNs;
+		for (const PacketRef& p : m_videoPackets)
+		{
+			if (!p.keyframe)
+				continue;
+			worst = std::max(worst, p.ptsNs - lastKey);
+			lastKey = p.ptsNs;
+		}
+		const int64_t end = std::max(m_videoPackets.back().ptsNs, static_cast<int64_t>(m_duration * 1e9));
+		worst = std::max(worst, end - lastKey);
+		return static_cast<double>(worst) * 1e-9;
+	}
+
 	uint32_t WebmDemuxer::FindVideoKeyframe(double seconds) const
 	{
 		const int64_t ns = static_cast<int64_t>(seconds * 1e9);

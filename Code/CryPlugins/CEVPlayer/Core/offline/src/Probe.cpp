@@ -54,6 +54,7 @@ namespace cev
 					out.hasAlpha = v.hasAlpha;
 					out.videoFrameCount = v.packetCount;
 					out.videoFirstPts = v.firstPts;
+					out.maxKeyframeIntervalSeconds = demux->MaxKeyframeIntervalSeconds();
 				}
 
 				for (AudioTrackData& a : file->Audio())

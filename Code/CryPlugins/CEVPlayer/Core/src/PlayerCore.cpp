@@ -32,6 +32,15 @@ namespace cev
 		constexpr double kEndGraceMin = 0.25;     // seconds past the duration after which remaining frames are discarded
 		constexpr uint32_t kMaxAudioBufferMs = 4000;
 		constexpr uint32_t kResampleBlock = 1024; // input frames moved from the PCM ring to the resampler at a time
+
+		constexpr uint8_t kModeVisible = static_cast<uint8_t>(VideoVisibility::Visible);
+		constexpr uint8_t kModeDecodeOnly = static_cast<uint8_t>(VideoVisibility::DecodeOnly);
+		constexpr uint8_t kModeStopped = static_cast<uint8_t>(VideoVisibility::Stopped);
+
+		inline int64_t SteadyNs()
+		{
+			return std::chrono::duration_cast<std::chrono::nanoseconds>(Steady::now().time_since_epoch()).count();
+		}
 	}
 
 	struct PlayerCore::Impl final : public IDecodeTask
@@ -113,6 +122,22 @@ namespace cev
 		uint32_t loopCount = 0;
 		uint64_t serial = 0;
 
+		// ---------------------------------------------------------------- visibility (M7)
+		// consumer -> worker
+		std::atomic<uint8_t> vMode{kModeVisible};       // VideoVisibility
+		std::atomic<double> decodeUntil{0.0};           // picture time the clock has reached (Update / seek)
+		std::atomic<uint32_t> resyncGen{0};             // +1 per Stopped -> Visible: the worker catches up
+		std::atomic<bool> catchUpPending{false};        // set with resyncGen, cleared by the worker: no presenting meanwhile
+		std::atomic<int64_t> catchUpRequestNs{0};       // steady time of the visible request (catch-up timing only)
+		// worker
+		uint32_t appliedResyncGen = 0;
+		bool vCatchUp = false;
+		uint32_t catchUpFrames = 0;
+		// consumer
+		double hiddenFor = 0.0;                         // seconds hidden in a row (sum of the caller's dt)
+		double hiddenStopSeconds = 2.0;
+		uint64_t decodeOnlyAtHide = 0;
+
 		static double ClampOffset(double v)
 		{
 			if (!(v == v))
@@ -171,6 +196,8 @@ namespace cev
 
 			if (seekGen.load(std::memory_order_acquire) != appliedSeekGen.load(std::memory_order_relaxed))
 				ApplySeek();
+			if (resyncGen.load(std::memory_order_acquire) != appliedResyncGen)
+				ApplyResync();
 
 			bool more = false;
 			if (hasVideo && VideoStep())
@@ -419,6 +446,28 @@ namespace cev
 			appliedSeekGen.store(gen, std::memory_order_release);
 		}
 
+		// Stopped -> Visible: continue from where decoding stopped when the keyframe before the clock is not later
+		// (the decoder state is still valid), otherwise jump to that keyframe; then skip-decode up to the clock.
+		void ApplyResync()
+		{
+			appliedResyncGen = resyncGen.load(std::memory_order_acquire);
+			vCatchUp = false;
+			if (hasVideo)
+			{
+				const uint32_t k = demux->FindVideoKeyframe(decodeUntil.load(std::memory_order_relaxed));
+				if (k > vPos)
+				{
+					vPos = k;
+					vEof.store(false, std::memory_order_relaxed);
+					ring.FlushReady(); // frames before the jump are stale (the consumer does not present meanwhile)
+				}
+				vCatchUp = !vEof.load(std::memory_order_relaxed);
+				catchUpFrames = 0;
+			}
+			if (!vCatchUp)
+				catchUpPending.store(false, std::memory_order_release);
+		}
+
 		// ================================================================ decode steps (worker)
 		bool VideoStep()
 		{
@@ -432,7 +481,18 @@ namespace cev
 			}
 
 			const uint32_t idx = vPos;
-			const bool skipping = vSeekActive && idx + 1 < count && demux->VideoPts(idx + 1) <= vSeekTarget + 1e-9;
+			const uint8_t mode = vMode.load(std::memory_order_acquire);
+			if (mode == kModeStopped)
+				return false; // hidden for long: no video decoding at all (SetVisible wakes us)
+			const bool hasNext = idx + 1 < count;
+			const double until = decodeUntil.load(std::memory_order_relaxed);
+			// Hidden: decode only the packets the clock has passed (the covering frame is left for the output when
+			// the picture becomes visible again), no ring slot. Catch-up: the same up to the moving clock.
+			const bool hiddenSkip = mode == kModeDecodeOnly;
+			if (hiddenSkip && (!hasNext || demux->VideoPts(idx + 1) > until + 1e-9))
+				return false; // caught up with the clock: Update() wakes us every frame
+			const bool catchSkip = !hiddenSkip && vCatchUp && hasNext && demux->VideoPts(idx + 1) <= until + 1e-9;
+			const bool skipping = hiddenSkip || catchSkip || (vSeekActive && hasNext && demux->VideoPts(idx + 1) <= vSeekTarget + 1e-9);
 
 			int slot = -1;
 			uint64_t epoch = 0;
@@ -475,10 +535,26 @@ namespace cev
 
 			if (skipping)
 			{
+				if (hiddenSkip || catchSkip)
+				{
+					stats.NoteDecodeOnly();
+					if (catchSkip)
+						++catchUpFrames;
+					if (timing && hiddenSkip)
+						stats.RecordDecoded(MsBetween(t0, t1), 0.0f, 0.0f, ring.InFlightCount());
+				}
 				++vPos;
 				return true;
 			}
 			vSeekActive = false;
+			if (vCatchUp)
+			{
+				// first frame decoded for output since the visible request
+				vCatchUp = false;
+				const int64_t ns = SteadyNs() - catchUpRequestNs.load(std::memory_order_relaxed);
+				stats.NoteCatchUp(static_cast<float>(static_cast<double>(std::max<int64_t>(ns, 1)) * 1e-6), catchUpFrames);
+				catchUpPending.store(false, std::memory_order_release);
+			}
 
 			if (Succeeded(st) && vdec->HasFrame())
 			{
@@ -489,7 +565,12 @@ namespace cev
 						tCopy = Steady::now();
 					ConvertSlot(s);
 					if (timing)
+					{
 						t2 = Steady::now();
+						const uint64_t luma = static_cast<uint64_t>(format.width) * static_cast<uint64_t>(format.height);
+						const uint64_t chroma = 2ull * static_cast<uint64_t>(format.ChromaWidth()) * static_cast<uint64_t>(format.ChromaHeight());
+						stats.NoteCopy(luma + chroma + (format.hasAlpha ? luma : 0ull), format.withRgba ? luma * 4ull : 0ull);
+					}
 					if (ring.Commit(slot, epoch, demux->VideoPts(idx)) && timing)
 						stats.RecordDecoded(MsBetween(t0, t1), MsBetween(t1, tCopy), MsBetween(tCopy, t2), ring.InFlightCount());
 				}
@@ -600,6 +681,7 @@ namespace cev
 				seekTarget = t;
 				seekGen.fetch_add(1, std::memory_order_acq_rel);
 			}
+			decodeUntil.store(std::max(t - avOffset, firstVideoPts), std::memory_order_relaxed);
 			if (hasVideo)
 				ring.FlushReady();
 			clock->Seek(t);
@@ -661,6 +743,15 @@ namespace cev
 			loopCount = 0;
 			audioEndNotified = false;
 			serial = 0;
+			vMode.store(kModeVisible);
+			decodeUntil.store(0.0);
+			resyncGen.store(0);
+			appliedResyncGen = 0;
+			catchUpPending.store(false);
+			vCatchUp = false;
+			catchUpFrames = 0;
+			hiddenFor = 0.0;
+			decodeOnlyAtHide = 0;
 			firstVideoPts = 0.0;
 			SetState(PlayerState::Stopped);
 			stats.Reset();
@@ -849,7 +940,11 @@ namespace cev
 		const double t = d.clock->NowSeconds();
 		const double tVideo = t - d.avOffset; // presentation time lookup (see SetAvOffset)
 
-		if (d.hasVideo)
+		const uint8_t mode = d.vMode.load(std::memory_order_relaxed);
+		// hidden or catching up: nothing is presented, the end follows the clock only
+		const bool outputOff = mode != kModeVisible || d.catchUpPending.load(std::memory_order_acquire);
+		d.decodeUntil.store(std::max(tVideo, d.firstVideoPts), std::memory_order_relaxed);
+		if (d.hasVideo && !outputOff)
 		{
 			uint32_t dropped = 0;
 			const int slot = d.ring.PopForTime(std::max(tVideo, d.firstVideoPts), kPresentEpsilon, dropped);
@@ -864,6 +959,10 @@ namespace cev
 			if ((slot >= 0 || dropped > 0) && !d.vEof.load(std::memory_order_relaxed))
 				d.WakeWorker();
 		}
+		else if (d.hasVideo && mode == kModeDecodeOnly)
+		{
+			d.WakeWorker(); // the hidden decoder follows the clock
+		}
 		if (d.hasAudio && !d.aEof.load(std::memory_order_relaxed) && d.aring.FreeFrames() >= d.aring.Capacity() / 4)
 			d.WakeWorker();
 		if (!d.audioEndNotified && d.AudioAtEnd() && (!d.hasAudio || d.aring.Buffered() == 0))
@@ -875,7 +974,9 @@ namespace cev
 
 		if (d.State() == PlayerState::Playing && t >= d.info.durationSeconds - kEndEpsilon)
 		{
-			bool videoDone = !d.hasVideo || (d.VideoAtEnd() && d.ring.ReadyCount() == 0);
+			// Hidden (or catching up): the clock alone decides, the decoder may be stopped. Visible: the last
+			// frame must have been presented as well.
+			bool videoDone = !d.hasVideo || outputOff || (d.VideoAtEnd() && d.ring.ReadyCount() == 0);
 			if (!videoDone && d.VideoAtEnd())
 			{
 				// Frames that stay queued long after the duration (bogus timestamps) must not hold the end back:
@@ -1041,6 +1142,7 @@ namespace cev
 	void PlayerCore::SetStatsEnabled(bool enabled) { m_impl->stats.SetEnabled(enabled); }
 	StatsSnapshot PlayerCore::GetStats() const { return m_impl->stats.Snapshot(); }
 	void PlayerCore::ResetStats() { m_impl->stats.Reset(); }
+	void PlayerCore::ResetStatsWindow() { m_impl->stats.ResetWindow(); }
 
 	bool PlayerCore::VideoBufferedFrame() const
 	{
@@ -1060,9 +1162,53 @@ namespace cev
 		return d.loadState.load(std::memory_order_acquire) == LoadState::Ready && d.VideoAtEnd();
 	}
 
-	void PlayerCore::SetVisible(bool, double) {}
-	void PlayerCore::SetHiddenStopSeconds(double) {}
-	VideoVisibility PlayerCore::GetVisibility() const { return VideoVisibility::Visible; }
+	void PlayerCore::SetVisible(bool visible, double dtSeconds)
+	{
+		Impl& d = *m_impl;
+		const uint8_t mode = d.vMode.load(std::memory_order_relaxed);
+		if (visible)
+		{
+			d.hiddenFor = 0.0;
+			if (mode == kModeDecodeOnly)
+			{
+				// Frames still queued from before hiding are stale once the hidden decoder moved on; otherwise
+				// (e.g. paused while hidden) they are exactly what is due.
+				if (d.stats.DecodeOnlyCount() != d.decodeOnlyAtHide)
+					d.ring.FlushReady();
+				d.vMode.store(kModeVisible, std::memory_order_release);
+				d.WakeWorker();
+			}
+			else if (mode == kModeStopped)
+			{
+				d.catchUpRequestNs.store(SteadyNs(), std::memory_order_relaxed);
+				d.catchUpPending.store(true, std::memory_order_release);
+				d.resyncGen.fetch_add(1, std::memory_order_acq_rel);
+				d.vMode.store(kModeVisible, std::memory_order_release);
+				d.WakeWorker();
+			}
+			return;
+		}
+		if (std::isfinite(dtSeconds) && dtSeconds > 0.0)
+			d.hiddenFor += dtSeconds;
+		if (mode == kModeVisible)
+		{
+			d.decodeOnlyAtHide = d.stats.DecodeOnlyCount();
+			d.vMode.store(kModeDecodeOnly, std::memory_order_release);
+			d.WakeWorker();
+		}
+		if (d.hiddenStopSeconds > 0.0 && d.hiddenFor >= d.hiddenStopSeconds - 1e-9)
+			d.vMode.store(kModeStopped, std::memory_order_release);
+	}
+
+	void PlayerCore::SetHiddenStopSeconds(double seconds)
+	{
+		m_impl->hiddenStopSeconds = std::isfinite(seconds) && seconds > 0.0 ? seconds : 0.0;
+	}
+
+	VideoVisibility PlayerCore::GetVisibility() const
+	{
+		return static_cast<VideoVisibility>(m_impl->vMode.load(std::memory_order_relaxed));
+	}
 
 	uint32_t PlayerCore::DecodeErrors() const { return m_impl->decodeErrors.load(std::memory_order_relaxed); }
 }

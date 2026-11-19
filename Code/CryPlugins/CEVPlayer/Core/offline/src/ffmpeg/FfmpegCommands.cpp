@@ -263,6 +263,8 @@ namespace cev
 				Push(video, "-deadline", "good");
 				Push(video, "-cpu-used", std::to_string(std::max(0, std::min(8, o.cpuUsed))));
 				Push(video, "-row-mt", "1");
+				// M7: a keyframe every 2 s bounds the catch-up when a hidden player becomes visible again
+				Push(video, "-g", std::to_string(KeyframeIntervalFrames(o.sourceFrameRate > 0.0 ? o.sourceFrameRate : o.inputFrameRate)));
 				if (alpha)
 					Push(video, "-auto-alt-ref", "0"); // libvpx-vp9 cannot use alt-ref frames together with alpha
 				if (o.threads > 0)
@@ -326,6 +328,13 @@ namespace cev
 					plan.commands.push_back(std::move(c));
 				}
 				return plan;
+			}
+
+			int KeyframeIntervalFrames(double frameRate)
+			{
+				if (!(frameRate > 0.0) || frameRate > 1000.0)
+					return 60; // unknown (also NaN / nonsense)
+				return std::max(1, static_cast<int>(std::lround(frameRate * 2.0)));
 			}
 
 			TranscodePlan BuildMakeVariant(const std::string& src, const std::string& dst, int height, const WebmTranscodeOptions& options)
@@ -464,6 +473,8 @@ namespace cev
 						return Res(Status::Unsupported, src + " has no video stream");
 					options.sourceHasAlpha = probe.hasAlpha;
 					options.sourceHasAudio = probe.hasAudio;
+					if (options.inputFrameRate <= 0.0)
+						options.sourceFrameRate = probe.frameRate; // a PNG sequence runs at inputFrameRate
 					if (probe.hasAlpha && options.inputVideoDecoder.empty() && (probe.videoCodec == "vp9" || probe.videoCodec == "vp8"))
 						options.inputVideoDecoder = probe.videoCodec == "vp9" ? "libvpx-vp9" : "libvpx"; // WebM alpha rides in BlockAdditions
 					const TranscodePlan plan = variantHeight > 0 ? BuildMakeVariant(src, dst, variantHeight, options) : BuildTranscodeToWebm(src, dst, options);

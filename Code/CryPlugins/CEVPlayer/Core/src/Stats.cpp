@@ -144,6 +144,13 @@ namespace cev
 		return out;
 	}
 
+	void Stats::ResetWindow()
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_head = 0;
+		m_count = 0;
+	}
+
 	void Stats::Reset()
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);

@@ -81,6 +81,7 @@ namespace cev
 			bool hasAlpha = false;
 			uint32_t videoFrameCount = 0;
 			double videoFirstPts = 0.0;
+			double maxKeyframeIntervalSeconds = 0.0; // longest keyframe distance (last one to the end), 0 = unknown
 			double durationSeconds = 0.0;        // container duration
 			uint64_t fileSize = 0;
 			std::vector<AudioTrackProbe> audioTracks;
