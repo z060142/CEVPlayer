@@ -310,3 +310,33 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 - **2160p30 alpha 在打包排列下即時播放**（每秒 30 次上傳＝每幀都到；RGBA8 只有 22.8）。
 - 引擎內的 GPU／行程 RAM 欄位在連續換素材的單次執行裡基準漂移，不採用；RAM 以上表的拆解為準。
 - 像素：打包貼圖內容＝Core 的平面（`cev_contract_selftest` 以上傳緩衝的雜湊對照快照矩形重組的平面，含 A），截圖 `shots/packed_yuva420_1080p30_alpha.jpg`（R8 以紅色顯示：Y、U｜V、A 三段）。`ITexture::GetData32` 對 R8 不可用（非 RGBA8 時以 `GetDeviceDataSize()` 整塊 memcpy、忽略 staging 列距，且在呼叫端執行緒直接下載），未採用。
+
+## 14. M9 的實測與場合建議（2026-11-19；`E:/coding3/xt-bench/cev-m9/`，RTX 4070 Ti；各 20 秒；ms 平均）
+
+| 後端 | 排列 | 素材 | 解碼 | 讀回 | 轉色 | 上傳 | 行程 RAM 增量 |
+|---|---|---|---|---|---|---|---|
+| CPU | RGBA8 | 1080p30 | 1.76 | – | 4.46 | 2.14 | 64 MB |
+| CPU | 打包 | 1080p30 | 2.07 | – | 0 | 1.06 | 14 MB |
+| GPU | 打包 | 1080p30 | 0.38 | 0.09 | 0 | 0.67 | 112 MB |
+| CPU | RGBA8 | 2160p30 alpha | 13.24 | – | 25.59 | 10.04 | 517 MB |
+| CPU | 打包 | 2160p30 alpha | 11.38 | – | 0 | 5.15 | 418 MB |
+| GPU | 打包 | 2160p30 alpha | 0.58 | 6.43 | 0 | 3.65 | 753 MB |
+
+- 硬解的打包輸出與 libvpx **逐位元組相同**（六支素材全片、Y／U／V／A；seek 後第一張 60／60）。全部組合掉幀 0。讀回在 MF 的專用執行緒上，不佔池與主執行緒。
+- **硬解省 CPU、不省記憶體**：行程 CPU 少 25～60 個百分點（以單核 100% 計；2160p 最明顯），但行程 RAM 比 CPU 後端多 100～540 MB（libvpx 的參考幀緩衝消失，換來 MF 裝置與解碼表面池、staging 貼圖、ring 多的兩格都算在行程的 private bytes）。這與 §6 原先的預期相反；要不要縮減（例如縮小 MFT 的表面池、共用裝置）待量測後另議。
+- 同時六個 1080p 播放器全部取得硬解。VP8 一律 libvpx。裝置遺失、沒有 MFT、`SetInputType` 失敗都退回 libvpx（以測試開關模擬；真實情境未測）。
+- 未測：其他廠牌顯示卡、沒有 VP9 Video Extensions 的實機、多顯示卡時「DXGI 第一張卡＝引擎用的卡」、GPU video decode 引擎使用率。
+
+**場合建議**（`Decode` 屬性／`cev_decodeMode`；排列由消費端協商，能打包就打包）
+
+| 場合 | 建議 | 理由 |
+|---|---|---|
+| 遊戲選單（1080p、常駐） | GPU | 解碼 0.4 ms、CPU 留給 UI 與邏輯；RAM 多約 100 MB |
+| 開場／過場（2160p 或帶 alpha） | GPU | libvpx 要 11～13 ms／幀；硬解 0.6 ms＋背景讀回 |
+| 關卡內單一大螢幕 | GPU；記憶體吃緊時 CPU | 硬解多 300 MB 以上 RAM |
+| 關卡內多個小螢幕（≤720p 或數量多） | CPU（即 Auto 的結果） | 小解析度軟解很便宜；每個硬解播放器多一條執行緒與一份私有裝置記憶體 |
+| 記憶體預算緊 | CPU | RAM 最少 |
+| VP8 素材 | CPU（自動） | 沒有硬解 |
+
+`Auto`＝硬體可用且影片高度 ≥ `cev_decodeAutoMinHeight`（1080）時用 GPU。
+
