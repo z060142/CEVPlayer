@@ -26,6 +26,7 @@
 | M4 資產與編輯器 | 完成（畫面待手動驗收） | EditorCEVPlayer：資產類型、WebM 匯入、三欄視窗、QViewport 預覽、離線處理（分離音軌／WAV／Ogg，對齊 ≤0.3 取樣）、ACE 註冊、資產圖示、打包工具；手動驗收清單 docs/manual-acceptance-M4.md |
 | M5 FFmpeg 轉碼 | 完成（UI 與 CI 待驗證） | 偵測／下載（等 release 才開放）／非 WebM 匯入／壓縮與解析度／多解析度子檔／批次；Sandbox 冒煙全過。未驗證：CI 實跑、精簡版 FFmpeg、實際網路下載、UI 手動操作（docs/manual-acceptance-M5.md） |
 
+| 階段 0＋M6～M10 經由 UI 播放 | 規劃定案 2026-11-19，未實作 | 設計在 docs/design/M6-ui-source.md：Surface ID 與登錄表、貼圖來源契約（不共用標頭）、舊節點刪除與兩個抽屜（M6）；可見性／變體／`open`（M7）；打包平面直通（M8）；Media Foundation 硬解，CPU 為 fallback，可選（M9）；關卡讀取期間推進等 XTFrame 主線的機制（M10） |
 ## 決策紀錄
 
 - 2026-11-16 分支名用 `rebuild`。
@@ -36,3 +37,4 @@
 - 2026-11-16 CE 插件預設無 /EHsc；CEVPlayerCore 單獨開 /EHsc，例外不跨出 Core API。
 - 2026-11-16 M4 使用者決定：WAV/OGG 放影片資產資料夾內；原始影片複製進 Assets；預覽先用 QViewport，不穩定再改 XTFrame 子視窗。資產圖示以 image summon 產生（WEBM 字樣）。
 - 2026-11-16 依使用者指示推上 GitHub（rebuild 分支）。
+- 2026-11-19 使用者：經由 UI 播放為主線；舊節點全部刪除不留別名、新節點分「開箱即用／進階」兩個抽屜；硬解用 Media Foundation、CPU 解為 fallback 且可選；GPU 轉色由 UI 端（XTFrame）負責，CEVPlayer 不寫自己的著色器；素材只吃 WebM；渲染器 patch 先不做（硬解先走讀回並量測）；UI 的影片播放全部交給播放來源（XTFrame 主線裁決，CE 倉 docs/09 §9.10）。
