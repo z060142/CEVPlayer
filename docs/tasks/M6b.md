@@ -25,7 +25,7 @@
 ## 規則
 
 - 引擎樹：只複製改過與新增的檔進去（刪除的檔也要在引擎樹刪掉對應複本——只限 `Code/CryPlugins/CEVPlayer` 內）；不要讓 SDK 目錄被刪掉重抄；新增／刪除原始檔後以 `Tools/Integration/Build.ps1 -ConfigureOnly` 重產方案，只增量建 `CEVPlayer`（`EditorCEVPlayer` 若因介面改動編不過，一併增量建並回報）；不重建渲染器、不改引擎與 CryXTUI。
-- 啟動 GameLauncher 一律帶 `sys_assert_dialogues 0`（不要 `sys_log_asserts 1`）；log 裡出現的任何斷言都要列在報告並判斷是否與本單有關。**這棵樹有既存的啟動不穩定**（約半數啟動在 CryXTUI 輸入註冊前後出現 `CryString.h:734` 斷言、卡住或存取違規，未改動的建置也會——另有調查在進行）：測試專案的插件清單**不要載入 CryXTUI**（本單不需要它），以排除干擾；若仍遇到，照實記錄並重跑，不得把失敗當作通過。關機前不留開著的 surface。
+- 啟動 GameLauncher 一律帶 `sys_assert_dialogues 0`（不要 `sys_log_asserts 1`）；log 裡出現的任何斷言都要列在報告並判斷是否與本單有關。**這棵樹的測試不穩定已查明（`E:/coding3/xt-bench/cev-crash/`，2026-11-19）**：(a) `CryString.h:734` 斷言（與其後的堆積損毀、卡住）是引擎主控台延後指令的問題——`exec` 一個**四行以上**含 `wait_seconds` 的 cfg 幾乎每次觸發，三行以下不會，與載入哪些插件無關（只載引擎也會）；(b) 關機尾端的 0xC0000005 只在載入 CryXTUI 時出現（約 1／6）。因此：測試專案**不載入 CryXTUI**；**不要用四行以上的 exec cfg 驅動測試**——改以 CEVPlayer 自己的開發用指令在 tick 裡依序執行一份腳本（可新增 `cev_run_script <file>`：逐行讀取、支援 `wait <seconds>`，以 `gEnv->pConsole->ExecuteString(…, false, false)` 立即執行，不經引擎的延後佇列；只供測試），啟動參數只帶這一個指令。log 裡若仍出現斷言，列在報告並判斷是否與本單有關；不得把失敗當作通過。關機前不留開著的 surface。
 - Popen＋`SetProcessAffinityMask(0xFFF)`、每個指令有逾時、背景指令 10 分鐘沒輸出就檢查並改前景；不用 `cmd /c start … > log`。只關自己啟動的行程（以完整路徑分辨；另一棵引擎樹可能有別的代理在跑）。
 - 獨立建置的中間檔放 `T:/cev/m6b/`，做完刪；證據放 `E:/coding3/xt-bench/cev-m6b/`。最多 8 個平行建置工作。不 `git add -A`、不 `git stash`、不推送、不合併；不動 `E:\\coding2`、`E:\\coding4`、主樹。
 - 程式、註解、提交訊息英文；提交帶 `M6b`、結尾 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。
