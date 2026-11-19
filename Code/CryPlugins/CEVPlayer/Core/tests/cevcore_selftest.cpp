@@ -488,12 +488,12 @@ namespace
 		d.video = "v/main.webm";
 		d.route = VideoRoute::Mixed;
 		d.pauseTrigger = "Pause_Root";
-		VideoDescriptor::SLanguage en; en.name = "english"; en.embedded = true;
-		VideoDescriptor::SLanguage ja; ja.name = "Japanese"; ja.file = "v/main.japanese.webm";
-		VideoDescriptor::SLanguage de; de.name = "german"; de.file = "v/main.german.webm";
-		VideoDescriptor::SLanguage fr; fr.name = "french"; fr.trigger = "Play_FR";
-		d.languages = { en, ja, de, fr };
-		d.defaultLanguage = "english";
+		VideoDescriptor::SAudioTrack en; en.name = "dialogue"; en.embedded = true; en.language = "english";
+		VideoDescriptor::SAudioTrack ja; ja.name = "Dub_JA"; ja.file = "v/main.japanese.webm"; ja.language = "Japanese";
+		VideoDescriptor::SAudioTrack de; de.name = "music"; de.file = "v/main.german.webm";
+		VideoDescriptor::SAudioTrack fr; fr.name = "commentary"; fr.trigger = "Play_FR"; fr.language = "french";
+		d.audioTracks = { en, ja, de, fr };
+		d.defaultTrack = "music";
 		VideoDescriptor::SVariant v720; v720.file = "v/main_720.webm"; v720.width = 1280; v720.height = 720;
 		VideoDescriptor::SVariant v540; v540.file = "v/main_540.webm"; v540.width = 960; v540.height = 540;
 		d.variants = { v720, v540 };
@@ -504,35 +504,90 @@ namespace
 		SortDescriptorMarkers(d);
 		CHECK(d.markers[0].name == "a" && d.markers[1].name == "b" && d.markers[2].name == "c"); // stable
 
-		CHECK(FindDescriptorLanguage(d, "JAPANESE") == 1);
-		CHECK(FindDescriptorLanguage(d, "") == -1);
-		CHECK(FindDescriptorLanguage(d, nullptr) == -1);
+		// A1: tracks are found by name; the language tag is a separate, optional lookup
+		CHECK(!d.followGameLanguage); // default off
+		CHECK(FindDescriptorAudioTrack(d, "DUB_ja") == 1);
+		CHECK(FindDescriptorAudioTrack(d, "japanese") == -1); // a language is not a track name
+		CHECK(FindDescriptorAudioTrack(d, "") == -1);
+		CHECK(FindDescriptorAudioTrack(d, nullptr) == -1);
+		CHECK(FindDescriptorAudioTrackByLanguage(d, "JAPANESE") == 1);
+		CHECK(FindDescriptorAudioTrackByLanguage(d, "dialogue") == -1); // a track name is not a language
+		CHECK(FindDescriptorAudioTrackByLanguage(d, "") == -1);
 		CHECK(std::strcmp(VideoRouteName(VideoRoute::Cue), "cue") == 0);
 
+		// track names: [A-Za-z0-9_.-], 1..63
+		CHECK(IsValidAudioTrackName("music") && IsValidAudioTrackName("dub_JA-2.1") && IsValidAudioTrackName(std::string(63, 'a').c_str()));
+		CHECK(!IsValidAudioTrackName("") && !IsValidAudioTrackName(nullptr) && !IsValidAudioTrackName("two words") && !IsValidAudioTrackName("a/b")
+			&& !IsValidAudioTrackName(std::string(64, 'a').c_str()));
+
+		const char* const gameJa[2] = { "japanese", "english" };
+		const char* const gameNone[2] = { "klingon", "" };
 		DescriptorAudioPlan a;
-		const char* const reqJa[3] = { "", "japanese", "english" };
-		ResolveDescriptorAudio(d, reqJa, 3, &PlanExists, &files, a);
-		CHECK(a.language == "Japanese" && a.externalPath == "v/main.japanese.webm" && !a.cue && a.missingExternal.empty());
-		const char* const reqDe[2] = { "unknown", "german" };
-		ResolveDescriptorAudio(d, reqDe, 2, &PlanExists, &files, a);
-		CHECK(a.language == "german" && a.externalPath.empty() && a.missingExternal == "v/main.german.webm");
-		const char* const reqFr[1] = { "french" };
-		ResolveDescriptorAudio(d, reqFr, 1, &PlanExists, &files, a);
-		CHECK(a.cue && a.trigger == "Play_FR" && a.pauseTrigger == "Pause_Root");
-		const char* const reqNone[1] = { "klingon" };
-		ResolveDescriptorAudio(d, reqNone, 1, &PlanExists, &files, a);
-		CHECK(a.language.empty() && a.externalPath.empty() && !a.cue);
+		// (1) explicit track wins, whatever the game language says
+		ResolveDescriptorAudio(d, "dub_ja", gameJa, 2, &PlanExists, &files, a);
+		CHECK(a.track == "Dub_JA" && a.reason == DescriptorTrackReason::Requested && a.externalPath == "v/main.japanese.webm" && !a.cue && a.missingExternal.empty() && !a.unknownRequest);
+		// followGameLanguage off (default): the game language is not read -> default track
+		ResolveDescriptorAudio(d, "", gameJa, 2, &PlanExists, &files, a);
+		CHECK(a.track == "music" && a.reason == DescriptorTrackReason::Default && a.externalPath.empty() && a.missingExternal == "v/main.german.webm");
+		// an unknown explicit name is reported and treated as not given
+		ResolveDescriptorAudio(d, "nope", gameJa, 2, &PlanExists, &files, a);
+		CHECK(a.unknownRequest && a.track == "music" && a.reason == DescriptorTrackReason::Default);
+		// (2) followGameLanguage on: g_languageAudio, then g_language, matched against the language tags
+		VideoDescriptor f = d;
+		f.followGameLanguage = true;
+		ResolveDescriptorAudio(f, nullptr, gameJa, 2, &PlanExists, &files, a);
+		CHECK(a.track == "Dub_JA" && a.reason == DescriptorTrackReason::GameLanguage);
+		const char* const gameFr[2] = { "klingon", "FRENCH" };
+		ResolveDescriptorAudio(f, nullptr, gameFr, 2, &PlanExists, &files, a);
+		CHECK(a.track == "commentary" && a.reason == DescriptorTrackReason::GameLanguage && a.cue && a.trigger == "Play_FR" && a.pauseTrigger == "Pause_Root");
+		const char* const gameByName[1] = { "music" }; // a track NAME given as game language does not match
+		ResolveDescriptorAudio(f, nullptr, gameByName, 1, &PlanExists, &files, a);
+		CHECK(a.track == "music" && a.reason == DescriptorTrackReason::Default);
+		ResolveDescriptorAudio(f, "dialogue", gameJa, 2, &PlanExists, &files, a);
+		CHECK(a.track == "dialogue" && a.reason == DescriptorTrackReason::Requested && a.externalPath.empty() && !a.cue);
+		// (3) default, (4) first track
+		VideoDescriptor g = f;
+		g.defaultTrack.clear();
+		ResolveDescriptorAudio(g, nullptr, gameNone, 2, &PlanExists, &files, a);
+		CHECK(a.track == "dialogue" && a.reason == DescriptorTrackReason::First && a.externalPath.empty() && !a.cue);
+		// no tracks: the embedded audio, no track name
+		VideoDescriptor n;
+		n.video = "v/main.webm";
+		n.route = VideoRoute::Mixed;
+		ResolveDescriptorAudio(n, "x", gameJa, 2, &PlanExists, &files, a);
+		CHECK(a.track.empty() && a.reason == DescriptorTrackReason::None && a.unknownRequest && a.externalPath.empty() && !a.cue);
 
 		VideoDescriptor e = d;
 		e.route = VideoRoute::Embedded;
-		ResolveDescriptorAudio(e, reqJa, 3, &PlanExists, &files, a);
-		CHECK(a.language == "Japanese" && a.externalPath.empty() && !a.cue);
+		ResolveDescriptorAudio(e, "Dub_JA", nullptr, 0, &PlanExists, &files, a);
+		CHECK(a.track == "Dub_JA" && a.externalPath.empty() && !a.cue);
 		e.route = VideoRoute::Cue;
 		e.trigger = "Play_Root";
-		ResolveDescriptorAudio(e, reqJa, 3, &PlanExists, &files, a);
-		CHECK(a.cue && a.trigger == "Play_Root" && a.language == "Japanese");
-		ResolveDescriptorAudio(e, reqFr, 1, &PlanExists, &files, a);
+		ResolveDescriptorAudio(e, "Dub_JA", nullptr, 0, &PlanExists, &files, a);
+		CHECK(a.cue && a.trigger == "Play_Root" && a.track == "Dub_JA");
+		ResolveDescriptorAudio(e, "commentary", nullptr, 0, &PlanExists, &files, a);
 		CHECK(a.cue && a.trigger == "Play_FR");
+
+		// invalid and duplicate names are dropped (the first of a duplicate stays), an unlisted default is cleared
+		VideoDescriptor s;
+		VideoDescriptor::SAudioTrack t1; t1.name = "Music"; t1.embedded = true;
+		VideoDescriptor::SAudioTrack t2; t2.name = "music"; t2.file = "x.webm";
+		VideoDescriptor::SAudioTrack t3; t3.name = "bad name"; t3.embedded = true;
+		VideoDescriptor::SAudioTrack t4; t4.name = ""; t4.embedded = true;
+		VideoDescriptor::SAudioTrack t5; t5.name = "voice"; t5.embedded = true;
+		s.audioTracks = { t1, t2, t3, t4, t5 };
+		s.defaultTrack = "bad name";
+		std::vector<DescriptorTrackProblem> problems;
+		SanitizeDescriptorAudioTracks(s, problems);
+		CHECK(s.audioTracks.size() == 2 && s.audioTracks[0].name == "Music" && s.audioTracks[0].embedded && s.audioTracks[1].name == "voice");
+		CHECK(problems.size() == 4 && problems[0].kind == DescriptorTrackProblem::Duplicate && problems[0].name == "music"
+			&& problems[1].kind == DescriptorTrackProblem::InvalidName && problems[1].name == "bad name"
+			&& problems[2].kind == DescriptorTrackProblem::InvalidName && problems[2].name.empty()
+			&& problems[3].kind == DescriptorTrackProblem::UnknownDefault && problems[3].name == "bad name");
+		CHECK(s.defaultTrack.empty());
+		s.defaultTrack = "VOICE";
+		SanitizeDescriptorAudioTracks(s, problems);
+		CHECK(problems.empty() && s.defaultTrack == "VOICE");
 
 		DescriptorVariantChoice c = PickDescriptorVariant(d, -1, false, 0, &PlanExists, &files);
 		CHECK(c.variant == -1 && c.videoPath == "v/main.webm");
