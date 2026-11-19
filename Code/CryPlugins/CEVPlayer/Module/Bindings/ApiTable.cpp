@@ -32,26 +32,26 @@ namespace CEVPlayer
 		// CryVS global functions, in ECryVSFunction order (M6c).
 		const CryGUID kCryVSFunctionGuids[eCryVS_FunctionCount] =
 		{
-			"27AF1B77-C05D-456D-B465-016FB958F9D9"_cry_guid, // Video::PlayOnScreen
-			"BD64D321-5F54-4C88-BE59-9F89D90883E7"_cry_guid, // Video::PlayOnMaterial
-			"35BF4E46-7F0D-49AC-A196-B57EAB16D689"_cry_guid, // Video::Stop
-			"4276BD72-C99B-40B4-95C1-213C80FFEB98"_cry_guid, // VideoUI::PlayToSurface
-			"4212CE2B-B8C1-44E0-A010-E1B1391AF471"_cry_guid, // VideoUI::StopSurface
-			"70FA6405-329B-4335-AB42-5334E1F8DA79"_cry_guid, // VideoUI::SurfaceInfo
-			"30F7ED4B-1FC5-43E9-952A-80A3847F199F"_cry_guid, // VideoAdvanced::Open
-			"4CA6690D-4E60-4EBC-8782-1B0C9F2414A0"_cry_guid, // VideoAdvanced::Close
-			"414E5002-C895-45FD-A347-81D12E7C8465"_cry_guid, // VideoAdvanced::Play
-			"AF12D09D-DD5A-440F-B6F8-D21D5139C43D"_cry_guid, // VideoAdvanced::Pause
-			"46CA5F4B-83E0-4C20-892D-F47737861B40"_cry_guid, // VideoAdvanced::Stop
-			"404EFDA7-98CF-461A-BC27-62B92AEF6787"_cry_guid, // VideoAdvanced::Seek
-			"4ACC3D98-043C-4CA7-A43C-9DB7D96F69BA"_cry_guid, // VideoAdvanced::SetLoop
-			"285B5336-FBD5-4D52-A878-40FD620E7932"_cry_guid, // VideoAdvanced::SetRate
-			"C24FFE00-8215-4B4C-80D5-3996D2650B39"_cry_guid, // VideoAdvanced::SetVolume
-			"888EAF9B-3128-4510-9C50-9B26353DA322"_cry_guid, // VideoAdvanced::SetLanguage
-			"D71E69BE-A424-451D-8840-A7BCFE53ADDD"_cry_guid, // VideoAdvanced::SetVariant
-			"20A1CC28-BE7C-4382-8F5C-FAD6955C25D2"_cry_guid, // VideoAdvanced::SetSkippable
-			"13B9D4C4-43B4-4602-9E42-E8A6F07B4974"_cry_guid, // VideoAdvanced::Info
-			"6A464499-0622-463D-8F43-57E805205A1C"_cry_guid, // VideoAdvanced::SetPauseDecodeWhenHidden (M7)
+			"27AF1B77-C05D-456D-B465-016FB958F9D9"_cry_guid, // CEVPlayer::PlayOnScreen
+			"BD64D321-5F54-4C88-BE59-9F89D90883E7"_cry_guid, // CEVPlayer::PlayOnMaterial
+			"35BF4E46-7F0D-49AC-A196-B57EAB16D689"_cry_guid, // CEVPlayer::Stop
+			"4276BD72-C99B-40B4-95C1-213C80FFEB98"_cry_guid, // CEVPlayer::UI::PlayToSurface
+			"4212CE2B-B8C1-44E0-A010-E1B1391AF471"_cry_guid, // CEVPlayer::UI::StopSurface
+			"70FA6405-329B-4335-AB42-5334E1F8DA79"_cry_guid, // CEVPlayer::UI::SurfaceInfo
+			"30F7ED4B-1FC5-43E9-952A-80A3847F199F"_cry_guid, // CEVPlayer::Advanced::Open
+			"4CA6690D-4E60-4EBC-8782-1B0C9F2414A0"_cry_guid, // CEVPlayer::Advanced::Close
+			"414E5002-C895-45FD-A347-81D12E7C8465"_cry_guid, // CEVPlayer::Advanced::Play
+			"AF12D09D-DD5A-440F-B6F8-D21D5139C43D"_cry_guid, // CEVPlayer::Advanced::Pause
+			"46CA5F4B-83E0-4C20-892D-F47737861B40"_cry_guid, // CEVPlayer::Advanced::Stop
+			"404EFDA7-98CF-461A-BC27-62B92AEF6787"_cry_guid, // CEVPlayer::Advanced::Seek
+			"4ACC3D98-043C-4CA7-A43C-9DB7D96F69BA"_cry_guid, // CEVPlayer::Advanced::SetLoop
+			"285B5336-FBD5-4D52-A878-40FD620E7932"_cry_guid, // CEVPlayer::Advanced::SetRate
+			"C24FFE00-8215-4B4C-80D5-3996D2650B39"_cry_guid, // CEVPlayer::Advanced::SetVolume
+			"888EAF9B-3128-4510-9C50-9B26353DA322"_cry_guid, // CEVPlayer::Advanced::SetLanguage
+			"D71E69BE-A424-451D-8840-A7BCFE53ADDD"_cry_guid, // CEVPlayer::Advanced::SetVariant
+			"20A1CC28-BE7C-4382-8F5C-FAD6955C25D2"_cry_guid, // CEVPlayer::Advanced::SetSkippable
+			"13B9D4C4-43B4-4602-9E42-E8A6F07B4974"_cry_guid, // CEVPlayer::Advanced::Info
+			"6A464499-0622-463D-8F43-57E805205A1C"_cry_guid, // CEVPlayer::Advanced::SetPauseDecodeWhenHidden (M7)
 		};
 		const CryGUID kCryVSResizedSignalGuid = "8431E4A5-BEA5-4461-B110-4B7883761FBC"_cry_guid;
 		const CryGUID kCryVSClosedSignalGuid  = "AAE0463C-E424-4A35-8737-00D3F22801F1"_cry_guid;

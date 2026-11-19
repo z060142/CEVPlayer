@@ -131,17 +131,18 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 
   | 抽屜 | 節點 | 合併了什麼 |
   |---|---|---|
-  | 開箱即用 `Video` | `Video:PlayOnScreen`——Video、Fit、Loop、Skippable、Decode；Play／Stop → Started、Ended、Skipped、Error | Create＋Load＋SetOutput(Screen)＋Play＋SetLoop＋SetSkippable＋Destroy |
-  | | `Video:PlayOnMaterial`——Video、Material（空＝實體自己的）、Slot、SubMaterial、Loop、Autoplay、Decode；Play／Stop → Started、Ended、Error | 同上，SetOutput(Material) |
-  | 連通 UI `VideoUI` | `VideoUI:PlayToSurface`——Video、SurfaceID、Loop、Autoplay、Decode；Play／Stop → Ready（帶 TextureId、Width、Height、Duration、HasAlpha）、Ended、Error | Create＋Load＋Play＋Destroy，輸出是具名 surface |
-  | | `VideoUI:SurfaceInfo`——SurfaceID → Exists、TextureId、Width、Height、PixelLayout、Premultiplied、HasAlpha、FrameSerial、State | TextureId、TextureName、IsPremultiplied 三個查詢移到這裡（給不經契約的 UI 系統用） |
-  | | `VideoUI:SurfaceEvents`——SurfaceID → Ready、NewFrame、Resized、Closed | 以 ID 訂閱，不必持有 Handle |
-  | 進階 `VideoAdvanced` | `Open`——Video、Output（Surface／Screen／Material）與其參數、Decode；Open／Close → Handle、Ready、Error | Create、Load、SetOutput、Destroy |
+  | 主抽屜 `CEVPlayer`（開箱即用） | `CEVPlayer:PlayOnScreen`——Video、Fit、Loop、Skippable、Decode；Play／Stop → Started、Ended、Skipped、Error | Create＋Load＋SetOutput(Screen)＋Play＋SetLoop＋SetSkippable＋Destroy |
+  | | `CEVPlayer:PlayOnMaterial`——Video、Material（空＝實體自己的）、Slot、SubMaterial、Loop、Autoplay、Decode；Play／Stop → Started、Ended、Error | 同上，SetOutput(Material) |
+  | 子抽屜 `CEVPlayer:UI`（連通 UI） | `CEVPlayer:UI:PlayToSurface`——Video、SurfaceID、Loop、Autoplay、Decode；Play／Stop → Ready（帶 TextureId、Width、Height、Duration、HasAlpha）、Ended、Error | Create＋Load＋Play＋Destroy，輸出是具名 surface |
+  | | `CEVPlayer:UI:SurfaceInfo`——SurfaceID → Exists、TextureId、Width、Height、PixelLayout、Premultiplied、HasAlpha、FrameSerial、State | TextureId、TextureName、IsPremultiplied 三個查詢移到這裡（給不經契約的 UI 系統用） |
+  | | `CEVPlayer:UI:SurfaceEvents`——SurfaceID → Ready、NewFrame、Resized、Closed | 以 ID 訂閱，不必持有 Handle |
+  | 子抽屜 `CEVPlayer:Advanced`（進階） | `Open`——Video、Output（Surface／Screen／Material）與其參數、Decode；Open／Close → Handle、Ready、Error | Create、Load、SetOutput、Destroy |
   | | `Transport`——Handle；Play、Pause、Stop、Seek（＋Seconds） | Play、Pause、Resume、Stop、Seek（Play 兼作繼續） |
   | | `Settings`——Handle；Loop、Rate、Volume、Language、Variant、Skippable（哪個埠被觸發就套用哪一項） | SetLoop、SetRate、SetVolume、SetLanguage、SetVariant、SetSkippable |
   | | `Info`——Handle；Get（或每幀）→ State、Time、Duration、Width、Height、HasAlpha、Language、Variant、DecodeBackend、FrameSerial、SurfaceId | State、Time、Duration、Width、Height、HasAlpha、Language、Variant |
   | | `Events`——Handle → Ready、Started、NewFrame、Marker、Looped、Ended、Skipped、Error | 不變 |
 
+- 抽屜的位置：主抽屜 `CEVPlayer` 直接放兩個開箱即用節點，`UI` 與 `Advanced` 是它之下的子抽屜（使用者 2026-11-19：「把 basic 獨立抽屜取消放在主抽屜，Advanced 跟 UI 的抽屜保留放在主抽屜內，主抽屜改名 CEVPlayer」）。CryVS 的全域函式命名空間對應為 `CEVPlayer`、`CEVPlayer::UI`、`CEVPlayer::Advanced`（目錄路徑 `Function::CEVPlayer::…`）。
 - 取消：`TextureName`（名詞消失）、`InterfaceVersion` 與 `Caps`（開發者資訊，改由主控台 `cev_info` 顯示）。事件與查詢的幀序號改以字串輸出，不再 2^31 回繞。
 - 描述表仍是單一事實來源：腳本綁定（Schematyc 函式、CryVS）維持一項一個函式——程式裡細粒度是正常的；合併只發生在 FlowGraph 節點這一層（複合節點由手寫的描述組合表內的函式）。Schematyc 元件 `Video Player` 的屬性對應同一組名詞（Output、SurfaceID、Decode、Loop、Autoplay、Skippable）。
 - **CryVS（社群版引擎的視覺腳本）也要有同一組節點**（使用者 2026-11-19：「CryVS 的節點要加」）。現況：`Module/Bindings/CryVSEnv.cpp` 以描述表產生一個元件與其函式／訊號（與 Schematyc 相同），只在社群版引擎樹編譯過、從未實跑（`PLAN.md` M2 備註）。M6 的要求：CryVS 端提供與 FlowGraph 相同的三個抽屜與 10 個節點的對應物（名詞一致：SurfaceID、Decode、Output…），並在社群版引擎（`E:\coding crycry\CryENGINE-5-7-community`，`z060142/CryENGINE-5-7-community`）實際執行驗證。CryVS 的節點模型（是否有不屬於元件的獨立函式節點、類別怎麼分抽屜、複合節點怎麼表達）在動工前先唯讀調查，寫進 M6 的任務單。

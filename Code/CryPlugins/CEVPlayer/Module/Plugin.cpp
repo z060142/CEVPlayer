@@ -92,7 +92,7 @@ namespace CEVPlayer
 
 		RegisterConsole();
 		Api::SelfCheck(); // duplicate GUIDs / names in the API table -> warning (assert in debug)
-		LogAlways("FlowGraph: %u node classes (Video:*, VideoUI:*, VideoAdvanced:*)", Api::FlowNodeCount());
+		LogAlways("FlowGraph: %u node classes (CEVPlayer:*, CEVPlayer:UI:*, CEVPlayer:Advanced:*)", Api::FlowNodeCount());
 
 		if (gEnv->pSystem != nullptr)
 		{

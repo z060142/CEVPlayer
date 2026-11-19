@@ -2,9 +2,9 @@
 // Registered through the engine's auto registration list (CAutoRegFlowNodeBase), so CVideoPlugin's
 // PLUGIN_FLOWNODE_REGISTER picks them up.
 //
-//   Video:PlayOnScreen, Video:PlayOnMaterial          ready to use: the node owns its player
-//   VideoUI:PlayToSurface, SurfaceInfo, SurfaceEvents for UIs: a named surface (surface id), no handle needed
-//   VideoAdvanced:Open, Transport, Settings, Info, Events   handle based building blocks
+//   CEVPlayer:PlayOnScreen, CEVPlayer:PlayOnMaterial          ready to use: the node owns its player
+//   CEVPlayer:UI:PlayToSurface, SurfaceInfo, SurfaceEvents for UIs: a named surface (surface id), no handle needed
+//   CEVPlayer:Advanced:Open, Transport, Settings, Info, Events   handle based building blocks
 //
 // The nodes contain no playback logic: every action and every value goes through the API table (Api::Call on a table
 // entry, by name). Players are addressed by the integer handles of CApiPlayers; the nodes never touch IVideoPlayer.
@@ -375,7 +375,7 @@ namespace CEVPlayer
 				}
 			};
 
-			// ========================================================================================== VideoUI
+			// ========================================================================================== CEVPlayer:UI
 			class CPlayToSurfaceNode final : public CNodeBase
 			{
 				enum EIn { eI_Play, eI_Stop, eI_Video, eI_SurfaceId, eI_Loop, eI_Autoplay, eI_Decode, eI_PauseDecodeWhenHidden };
@@ -690,7 +690,7 @@ namespace CEVPlayer
 				bool m_ready = false;
 			};
 
-			// ========================================================================================== VideoAdvanced
+			// ========================================================================================== CEVPlayer:Advanced
 			class COpenNode final : public CNodeBase
 			{
 				enum EIn { eI_Open, eI_Close, eI_Video, eI_Output, eI_SurfaceId, eI_Fit, eI_Material, eI_Slot, eI_SubMaterial, eI_Decode };
@@ -726,7 +726,7 @@ namespace CEVPlayer
 					};
 					config.pInputPorts = in;
 					config.pOutputPorts = out;
-					config.sDescription = _HELP("Opens a player with its output and returns its handle for the other VideoAdvanced nodes. The node owns the player: Close, or the end of the graph, destroys it.");
+					config.sDescription = _HELP("Opens a player with its output and returns its handle for the other CEVPlayer:Advanced nodes. The node owns the player: Close, or the end of the graph, destroys it.");
 					config.SetCategory(EFLN_APPROVED);
 					config.nFlags |= EFLN_TARGET_ENTITY;
 				}
@@ -809,7 +809,7 @@ namespace CEVPlayer
 				{
 					static const SInputPortConfig in[] =
 					{
-						InputPortConfig<int>("Handle", 0, _HELP("Player handle (from VideoAdvanced:Open).")),
+						InputPortConfig<int>("Handle", 0, _HELP("Player handle (from CEVPlayer:Advanced:Open).")),
 						InputPortConfig_Void("Play", _HELP("Plays from the start, or continues a paused video.")),
 						InputPortConfig_Void("Pause", _HELP("Pauses playback.")),
 						InputPortConfig_Void("Stop", _HELP("Stops and goes back to the beginning.")),
@@ -860,7 +860,7 @@ namespace CEVPlayer
 				{
 					static const SInputPortConfig in[] =
 					{
-						InputPortConfig<int>("Handle", 0, _HELP("Player handle (from VideoAdvanced:Open).")),
+						InputPortConfig<int>("Handle", 0, _HELP("Player handle (from CEVPlayer:Advanced:Open).")),
 						InputPortConfig<bool>("Loop", false, _HELP("Applied when triggered: restart at the beginning when the end is reached.")),
 						InputPortConfig<float>("Rate", 1.f, _HELP("Applied when triggered: playback speed 0.25 to 4 (1 = normal).")),
 						InputPortConfig<float>("Volume", 1.f, _HELP("Applied when triggered: player volume 0 to 1.")),
@@ -920,7 +920,7 @@ namespace CEVPlayer
 					static const SInputPortConfig in[] =
 					{
 						InputPortConfig_Void("Get", _HELP("Reads the values of the player and sends them to the outputs.")),
-						InputPortConfig<int>("Handle", 0, _HELP("Player handle (from VideoAdvanced:Open).")),
+						InputPortConfig<int>("Handle", 0, _HELP("Player handle (from CEVPlayer:Advanced:Open).")),
 						InputPortConfig<bool>("EveryFrame", false, _HELP("Also send the values every frame while the handle is valid.")),
 						{ 0 }
 					};
@@ -1009,7 +1009,7 @@ namespace CEVPlayer
 				{
 					static const SInputPortConfig in[] =
 					{
-						InputPortConfig<int>("Handle", 0, _HELP("Player handle to listen to (from VideoAdvanced:Open); 0 stops listening.")),
+						InputPortConfig<int>("Handle", 0, _HELP("Player handle to listen to (from CEVPlayer:Advanced:Open); 0 stops listening.")),
 						{ 0 }
 					};
 					static const SOutputPortConfig out[] =
@@ -1078,22 +1078,22 @@ namespace CEVPlayer
 			};
 
 			// The class names are what saved flow graphs store: never rename one.
-			CNodeFactory<CPlayOnScreenNode> s_playOnScreen("Video:PlayOnScreen");
-			CNodeFactory<CPlayOnMaterialNode> s_playOnMaterial("Video:PlayOnMaterial");
-			CNodeFactory<CPlayToSurfaceNode> s_playToSurface("VideoUI:PlayToSurface");
-			CNodeFactory<CSurfaceInfoNode> s_surfaceInfo("VideoUI:SurfaceInfo");
-			CNodeFactory<CSurfaceEventsNode> s_surfaceEvents("VideoUI:SurfaceEvents");
-			CNodeFactory<COpenNode> s_open("VideoAdvanced:Open");
-			CNodeFactory<CTransportNode> s_transport("VideoAdvanced:Transport");
-			CNodeFactory<CSettingsNode> s_settings("VideoAdvanced:Settings");
-			CNodeFactory<CInfoNode> s_info("VideoAdvanced:Info");
-			CNodeFactory<CEventsNode> s_events("VideoAdvanced:Events");
+			CNodeFactory<CPlayOnScreenNode> s_playOnScreen("CEVPlayer:PlayOnScreen");
+			CNodeFactory<CPlayOnMaterialNode> s_playOnMaterial("CEVPlayer:PlayOnMaterial");
+			CNodeFactory<CPlayToSurfaceNode> s_playToSurface("CEVPlayer:UI:PlayToSurface");
+			CNodeFactory<CSurfaceInfoNode> s_surfaceInfo("CEVPlayer:UI:SurfaceInfo");
+			CNodeFactory<CSurfaceEventsNode> s_surfaceEvents("CEVPlayer:UI:SurfaceEvents");
+			CNodeFactory<COpenNode> s_open("CEVPlayer:Advanced:Open");
+			CNodeFactory<CTransportNode> s_transport("CEVPlayer:Advanced:Transport");
+			CNodeFactory<CSettingsNode> s_settings("CEVPlayer:Advanced:Settings");
+			CNodeFactory<CInfoNode> s_info("CEVPlayer:Advanced:Info");
+			CNodeFactory<CEventsNode> s_events("CEVPlayer:Advanced:Events");
 
 			const char* const kClassNames[] =
 			{
-				"Video:PlayOnScreen", "Video:PlayOnMaterial",
-				"VideoUI:PlayToSurface", "VideoUI:SurfaceInfo", "VideoUI:SurfaceEvents",
-				"VideoAdvanced:Open", "VideoAdvanced:Transport", "VideoAdvanced:Settings", "VideoAdvanced:Info", "VideoAdvanced:Events",
+				"CEVPlayer:PlayOnScreen", "CEVPlayer:PlayOnMaterial",
+				"CEVPlayer:UI:PlayToSurface", "CEVPlayer:UI:SurfaceInfo", "CEVPlayer:UI:SurfaceEvents",
+				"CEVPlayer:Advanced:Open", "CEVPlayer:Advanced:Transport", "CEVPlayer:Advanced:Settings", "CEVPlayer:Advanced:Info", "CEVPlayer:Advanced:Events",
 			};
 		}
 

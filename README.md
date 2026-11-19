@@ -24,8 +24,8 @@ Runtime (`Code/CryPlugins/CEVPlayer`)
   `mixed` (external per-language audio WebM files) and `cue` (a CryAudio trigger plays the sound, the picture follows
   its playback position; needs the optional engine patch for exact sync, otherwise it falls back to a clock).
 * Languages, markers, A/V offset and variants (resolution steps) in the descriptor.
-* FlowGraph nodes in three categories: `Video` (PlayOnScreen, PlayOnMaterial), `VideoUI` (PlayToSurface, SurfaceInfo,
-  SurfaceEvents) and `VideoAdvanced` (Open, Transport, Settings, Info, Events); a Schematyc component `Video Player`; a
+* FlowGraph nodes in one top-level folder `CEVPlayer` (PlayOnScreen, PlayOnMaterial) with the sub-folders `UI`
+  (PlayToSurface, SurfaceInfo, SurfaceEvents) and `Advanced` (Open, Transport, Settings, Info, Events); a Schematyc component `Video Player`; a
   script API table (`Module/Bindings/ApiTable.cpp`, one function per entry); the C++ player API (`IVideoPlugin`,
   `IVideoPlayer`) and the texture source contract export `CryTexSource_v1` (docs/design/M6-ui-source.md).
 

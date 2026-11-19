@@ -261,18 +261,18 @@ namespace CEVPlayer
 
 			void Build(SFlowTest& t)
 			{
-				AddNode(t, "VideoUI:PlayToSurface", { "Play", "Stop", "Video", "SurfaceID", "Loop", "Decode", "PauseDecodeWhenHidden" }, { "Ready", "TextureId", "Width", "Height", "Duration", "HasAlpha", "Ended", "Error", "ErrorCode", "ErrorMessage" });
-				AddNode(t, "VideoUI:PlayToSurface", { "Play", "Video", "SurfaceID" }, { "Ready", "Error", "ErrorCode", "ErrorMessage" });
-				AddNode(t, "VideoUI:SurfaceInfo", { "Get", "SurfaceID" }, { "Exists", "TextureId", "Width", "Height", "PixelLayout", "Premultiplied", "HasAlpha", "FrameSerial", "State" });
-				AddNode(t, "VideoUI:SurfaceEvents", { "SurfaceID" }, { "Ready", "NewFrame", "FrameSerial", "Resized", "TextureId", "Width", "Height", "Closed" });
-				AddNode(t, "VideoUI:PlayToSurface", { "Play", "Stop", "Video", "SurfaceID" }, { "Ready", "Error" });
-				AddNode(t, "VideoAdvanced:Open", { "Open", "Close", "Video", "Output", "Fit", "Decode" }, { "Handle", "Ready", "Error", "ErrorCode", "ErrorMessage" });
-				AddNode(t, "VideoAdvanced:Transport", { "Handle", "Play", "Pause", "Stop", "Seek", "Seconds" }, { "Done", "Error" });
-				AddNode(t, "VideoAdvanced:Settings", { "Handle", "Loop", "Rate", "Volume", "Language", "Variant", "Skippable", "PauseDecodeWhenHidden" }, { "Done", "Error" });
-				AddNode(t, "VideoAdvanced:Info", { "Get", "Handle" }, { "State", "Time", "Duration", "Width", "Height", "HasAlpha", "Language", "Variant", "DecodeBackend", "FrameSerial", "SurfaceId", "Error" });
-				AddNode(t, "VideoAdvanced:Events", { "Handle" }, { "Ready", "Started", "NewFrame", "NewFrameSerial", "Marker", "Looped", "Ended", "Skipped", "Error" });
-				AddNode(t, "Video:PlayOnScreen", { "Play", "Stop", "Video", "Fit", "Loop", "Skippable", "Decode" }, { "Started", "Ended", "Skipped", "Error", "ErrorCode", "ErrorMessage" });
-				AddNode(t, "Video:PlayOnMaterial", { "Play", "Stop", "Video", "Material", "Slot" }, { "Started", "Ended", "Error", "ErrorCode", "ErrorMessage" });
+				AddNode(t, "CEVPlayer:UI:PlayToSurface", { "Play", "Stop", "Video", "SurfaceID", "Loop", "Decode", "PauseDecodeWhenHidden" }, { "Ready", "TextureId", "Width", "Height", "Duration", "HasAlpha", "Ended", "Error", "ErrorCode", "ErrorMessage" });
+				AddNode(t, "CEVPlayer:UI:PlayToSurface", { "Play", "Video", "SurfaceID" }, { "Ready", "Error", "ErrorCode", "ErrorMessage" });
+				AddNode(t, "CEVPlayer:UI:SurfaceInfo", { "Get", "SurfaceID" }, { "Exists", "TextureId", "Width", "Height", "PixelLayout", "Premultiplied", "HasAlpha", "FrameSerial", "State" });
+				AddNode(t, "CEVPlayer:UI:SurfaceEvents", { "SurfaceID" }, { "Ready", "NewFrame", "FrameSerial", "Resized", "TextureId", "Width", "Height", "Closed" });
+				AddNode(t, "CEVPlayer:UI:PlayToSurface", { "Play", "Stop", "Video", "SurfaceID" }, { "Ready", "Error" });
+				AddNode(t, "CEVPlayer:Advanced:Open", { "Open", "Close", "Video", "Output", "Fit", "Decode" }, { "Handle", "Ready", "Error", "ErrorCode", "ErrorMessage" });
+				AddNode(t, "CEVPlayer:Advanced:Transport", { "Handle", "Play", "Pause", "Stop", "Seek", "Seconds" }, { "Done", "Error" });
+				AddNode(t, "CEVPlayer:Advanced:Settings", { "Handle", "Loop", "Rate", "Volume", "Language", "Variant", "Skippable", "PauseDecodeWhenHidden" }, { "Done", "Error" });
+				AddNode(t, "CEVPlayer:Advanced:Info", { "Get", "Handle" }, { "State", "Time", "Duration", "Width", "Height", "HasAlpha", "Language", "Variant", "DecodeBackend", "FrameSerial", "SurfaceId", "Error" });
+				AddNode(t, "CEVPlayer:Advanced:Events", { "Handle" }, { "Ready", "Started", "NewFrame", "NewFrameSerial", "Marker", "Looped", "Ended", "Skipped", "Error" });
+				AddNode(t, "CEVPlayer:PlayOnScreen", { "Play", "Stop", "Video", "Fit", "Loop", "Skippable", "Decode" }, { "Started", "Ended", "Skipped", "Error", "ErrorCode", "ErrorMessage" });
+				AddNode(t, "CEVPlayer:PlayOnMaterial", { "Play", "Stop", "Video", "Material", "Slot" }, { "Started", "Ended", "Error", "ErrorCode", "ErrorMessage" });
 			}
 		}
 
@@ -306,6 +306,36 @@ namespace CEVPlayer
 			for (const char* old : { "CEVPlayer:2DVideoPlayer", "CEVPlayer:TextureVideoPlayer", "CEVPlayer:FlashVideoPlayer", "CEVPlayer:Video:Control:Create", "CEVPlayer:Video:Query:State", "CEVPlayer:Video:Events" })
 				oldGone = oldGone && gEnv->pFlowSystem->GetTypeId(old) == InvalidFlowNodeTypeId;
 			t.Check(oldGone, "the legacy and the generated CEVPlayer:Video:* node classes are not registered");
+			{
+				// Folder layout as the FlowGraph editor shows it (the class name split at ':'): one top-level folder
+				// CEVPlayer with two nodes directly in it and the sub-folders UI (3) and Advanced (5); no node of ours elsewhere (stock Video:ClipCapture is not ours).
+				int top = 0, ui = 0, advanced = 0, other = 0;
+				std::string names;
+				IFlowNodeTypeIteratorPtr it = gEnv->pFlowSystem->CreateNodeTypeIterator();
+				IFlowNodeTypeIterator::SNodeType type;
+				while (it && it->Next(type))
+				{
+					const std::string name = type.typeName != nullptr ? type.typeName : "";
+					if (name.compare(0, 10, "CEVPlayer:") != 0 && name.compare(0, 12, "Video:PlayOn") != 0 && name.compare(0, 8, "VideoUI:") != 0 && name.compare(0, 14, "VideoAdvanced:") != 0)
+						continue;
+					if (name == kProbeType)
+						continue;
+					names += " " + name;
+					const std::string rest = name.compare(0, 10, "CEVPlayer:") == 0 ? name.substr(10) : std::string();
+					if (rest.empty())
+						++other;
+					else if (rest.compare(0, 3, "UI:") == 0 && rest.find(':', 3) == std::string::npos)
+						++ui;
+					else if (rest.compare(0, 9, "Advanced:") == 0 && rest.find(':', 9) == std::string::npos)
+						++advanced;
+					else if (rest.find(':') == std::string::npos)
+						++top;
+					else
+						++other;
+				}
+				LogAlways("cev_flowtest: registered CEVPlayer / video node types:%s", names.c_str());
+				t.Check(top == 2 && ui == 3 && advanced == 5 && other == 0, "folder CEVPlayer: " + std::to_string(top) + " nodes, UI " + std::to_string(ui) + ", Advanced " + std::to_string(advanced) + ", elsewhere " + std::to_string(other) + " (2 / 3 / 5 / 0)");
+			}
 
 			t.typeRegistered = gEnv->pFlowSystem->RegisterType(kProbeType, IFlowNodeFactoryPtr(new CProbeFactory())) != InvalidFlowNodeTypeId;
 			if (!t.typeRegistered)
