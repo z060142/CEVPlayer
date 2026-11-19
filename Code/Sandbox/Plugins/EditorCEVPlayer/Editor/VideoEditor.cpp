@@ -101,6 +101,11 @@ namespace CEVEditor
 		return g_pCurrent;
 	}
 
+	CVideoPreviewPanel* CVideoEditor::PreviewPanel() const
+	{
+		return m_pPreview.data();
+	}
+
 	void CVideoEditor::OnInitialize()
 	{
 		RegisterDockableWidget("Preview", [this]()

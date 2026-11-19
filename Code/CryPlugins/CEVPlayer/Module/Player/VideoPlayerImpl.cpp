@@ -61,6 +61,12 @@ namespace CEVPlayer
 			return !path.empty() && gEnv != nullptr && gEnv->pCryPak != nullptr && gEnv->pCryPak->IsFileExist(path.c_str());
 		}
 
+		// cev::DescriptorFileExistsFn over CryPak (the descriptor's file names are CryPak paths)
+		bool PakFileExists(const char* path, void*)
+		{
+			return path != nullptr && FileExists(path);
+		}
+
 		//! cvar string value, empty when the cvar does not exist.
 		const char* CVarString(const char* name)
 		{
@@ -291,7 +297,8 @@ namespace CEVPlayer
 		return true;
 	}
 
-	//! Fills language, external file and cue flag from the descriptor and the language requests.
+	//! Fills language, external file and cue flag from the descriptor and the language requests (the decision is
+	//! cev::ResolveDescriptorAudio, shared with the Sandbox preview; the warnings are logged here).
 	void CVideoPlayerImpl::ResolveAudio(SPlan& plan, bool report) const
 	{
 		plan.externalPath.clear();
@@ -305,105 +312,38 @@ namespace CEVPlayer
 
 		// request chain: SetLanguage, g_languageAudio, g_language, descriptor default
 		const char* const candidates[4] = { m_requestedLanguage.c_str(), CVarString("g_languageAudio"), CVarString("g_language"), m_desc.defaultLanguage.c_str() };
-		int index = -1;
-		for (const char* name : candidates)
-		{
-			index = FindLanguage(m_desc, name);
-			if (index >= 0)
-				break;
-		}
-
-		if (m_desc.route == EVideoRoute::Cue)
-		{
-			// every language may bring its own trigger, the root attributes are the defaults
-			plan.cue = true;
-			plan.trigger = m_desc.trigger;
-			plan.pauseTrigger = m_desc.pauseTrigger;
-			plan.resumeTrigger = m_desc.resumeTrigger;
-			if (index >= 0)
-			{
-				const SVideoDescriptor::SLanguage& cueLang = m_desc.languages[static_cast<size_t>(index)];
-				plan.language = cueLang.name;
-				if (!cueLang.trigger.empty())
-				{
-					plan.trigger = cueLang.trigger;
-					plan.pauseTrigger = cueLang.pauseTrigger;
-					plan.resumeTrigger = cueLang.resumeTrigger;
-				}
-				else
-				{
-					if (!cueLang.pauseTrigger.empty())
-						plan.pauseTrigger = cueLang.pauseTrigger;
-					if (!cueLang.resumeTrigger.empty())
-						plan.resumeTrigger = cueLang.resumeTrigger;
-				}
-			}
-			if (report && plan.trigger.empty())
-				LogWarning("player %u: <%s> uses route=\"cue\" but has no trigger for language <%s>: playing without audio", m_id, m_path.c_str(), plan.language.c_str());
+		cev::DescriptorAudioPlan audio;
+		cev::ResolveDescriptorAudio(m_desc, candidates, 4, &PakFileExists, nullptr, audio);
+		plan.language = audio.language;
+		plan.externalPath = audio.externalPath;
+		plan.cue = audio.cue;
+		plan.trigger = audio.trigger;
+		plan.pauseTrigger = audio.pauseTrigger;
+		plan.resumeTrigger = audio.resumeTrigger;
+		if (!report)
 			return;
-		}
-
-		if (index < 0)
-			return; // no language matches: the embedded track
-		const SVideoDescriptor::SLanguage& lang = m_desc.languages[static_cast<size_t>(index)];
-		plan.language = lang.name;
-		if (m_desc.route != EVideoRoute::Mixed)
-			return; // route "embedded": the embedded track whatever the language entry says
-
-		if (!lang.file.empty())
-		{
-			if (FileExists(lang.file))
-				plan.externalPath = lang.file;
-			else if (report)
-				LogWarning("player %u: audio file <%s> of language <%s> not found, using the embedded track", m_id, lang.file.c_str(), lang.name.c_str());
-		}
-		else if (!lang.embedded && !lang.trigger.empty())
-		{
-			// cue-only language of a mixed video: the audio comes from the CryAudio trigger, the embedded track is not played
-			plan.cue = true;
-			plan.trigger = lang.trigger;
-			plan.pauseTrigger = lang.pauseTrigger.empty() ? m_desc.pauseTrigger : lang.pauseTrigger;
-			plan.resumeTrigger = lang.resumeTrigger.empty() ? m_desc.resumeTrigger : lang.resumeTrigger;
-		}
+		if (m_desc.route == EVideoRoute::Cue && plan.trigger.empty())
+			LogWarning("player %u: <%s> uses route=\"cue\" but has no trigger for language <%s>: playing without audio", m_id, m_path.c_str(), plan.language.c_str());
+		else if (!audio.missingExternal.empty())
+			LogWarning("player %u: audio file <%s> of language <%s> not found, using the embedded track", m_id, audio.missingExternal.c_str(), plan.language.c_str());
 	}
 
 	std::string CVideoPlayerImpl::PickVariantPath()
 	{
 		m_variantIndex = -1;
-		const std::vector<SVideoDescriptor::SVariant>& variants = m_desc.variants;
-		if (variants.empty())
-			return m_desc.video;
-
-		int chosen = -1; // index into variants
 		const int forced = m_variantRequest != kVariantFollowCvar ? m_variantRequest : mEnv->m_cevVariant;
-		if (forced >= 0)
-		{
-			if (forced >= 1 && static_cast<size_t>(forced) <= variants.size())
-				chosen = forced - 1;
-			else if (forced > 0)
-				LogWarning("player %u: cev_variant %d does not exist in <%s> (%u variants), using the main video", m_id, forced, m_path.c_str(), static_cast<unsigned>(variants.size()));
-		}
-		else if (m_fullscreen && gEnv != nullptr && gEnv->pRenderer != nullptr)
-		{
-			// smallest variant not below the output; none big enough: the main video (the biggest picture)
-			const int outputHeight = gEnv->pRenderer->GetHeight();
-			for (size_t i = 0; i < variants.size(); ++i)
-			{
-				if (variants[i].height >= outputHeight && (chosen < 0 || variants[i].height < variants[static_cast<size_t>(chosen)].height))
-					chosen = static_cast<int>(i);
-			}
-		}
-		if (chosen >= 0 && !FileExists(variants[static_cast<size_t>(chosen)].file))
-		{
-			LogWarning("player %u: variant file <%s> not found, using the main video", m_id, variants[static_cast<size_t>(chosen)].file.c_str());
-			chosen = -1;
-		}
-		if (chosen < 0)
-			return m_desc.video;
-		m_variantIndex = chosen + 1;
-		Log("player %u: variant %d <%s> %dx%d chosen", m_id, m_variantIndex, variants[static_cast<size_t>(chosen)].file.c_str(),
-			variants[static_cast<size_t>(chosen)].width, variants[static_cast<size_t>(chosen)].height);
-		return variants[static_cast<size_t>(chosen)].file;
+		const bool autoPick = m_fullscreen && gEnv != nullptr && gEnv->pRenderer != nullptr;
+		const int outputHeight = autoPick ? gEnv->pRenderer->GetHeight() : 0;
+		const cev::DescriptorVariantChoice choice = cev::PickDescriptorVariant(m_desc, forced, autoPick, outputHeight, &PakFileExists, nullptr);
+		if (choice.forcedOutOfRange)
+			LogWarning("player %u: cev_variant %d does not exist in <%s> (%u variants), using the main video", m_id, forced, m_path.c_str(), static_cast<unsigned>(m_desc.variants.size()));
+		if (!choice.missingFile.empty())
+			LogWarning("player %u: variant file <%s> not found, using the main video", m_id, choice.missingFile.c_str());
+		if (choice.variant < 0)
+			return choice.videoPath;
+		m_variantIndex = choice.variant;
+		Log("player %u: variant %d <%s> %dx%d chosen", m_id, m_variantIndex, choice.videoPath.c_str(), choice.width, choice.height);
+		return choice.videoPath;
 	}
 
 	bool CVideoPlayerImpl::ChoosePlan(const char* path, SPlan& plan)

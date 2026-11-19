@@ -12,12 +12,21 @@
 
 #include <QFile>
 #include <QIcon>
+#include <QPixmap>
+#include <QPointer>
+#include <QTimer>
+
+#include <QToolWindowManager/QToolWindowManager.h>
+#include <QToolWindowManager/IToolWindowArea.h>
 
 #include <algorithm>
+#include <chrono>
+#include <vector>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 
 #include "AutoScript.h"
 #include "Asset/ImportQueue.h"
@@ -25,8 +34,10 @@
 #include "Editor/VideoEditor.h"
 #include "FFmpeg/FfmpegService.h"
 #include "Editor/PreviewPanel.h"
+#include "Editor/InfoPanel.h"
+#include "Editor/PreviewAudio.h"
 #include "Editor/PreviewSession.h"
-#include "Editor/VideoViewport.h"
+#include "Editor/VideoPreviewWidget.h"
 #include "Jobs/JobRunner.h"
 #include "Offline/IOfflineOps.h"
 #include "Offline/OfflineOpsReal.h"
@@ -47,13 +58,11 @@ namespace
 		{
 			if (event == eNotify_OnMainFrameInitialized)
 			{
-				CEVEditor::SetEditorReady(true); // panes created from now on may create their viewport at once
 				if (CEVEditor::CFfmpegService* const pService = CEVEditor::CFfmpegService::Get())
 					pService->EnsureDetected(); // lazy detection of ffmpeg on a job thread, cached
 			}
 			else if (event == eNotify_OnQuit)
 			{
-				CEVEditor::SetEditorReady(false);
 				if (CEVEditor::CImportQueue* const pQueue = CEVEditor::CImportQueue::Get())
 					pQueue->CancelAll(true); // nothing queued starts any more, the running ffmpeg is cancelled
 				if (CEVEditor::CJobRunner* const pRunner = CEVEditor::CJobRunner::Get())
@@ -559,9 +568,307 @@ namespace
 	void CmdStatus(IConsoleCmdArgs*)
 	{
 		using namespace CEVEditor;
-		CryLogAlways("[CEVEditor] status: viewports live=%d created=%d destroyed=%d, jobs running=%d, import queue pending=%d, offline ops: %s",
-			CVideoViewport::LiveCount(), CVideoViewport::CreatedCount(), CVideoViewport::DestroyedCount(),
+		CVideoEditor* const pEditor = CVideoEditor::Current();
+		CVideoPreviewPanel* const pPanel = pEditor != nullptr ? pEditor->PreviewPanel() : nullptr;
+		CryLogAlways("[CEVEditor] status: preview timers=%d decode pools=%d audio callbacks=%llu, panel %s (visible %d, timer %d, ready %d, state %d, serial %llu, paints %llu), jobs running=%d, import queue pending=%d, offline ops: %s",
+			CVideoPreviewPanel::ActiveTimers(), CPreviewSession::LivePools(), static_cast<unsigned long long>(CPreviewAudioSource::TotalCallbacks()),
+			pPanel != nullptr ? "yes" : "no", pPanel != nullptr && pPanel->isVisible() ? 1 : 0, pPanel != nullptr && pPanel->TimerActive() ? 1 : 0,
+			pPanel != nullptr && pPanel->Session().IsReady() ? 1 : 0, pPanel != nullptr ? static_cast<int>(pPanel->Session().State()) : -1,
+			static_cast<unsigned long long>(pPanel != nullptr ? pPanel->Session().FrameSerial() : 0),
+			static_cast<unsigned long long>(pPanel != nullptr ? pPanel->PictureWidget()->PaintCount() : 0),
 			CJobRunner::Get() != nullptr ? CJobRunner::Get()->RunningCount() : -1, CImportQueue::Get() != nullptr ? CImportQueue::Get()->Pending() : -1, GetOfflineOps().Name());
+	}
+
+	// ---- cev_editor_preview_test [png:<path>] [pause:<seconds>] [close] ----
+	// The preview of the open video editor: loads (waits for ready), plays 1 s (the frame serial must advance, the audio device
+	// must pull PCM unless there is no device / no audio), pauses (no paintEvent during the pause), optionally saves the picture
+	// widget as PNG, optionally closes the editor windows and checks that no preview timer and no decode thread is left.
+	// Runs from Qt timers (the console command returns at once); the result is one PASS / FAIL line.
+	struct SPreviewTest
+	{
+		QPointer<CEVEditor::CVideoPreviewPanel> panel;
+		std::string png;
+		double pauseSeconds = 5.0;
+		bool close = false;
+		int checks = 0;
+		int failed = 0;
+		int waitedMs = 0;
+		uint64_t serial0 = 0;
+		uint64_t callbacks0 = 0;
+		uint64_t paints0 = 0;
+
+		void Check(bool ok, const char* what, const std::string& detail = std::string())
+		{
+			++checks;
+			if (!ok)
+				++failed;
+			CryLogAlways("[CEVEditor] preview_test: %s %s%s%s", ok ? "ok  " : "FAIL", what, detail.empty() ? "" : ": ", detail.c_str());
+		}
+	};
+	bool g_previewTestRunning = false;
+
+	void PreviewTestEnd(const std::shared_ptr<SPreviewTest>& t)
+	{
+		CryLogAlways("[CEVEditor] preview_test: %s (%d checks, %d failed)", t->failed == 0 ? "PASS" : "FAIL", t->checks, t->failed);
+		g_previewTestRunning = false;
+	}
+
+	void PreviewTestAfterClose(std::shared_ptr<SPreviewTest> t)
+	{
+		using namespace CEVEditor;
+		t->Check(CVideoPreviewPanel::ActiveTimers() == 0, "no preview timer after closing the window", "timers " + std::to_string(CVideoPreviewPanel::ActiveTimers()));
+		t->Check(CPreviewSession::LivePools() == 0, "no preview decode threads after closing the window", "decode pools " + std::to_string(CPreviewSession::LivePools()));
+		PreviewTestEnd(t);
+	}
+
+	void PreviewTestAfterPause(std::shared_ptr<SPreviewTest> t)
+	{
+		using namespace CEVEditor;
+		if (!t->panel)
+		{
+			t->Check(false, "panel still exists after the pause");
+			PreviewTestEnd(t);
+			return;
+		}
+		const uint64_t paints = t->panel->PictureWidget()->PaintCount();
+		const std::string seconds = QString::number(t->pauseSeconds, 'f', 1).toStdString();
+		t->Check(paints == t->paints0, "no paintEvent while paused", std::to_string(paints - t->paints0) + " paints in " + seconds + " s");
+		if (!t->png.empty())
+		{
+			const QPixmap shot = t->panel->PictureWidget()->grab();
+			const bool saved = !shot.isNull() && shot.save(QString::fromUtf8(t->png.c_str()), "PNG");
+			t->Check(saved, "picture saved", t->png + " (" + std::to_string(shot.width()) + "x" + std::to_string(shot.height()) + ")");
+		}
+		if (!t->close)
+		{
+			PreviewTestEnd(t);
+			return;
+		}
+		gEnv->pConsole->ExecuteString("cev_editor_close");
+		QTimer::singleShot(1500, [t]() { PreviewTestAfterClose(t); });
+	}
+
+	void PreviewTestAfterPlay(std::shared_ptr<SPreviewTest> t)
+	{
+		using namespace CEVEditor;
+		if (!t->panel)
+		{
+			t->Check(false, "panel still exists after playing");
+			PreviewTestEnd(t);
+			return;
+		}
+		CPreviewSession& session = t->panel->Session();
+		const uint64_t serial = session.FrameSerial();
+		t->Check(serial > t->serial0, "frame serial advances while playing", std::to_string(t->serial0) + " -> " + std::to_string(serial));
+		const uint64_t callbacks = CPreviewAudioSource::TotalCallbacks() - t->callbacks0;
+		if (!session.HasAudio())
+			t->Check(true, "audio", "the media has no audio");
+		else if (!session.AudioDeviceRunning())
+			t->Check(true, "audio", "no audio device (" + session.AudioDeviceError() + "): playing silently");
+		else
+			t->Check(callbacks > 0, "audio device pulls PCM", std::to_string(callbacks) + " callbacks in 1 s");
+		t->Check(t->panel->TimerActive(), "preview timer runs while visible");
+		t->panel->PlayPause(); // pause
+		t->Check(session.State() == cev::PlayerState::Paused, "paused", "state " + std::to_string(static_cast<int>(session.State())));
+		// let the last frame / the smooth repaint of the pause land, then count
+		QTimer::singleShot(500, [t]()
+		{
+			if (t->panel)
+				t->paints0 = t->panel->PictureWidget()->PaintCount();
+			QTimer::singleShot(static_cast<int>(t->pauseSeconds * 1000.0), [t]() { PreviewTestAfterPause(t); });
+		});
+	}
+
+	void PreviewTestWaitReady(std::shared_ptr<SPreviewTest> t)
+	{
+		using namespace CEVEditor;
+		if (!t->panel)
+		{
+			t->Check(false, "panel exists while loading");
+			PreviewTestEnd(t);
+			return;
+		}
+		CPreviewSession& session = t->panel->Session();
+		if (!session.IsReady() && session.IsLoading() && t->waitedMs < 15000)
+		{
+			t->waitedMs += 100;
+			QTimer::singleShot(100, [t]() { PreviewTestWaitReady(t); });
+			return;
+		}
+		std::string detail = std::to_string(t->waitedMs) + " ms";
+		if (session.IsReady())
+		{
+			detail += ", " + std::to_string(session.Info().width) + "x" + std::to_string(session.Info().height) + (session.Info().hasAlpha ? " alpha" : " opaque")
+				+ (session.HasAudio() ? " audio" : " no audio") + session.Notes();
+		}
+		t->Check(session.IsReady(), "preview loaded", detail);
+		if (!session.IsReady())
+		{
+			PreviewTestEnd(t);
+			return;
+		}
+		if (session.State() == cev::PlayerState::Playing)
+			t->panel->PlayPause();
+		t->serial0 = session.FrameSerial();
+		t->callbacks0 = CPreviewAudioSource::TotalCallbacks();
+		t->panel->PlayPause(); // play
+		t->Check(session.State() == cev::PlayerState::Playing, "playing", "state " + std::to_string(static_cast<int>(session.State())));
+		QTimer::singleShot(1000, [t]() { PreviewTestAfterPlay(t); });
+	}
+
+	void CmdPreviewTest(IConsoleCmdArgs* pArgs)
+	{
+		using namespace CEVEditor;
+		if (g_previewTestRunning)
+		{
+			CryLogAlways("[CEVEditor] preview_test: already running");
+			return;
+		}
+		auto t = std::make_shared<SPreviewTest>();
+		for (int i = 1; i < pArgs->GetArgCount(); ++i)
+		{
+			const std::string arg = pArgs->GetArg(i);
+			if (arg.compare(0, 4, "png:") == 0 || arg.compare(0, 4, "png=") == 0)
+				t->png = arg.substr(4);
+			else if (arg.compare(0, 6, "pause:") == 0 || arg.compare(0, 6, "pause=") == 0)
+				t->pauseSeconds = std::max(0.5, std::atof(arg.c_str() + 6));
+			else if (arg == "close")
+				t->close = true;
+			else if (!t->png.empty())
+				t->png += " " + arg; // a path with spaces arrives as several arguments
+		}
+		CVideoEditor* const pEditor = CVideoEditor::Current();
+		t->panel = pEditor != nullptr ? pEditor->PreviewPanel() : nullptr;
+		g_previewTestRunning = true;
+		if (!t->panel)
+		{
+			t->Check(false, "an open video editor with a preview panel");
+			PreviewTestEnd(t);
+			return;
+		}
+		PreviewTestWaitReady(t);
+	}
+
+	// cev_editor_preview_dock <float|dock|tab_other|tab_preview>: moves the preview panel of the open video editor through the
+	// docking manager the way a user drags it (floating window, back into the area of the info panel, switching tabs there)
+	void CmdPreviewDock(IConsoleCmdArgs* pArgs)
+	{
+		using namespace CEVEditor;
+		const std::string op = pArgs->GetArgCount() > 1 ? pArgs->GetArg(1) : "";
+		CVideoEditor* const pEditor = CVideoEditor::Current();
+		CVideoPreviewPanel* const pPanel = pEditor != nullptr ? pEditor->PreviewPanel() : nullptr;
+		if (pPanel == nullptr)
+		{
+			CryLogAlways("[CEVEditor] preview_dock %s: FAILED, no preview panel", op.c_str());
+			return;
+		}
+		QToolWindowManager* pManager = nullptr;
+		QWidget* pTool = nullptr;
+		for (QToolWindowManager* m : pEditor->findChildren<QToolWindowManager*>())
+		{
+			for (QWidget* w = pPanel; w != nullptr && pTool == nullptr; w = w->parentWidget())
+			{
+				if (m->ownsToolWindow(w))
+				{
+					pManager = m;
+					pTool = w;
+				}
+			}
+			if (pManager != nullptr)
+				break;
+		}
+		if (pManager == nullptr)
+		{
+			CryLogAlways("[CEVEditor] preview_dock %s: FAILED, the docking manager does not own the preview panel", op.c_str());
+			return;
+		}
+		QWidget* pOther = nullptr;
+		for (QWidget* w : pManager->toolWindows())
+		{
+			if (w != pTool && (qobject_cast<CVideoInfoPanel*>(w) != nullptr || w->findChild<CVideoInfoPanel*>() != nullptr))
+				pOther = w;
+		}
+		bool ok = true;
+		if (op == "float")
+			pManager->moveToolWindow(pTool, QToolWindowAreaTarget(QToolWindowAreaReference::Floating, -1, QRect(200, 200, 800, 520)));
+		else if (op == "dock" && pOther != nullptr && pManager->areaOf(pOther) != nullptr)
+			pManager->moveToolWindow(pTool, pManager->areaOf(pOther), QToolWindowAreaReference::Combine);
+		else if ((op == "tab_other" || op == "tab_preview") && pOther != nullptr && pManager->areaOf(pTool) != nullptr && pManager->areaOf(pTool) == pManager->areaOf(pOther))
+			pManager->areaOf(pTool)->setCurrentWidget(op == "tab_other" ? pOther : pTool);
+		else
+			ok = false;
+		CryLogAlways("[CEVEditor] preview_dock %s: %s (tool %s, other panel %s, floating %d)", op.c_str(), ok ? "done" : "FAILED (usage: float | dock | tab_other | tab_preview)",
+			pTool->metaObject()->className(), pOther != nullptr ? pOther->metaObject()->className() : "none", pManager->isFloatingWrapper(pTool->window()) ? 1 : 0);
+	}
+
+	// cev_editor_frametime <seconds> [label]: statistics of the editor's main loop over the next <seconds> (interval between two
+	// eNotify_OnIdleUpdate notifications = one editor frame, the main viewport's render included): count, average, p50, p99, max.
+	class CFrameTimer final : public IAutoEditorNotifyListener
+	{
+	public:
+		void Start(double seconds, const std::string& label)
+		{
+			m_seconds = seconds;
+			m_label = label;
+			m_samples.clear();
+			m_samples.reserve(65536);
+			m_started = false;
+			m_running = true;
+		}
+
+		void OnEditorNotifyEvent(EEditorNotifyEvent event) override
+		{
+			if (event == eNotify_OnQuit)
+			{
+				m_running = false;
+				return;
+			}
+			if (event != eNotify_OnIdleUpdate || !m_running)
+				return;
+			const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+			if (!m_started)
+			{
+				m_started = true;
+				m_begin = now;
+				m_last = now;
+				return;
+			}
+			m_samples.push_back(std::chrono::duration<double, std::milli>(now - m_last).count());
+			m_last = now;
+			if (std::chrono::duration<double>(now - m_begin).count() < m_seconds)
+				return;
+			m_running = false;
+			std::vector<double> sorted = m_samples;
+			std::sort(sorted.begin(), sorted.end());
+			double sum = 0.0;
+			for (double v : sorted)
+				sum += v;
+			const size_t n = sorted.size();
+			const double avg = n > 0 ? sum / static_cast<double>(n) : 0.0;
+			const auto pct = [&](double p) { return n > 0 ? sorted[std::min(n - 1, static_cast<size_t>(p * static_cast<double>(n - 1) + 0.5))] : 0.0; };
+			CryLogAlways("[CEVEditor] frametime %s: %u frames in %.1f s, avg %.3f ms (%.1f fps), p50 %.3f ms, p99 %.3f ms, max %.3f ms",
+				m_label.c_str(), static_cast<unsigned>(n), m_seconds, avg, avg > 0.0 ? 1000.0 / avg : 0.0, pct(0.5), pct(0.99), n > 0 ? sorted.back() : 0.0);
+		}
+
+	private:
+		double m_seconds = 10.0;
+		std::string m_label;
+		std::vector<double> m_samples;
+		bool m_started = false;
+		bool m_running = false;
+		std::chrono::steady_clock::time_point m_begin;
+		std::chrono::steady_clock::time_point m_last;
+	};
+	CFrameTimer* g_pFrameTimer = nullptr;
+
+	void CmdFrameTime(IConsoleCmdArgs* pArgs)
+	{
+		if (g_pFrameTimer == nullptr)
+			g_pFrameTimer = new CFrameTimer(); // lives until the process ends (listener of the editor)
+		const double seconds = pArgs->GetArgCount() > 1 ? std::max(1.0, std::atof(pArgs->GetArg(1))) : 10.0;
+		const std::string label = pArgs->GetArgCount() > 2 ? pArgs->GetArg(2) : "";
+		g_pFrameTimer->Start(seconds, label);
+		CryLogAlways("[CEVEditor] frametime %s: measuring %.1f s", label.c_str(), seconds);
 	}
 
 	// cev_editor_script <file>: runs a list of console commands from the idle notification (see AutoScript.h)
@@ -601,10 +908,13 @@ CEditorCEVPlayerPlugin::CEditorCEVPlayerPlugin()
 		REGISTER_COMMAND("cev_editor_recompress", CmdRecompress, VF_NULL, "cev_editor_recompress <asset.cevvideo> [crf:N] [height:PX] [variants:a,b|none] [refresh]: re-encode the video from its source copy");
 		REGISTER_COMMAND("cev_editor_open", CmdOpen, VF_NULL, "cev_editor_open [<asset.cevvideo>]: open the CEV Video Editor (on that asset)");
 		REGISTER_COMMAND("cev_editor_close", CmdClose, VF_NULL, "cev_editor_close: close the CEV Video Editor windows");
-		REGISTER_COMMAND("cev_editor_status", CmdStatus, VF_NULL, "cev_editor_status: log viewport / job counters of the CEV editor");
+		REGISTER_COMMAND("cev_editor_status", CmdStatus, VF_NULL, "cev_editor_status: log preview / job counters of the CEV editor");
+		REGISTER_COMMAND("cev_editor_preview_test", CmdPreviewTest, VF_NULL, "cev_editor_preview_test [png:<path>] [pause:<s>] [close]: self test of the preview of the open video editor (load, play 1 s, pause, no repaint while paused, PNG, close)");
+		REGISTER_COMMAND("cev_editor_preview_dock", CmdPreviewDock, VF_NULL, "cev_editor_preview_dock <float|dock|tab_other|tab_preview>: move the preview panel through the docking manager (test)");
 		REGISTER_COMMAND("cev_editor_rename", CmdRename, VF_NULL, "cev_editor_rename <asset.cevvideo> <newName>: rename a video asset through the asset manager");
 		REGISTER_COMMAND("cev_editor_move", CmdMove, VF_NULL, "cev_editor_move <asset.cevvideo> <folder>: move a video asset through the asset manager");
 		REGISTER_COMMAND("cev_editor_delete", CmdDelete, VF_NULL, "cev_editor_delete <asset.cevvideo>: delete a video asset with all its files");
+		REGISTER_COMMAND("cev_editor_frametime", CmdFrameTime, VF_NULL, "cev_editor_frametime <seconds> [label]: log editor frame time statistics (idle update intervals) over the next seconds");
 		REGISTER_COMMAND("cev_editor_script", CmdScript, VF_NULL, "cev_editor_script <file>: run a list of console commands (one per line, wait_seconds N) from the editor idle loop");
 	}
 	// the asset type icon is a Qt resource of this DLL (EditorCEVPlayer.qrc); CryIcon would silently show the "missing" icon
@@ -645,12 +955,17 @@ CEditorCEVPlayerPlugin::~CEditorCEVPlayerPlugin()
 		pConsole->RemoveCommand("cev_editor_open");
 		pConsole->RemoveCommand("cev_editor_close");
 		pConsole->RemoveCommand("cev_editor_status");
+		pConsole->RemoveCommand("cev_editor_preview_test");
+		pConsole->RemoveCommand("cev_editor_preview_dock");
 		pConsole->RemoveCommand("cev_editor_rename");
 		pConsole->RemoveCommand("cev_editor_move");
 		pConsole->RemoveCommand("cev_editor_delete");
 		pConsole->RemoveCommand("cev_editor_script");
+		pConsole->RemoveCommand("cev_editor_frametime");
 	}
 	g_pScript = nullptr;
+	delete g_pFrameTimer; // unregisters its editor listener before the DLL goes
+	g_pFrameTimer = nullptr;
 	CEVEditor::SetOfflineOps(nullptr);
 	CryLogAlways("[CEVEditor] plugin unloaded");
 }

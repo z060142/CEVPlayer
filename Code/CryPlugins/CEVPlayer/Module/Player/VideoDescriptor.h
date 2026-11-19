@@ -24,45 +24,15 @@
 #include <string>
 #include <vector>
 
+#include "CEVCore/DescriptorPlan.h"
+
 namespace CEVPlayer
 {
-	enum class EVideoRoute : unsigned char { Embedded, Mixed, Cue };
-
-	struct SVideoDescriptor
-	{
-		struct SLanguage
-		{
-			std::string name;
-			std::string file;      // resolved CryPak path of the external audio file ("" = none)
-			std::string trigger;   // cue route trigger name (M3), "" = the root trigger
-			std::string pauseTrigger;  // cue route: event action "pause" trigger, "" = the root one
-			std::string resumeTrigger; // cue route: event action "resume" trigger, "" = the root one
-			bool embedded = false;
-		};
-		struct SVariant
-		{
-			std::string file;      // resolved CryPak path
-			int width = 0;
-			int height = 0;
-		};
-		struct SMarker
-		{
-			std::string name;
-			double time = 0.0;
-		};
-
-		std::string path;          // the descriptor itself
-		EVideoRoute route = EVideoRoute::Embedded;
-		std::string video;         // resolved CryPak path of the main video
-		double avOffsetMs = 0.0;   // applied with PlayerCore::SetAvOffset (picture later by this much, see PlayerCore.h)
-		std::string trigger;       // cue route default trigger (languages without their own use it)
-		std::string pauseTrigger;  // cue route default pause trigger
-		std::string resumeTrigger; // cue route default resume trigger
-		std::string defaultLanguage;
-		std::vector<SLanguage> languages;
-		std::vector<SVariant> variants;
-		std::vector<SMarker> markers; // sorted by time
-	};
+	// The data model and the decisions taken from it (variant, audio source) live in CEVPlayerCore
+	// (CEVCore/DescriptorPlan.h), shared with the Sandbox preview; reading the XML and resolving file names through
+	// CryPak stay here.
+	using EVideoRoute = cev::VideoRoute;
+	using SVideoDescriptor = cev::VideoDescriptor;
 
 	//! True when `path` ends in ".cevvideo" (case insensitive).
 	bool IsDescriptorPath(const char* path);

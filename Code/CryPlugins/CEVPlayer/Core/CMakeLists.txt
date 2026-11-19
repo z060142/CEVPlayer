@@ -79,6 +79,7 @@ set(CEV_CORE_SOURCES
 	src/Clock.cpp
 	src/ColorConvert.cpp
 	src/DecodePool.cpp
+	src/DescriptorPlan.cpp
 	src/FrameRing.cpp
 	src/IByteSource.cpp
 	src/PlayerCore.cpp
@@ -93,6 +94,7 @@ set(CEV_CORE_HEADERS
 	include/CEVCore/AudioDecoder.h
 	include/CEVCore/ColorConvert.h
 	include/CEVCore/DecodePool.h
+	include/CEVCore/DescriptorPlan.h
 	include/CEVCore/FrameRing.h
 	include/CEVCore/IByteSource.h
 	include/CEVCore/IClock.h

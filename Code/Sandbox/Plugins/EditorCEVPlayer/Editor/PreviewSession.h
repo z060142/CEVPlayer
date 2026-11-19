@@ -1,67 +1,130 @@
-// Owns the IVideoPlayer of a preview (texture output only, no fullscreen): the only place in the editor that holds an
-// IVideoPlayer*. Created, used and destroyed on the main thread. Player callbacks only set flags that the owner reads
-// from its per-frame Tick, nothing happens inside a callback.
+// The player of a video preview: CEVPlayerCore decodes, Qt Multimedia plays the sound (PreviewAudio.h), the panel
+// paints the frames (VideoPreviewWidget.h). Nothing goes through the engine renderer, the engine audio system or the
+// runtime plug-in, which does not even have to be loaded.
+//
+// What it plays is decided like the runtime module decides it (CEVCore/DescriptorPlan.h, shared code): variant (the
+// cvar cev_variant when the runtime plug-in registered it; the preview is never fullscreen, so no automatic choice),
+// language chain g_languageAudio, g_language, default language of the descriptor, external language file of the mixed
+// route, A/V offset. Limitation: a cue route (audio from an audio middleware trigger) is not auditioned; the preview
+// plays the embedded track instead and says so.
+//
+// Main thread only (the audio device thread only reaches the Core's audio path). Like the runtime module the video
+// core and the optional external audio core share one cev::AudioClock and move together; without an audio device the
+// cores run on their internal (wall) clock.
 #pragma once
 
+#include <atomic>
+#include <memory>
 #include <string>
 
-#include <CrySystem/ISystem.h>
-#include <CEVPlayer/IVideoPlayer.h>
+#include "CEVCore/AudioClock.h"
+#include "CEVCore/DecodePool.h"
+#include "CEVCore/DescriptorPlan.h"
+#include "CEVCore/PlayerCore.h"
+#include "Editor/PreviewAudio.h"
 
 namespace CEVEditor
 {
 	enum class EPreviewAudio
 	{
-		AsAuthored,    //!< load the .cevvideo as it is (route, language, triggers)
-		EmbeddedTrack, //!< play the video file with its own audio, through a temporary descriptor
+		AsAuthored,    //!< route and language of the descriptor (cue route: the embedded track, see above)
+		EmbeddedTrack, //!< the audio track inside the video, whatever the descriptor says
 		Muted,         //!< as authored, volume 0
 	};
 
-	//! Deletes the leftovers of an earlier run in Assets/.cevpreview (temporary descriptors of the "embedded track" preview).
+	//! Deletes the leftovers of an earlier version in Assets/.cevpreview (temporary descriptors it wrote).
 	void RemoveStalePreviewFiles();
 
-	class CPreviewSession final : public CEVPlayer::IVideoPlayerListener, public ISystemEventListener
+	struct SPreviewRequest
+	{
+		std::string descriptorRel;   //!< game relative path of the .cevvideo
+		std::string videoRel;        //!< main video, game relative (EmbeddedTrack)
+		double avOffsetMs = 0.0;     //!< EmbeddedTrack: the offset of the edited descriptor
+		EPreviewAudio audio = EPreviewAudio::AsAuthored;
+		float volume = 1.f;
+	};
+
+	class CPreviewSession final
 	{
 	public:
 		CPreviewSession();
-		~CPreviewSession() override;
+		~CPreviewSession();
 		CPreviewSession(const CPreviewSession&) = delete;
 		CPreviewSession& operator=(const CPreviewSession&) = delete;
 
-		//! False when the CEVPlayer runtime plug-in is not loaded (the window then says so).
-		static bool RuntimeAvailable();
-
-		//! Loads the descriptor (path relative to the game root, as the runtime plug-in expects) and creates the player on
-		//! first use. `videoRelPath` / `avOffsetMs` are only needed for EEmbeddedTrack (temporary descriptor).
-		bool Load(const std::string& descriptorRel, EPreviewAudio audio, const std::string& videoRelPath, double avOffsetMs);
-		//! Destroys the player (and the temporary descriptor). Safe to call repeatedly.
+		//! Reads the descriptor, decides files and audio source and starts loading (asynchronous). False and `error`
+		//! when the descriptor cannot be read or the video does not exist.
+		bool Load(const SPreviewRequest& request, std::string& error);
+		//! Stops the sound, joins the decode threads, frees everything. Safe to call repeatedly.
 		void Release();
 
-		CEVPlayer::IVideoPlayer* Player() const { return m_pPlayer; }
-		bool HasPlayer() const { return m_pPlayer != nullptr; }
-
+		bool HasMedia() const { return m_phase != EPhase::None; }
+		bool IsLoading() const { return m_phase == EPhase::Loading; }
+		bool IsReady() const { return m_phase == EPhase::Ready; }
+		//! One step (from the panel's timer): load completion, Core Update of both cores. True when a new frame became
+		//! current or the state changed in a way the picture shows (ready, failed).
+		bool Tick();
 		//! Cleared by the reader.
-		bool TakeReady() { const bool v = m_ready; m_ready = false; return v; }
-		bool TakeError(std::string& message) { if (!m_error) return false; message = m_errorMessage; m_error = false; return true; }
-		uint32_t FramesSeen() const { return m_frames; }
+		bool TakeReady() { const bool v = m_readyEvent; m_readyEvent = false; return v; }
+		bool TakeError(std::string& message) { if (m_errorText.empty()) return false; message.swap(m_errorText); m_errorText.clear(); return true; }
 
-		// IVideoPlayerListener
-		void OnReady(CEVPlayer::IVideoPlayer&) override { m_ready = true; }
-		void OnError(CEVPlayer::IVideoPlayer&, int code, const char* message) override;
-		void OnNewFrame(CEVPlayer::IVideoPlayer&, uint64_t) override { ++m_frames; }
+		// ---- transport (both cores, like CVideoPlayerImpl::Cores*) ----
+		void Play();
+		void Pause();
+		void Resume();
+		void Stop();
+		void Seek(double seconds);
+		void SetLoop(bool loop);
+		void SetVolume(float volume);
+		//! Window hidden / game mode: pauses playback and the audio device; Suspend(false) continues where it was.
+		void Suspend(bool suspend);
+		bool IsSuspended() const { return m_suspended; }
 
-		// ISystemEventListener: the runtime plug-in destroys every player at FULL / FAST_SHUTDOWN, after that the pointer
-		// must not be touched (not even to remove the listener).
-		void OnSystemEvent(ESystemEvent event, UINT_PTR wparam, UINT_PTR lparam) override;
+		cev::PlayerState State() const;
+		double Time() const;
+		double Duration() const;
+		const cev::MediaInfo& Info() const;
+		bool HasAudio() const { return m_hasAudio; }
+		bool GetFrame(cev::FrameView& out) const;
+		uint64_t FrameSerial() const;
+		//! Short notes for the status line (variant, language, external file, cue limitation, no audio device).
+		const std::string& Notes() const { return m_notes; }
+		bool AudioDeviceRunning() const { return m_output.IsRunning(); }
+		const std::string& AudioDeviceError() const { return m_audioError; }
+
+		//! Preview sessions with a decode pool right now (self test: 0 after the window closed).
+		static int LivePools() { return s_livePools.load(); }
 
 	private:
-		bool m_listening = false;
-		CEVPlayer::IVideoPlayer* m_pPlayer = nullptr;
-		bool m_ready = false;
-		bool m_error = false;
-		std::string m_errorMessage;
-		uint32_t m_frames = 0;
-		std::string m_tempDescriptorAbs;
-		std::string m_tempDescriptorRel;
+		enum class EPhase { None, Loading, Ready, Failed };
+		void OnLoaded();
+		void Fail(const std::string& message);
+		void StartAudio();
+
+		EPhase m_phase = EPhase::None;
+		// Order: the clock is referenced by the cores and the audio device, the pool by the cores; the audio output is
+		// stopped before anything else is reset (Release()).
+		std::shared_ptr<cev::DecodePool> m_pool;
+		std::unique_ptr<cev::AudioClock> m_audioClock;
+		std::unique_ptr<cev::PlayerCore> m_core;       // video (and the embedded audio track)
+		std::unique_ptr<cev::PlayerCore> m_audioCore;  // external language file, audio only
+		CPreviewAudioOutput m_output;
+		uint32_t m_deviceRate = 0;
+		std::string m_audioError;
+		bool m_hasAudio = false;
+		bool m_loop = false;
+		float m_volume = 1.f;
+		bool m_suspended = false;
+		bool m_resumeAfterSuspend = false;
+		bool m_playPending = false;
+		bool m_seekPending = false;
+		double m_seekTime = 0.0;
+		bool m_readyEvent = false;
+		std::string m_errorText;
+		std::string m_notes;
+		std::string m_externalPath;
+		double m_audioWaitSince = -1.0;
+		uint32_t m_seenLoops = 0;
+		static std::atomic<int> s_livePools;
 	};
 }
