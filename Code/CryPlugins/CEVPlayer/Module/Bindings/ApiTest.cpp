@@ -59,7 +59,8 @@ namespace CEVPlayer
 				SValue Query(const char* name, bool* pOk = nullptr)
 				{
 					SValue v;
-					const bool ok = Call(E(name), handle, nullptr, 0, &v);
+					const SEntry* const pEntry = FindByName(name); // a missing entry fails the check instead of crashing
+					const bool ok = pEntry != nullptr && Call(*pEntry, handle, nullptr, 0, &v);
 					if (pOk != nullptr)
 						*pOk = ok;
 					return v;
