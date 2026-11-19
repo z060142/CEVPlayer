@@ -47,7 +47,7 @@ namespace CEVPlayer
 			"4ACC3D98-043C-4CA7-A43C-9DB7D96F69BA"_cry_guid, // CEVPlayer::Advanced::SetLoop
 			"285B5336-FBD5-4D52-A878-40FD620E7932"_cry_guid, // CEVPlayer::Advanced::SetRate
 			"C24FFE00-8215-4B4C-80D5-3996D2650B39"_cry_guid, // CEVPlayer::Advanced::SetVolume
-			"888EAF9B-3128-4510-9C50-9B26353DA322"_cry_guid, // CEVPlayer::Advanced::SetLanguage
+			"888EAF9B-3128-4510-9C50-9B26353DA322"_cry_guid, // CEVPlayer::Advanced::SetAudioTrack (A1: renamed from SetLanguage, GUID kept)
 			"D71E69BE-A424-451D-8840-A7BCFE53ADDD"_cry_guid, // CEVPlayer::Advanced::SetVariant
 			"20A1CC28-BE7C-4382-8F5C-FAD6955C25D2"_cry_guid, // CEVPlayer::Advanced::SetSkippable
 			"13B9D4C4-43B4-4602-9E42-E8A6F07B4974"_cry_guid, // CEVPlayer::Advanced::Info
@@ -56,7 +56,8 @@ namespace CEVPlayer
 		const CryGUID kCryVSResizedSignalGuid = "8431E4A5-BEA5-4461-B110-4B7883761FBC"_cry_guid;
 		const CryGUID kCryVSClosedSignalGuid  = "AAE0463C-E424-4A35-8737-00D3F22801F1"_cry_guid;
 		// Retired (see ApiTable.h): 6215D8DE-93E8-4236-9DB5-9DDCFD4F1C0D (TextureName), 2819FAC7-8B52-4BA3-9FA7-25BE56E317AD
-		// (InterfaceVersion), 23441E42-DE20-4EA3-A312-F6D624D5D83C (Caps).
+		// (InterfaceVersion), 23441E42-DE20-4EA3-A312-F6D624D5D83C (Caps); A1: EB59C123-4D68-43F3-A979-65C544B6BA1C
+		// (SetLanguage), B7A77A6C-E01F-4051-9B05-CA9596E6E49B (Language).
 
 		std::string SerialText(uint64_t serial)
 		{
@@ -144,7 +145,7 @@ namespace CEVPlayer
 				c.pPlayer->SetRate(clamped);
 				return true;
 			}
-			bool FnSetLanguage(const SCall& c) { c.pPlayer->SetLanguage(c.args[0].s.c_str()); return true; }
+			bool FnSetAudioTrack(const SCall& c) { c.pPlayer->SetAudioTrack(c.args[0].s.c_str()); return true; }
 			bool FnSetVolume(const SCall& c) { c.pPlayer->SetVolume(c.args[0].f); return true; }
 			bool FnSetVariant(const SCall& c) { c.pPlayer->SetVariant(c.args[0].i); return true; }
 			bool FnSetSkippable(const SCall& c) { mEnv->pApi->SetSkippable(c.handle, c.args[0].b); return true; }
@@ -230,7 +231,7 @@ namespace CEVPlayer
 			bool FnTextureId(const SCall& c) { *c.pResult = SValue::FromInt(c.pPlayer->GetTextureId()); return true; }
 			bool FnHasAlpha(const SCall& c) { *c.pResult = SValue::FromBool(c.pPlayer->HasAlpha()); return true; }
 			bool FnIsPremultiplied(const SCall& c) { *c.pResult = SValue::FromBool(c.pPlayer->IsPremultiplied()); return true; }
-			bool FnLanguage(const SCall& c) { *c.pResult = SValue::FromString(c.pPlayer->GetLanguage()); return true; }
+			bool FnAudioTrack(const SCall& c) { *c.pResult = SValue::FromString(c.pPlayer->GetAudioTrack()); return true; }
 			bool FnVariant(const SCall& c) { *c.pResult = SValue::FromInt(c.pPlayer->GetVariant()); return true; }
 			bool FnSurfaceId(const SCall& c) { *c.pResult = SValue::FromString(c.pPlayer->GetSurfaceId()); return true; }
 			bool FnGeneration(const SCall& c) { *c.pResult = SValue::FromInt(static_cast<int>(c.pPlayer->GetGeneration())); return true; }
@@ -244,6 +245,9 @@ namespace CEVPlayer
 			bool FnRate(const SCall& c) { *c.pResult = SValue::FromFloat(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetRate()); return true; }
 			bool FnVolume(const SCall& c) { *c.pResult = SValue::FromFloat(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetVolume()); return true; }
 			bool FnPath(const SCall& c) { *c.pResult = SValue::FromString(c.pPlayer->GetPath()); return true; }
+			bool FnAudioTrackCount(const SCall& c) { *c.pResult = SValue::FromInt(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetAudioTrackCount()); return true; }
+			bool FnAudioTrackName(const SCall& c) { *c.pResult = SValue::FromString(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetAudioTrackName(c.args[0].i)); return true; }
+			bool FnAudioTrackLanguage(const SCall& c) { *c.pResult = SValue::FromString(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetAudioTrackLanguage(c.args[0].i)); return true; }
 			bool FnPauseDecodeWhenHidden(const SCall& c) { *c.pResult = SValue::FromBool(static_cast<const CVideoPlayerImpl*>(c.pPlayer)->GetPauseDecodeWhenHidden()); return true; }
 
 			// ======================================================================================== parameters
@@ -252,7 +256,8 @@ namespace CEVPlayer
 			const SParam kSeekParams[]        = { { EType::Float, "Seconds", "Target time in seconds", 0, nullptr, 'in00' } };
 			const SParam kSetLoopParams[]     = { { EType::Bool, "Loop", "Restart at 0 when the end is reached", 0, nullptr, 'in00' } };
 			const SParam kSetRateParams[]     = { { EType::Float, "Rate", "Playback speed, 0.25 .. 4 (1 = normal; values outside are clamped)", 1.0, nullptr, 'in00' } };
-			const SParam kSetLanguageParams[] = { { EType::String, "Language", "Audio language as named in the .cevvideo descriptor; empty = default choice", 0, "", 'in00' } };
+			const SParam kSetAudioTrackParams[] = { { EType::String, "Track", "Audio track name as listed in the .cevvideo descriptor's <AudioTracks>; empty = automatic choice", 0, "", 'in00' } };
+			const SParam kAudioTrackIndexParams[] = { { EType::Int, "Index", "0 based index into the descriptor's audio tracks (AudioTrackCount)", 0, nullptr, 'in00' } };
 			const SParam kSetVolumeParams[]   = { { EType::Float, "Volume", "Player volume 0..1 (multiplied with the global volume cev_volume)", 1.0, nullptr, 'in00' } };
 			const SParam kSetOutputParams[]   =
 			{
@@ -295,7 +300,7 @@ namespace CEVPlayer
 				{ EKind::Control, "C89FA6A6-1EDF-4BDA-A6A6-5C08915A887C"_cry_guid, "Seek", "Jumps to a time in seconds.", CEV_ARRAY(kSeekParams), EType::Void, nullptr, false, 0, &FnSeek },
 				{ EKind::Control, "ACDCF5FB-070D-439A-B430-A92609F06348"_cry_guid, "SetLoop", "Sets looping.", CEV_ARRAY(kSetLoopParams), EType::Void, nullptr, false, 0, &FnSetLoop },
 				{ EKind::Control, "510FE2B6-D098-4C1A-9C7E-D74B77A1D22F"_cry_guid, "SetRate", "Sets the playback speed.", CEV_ARRAY(kSetRateParams), EType::Void, nullptr, false, 0, &FnSetRate },
-				{ EKind::Control, "EB59C123-4D68-43F3-A979-65C544B6BA1C"_cry_guid, "SetLanguage", "Selects the audio language of a .cevvideo descriptor (reloads the media in place while playing).", CEV_ARRAY(kSetLanguageParams), EType::Void, nullptr, false, 0, &FnSetLanguage },
+				{ EKind::Control, "16354407-5E1B-417E-8AF6-36CCC10B3F6F"_cry_guid, "SetAudioTrack", "Selects the audio track of a .cevvideo descriptor by name (reloads the media in place while playing).", CEV_ARRAY(kSetAudioTrackParams), EType::Void, nullptr, false, 0, &FnSetAudioTrack },
 				{ EKind::Control, "737D69DA-7715-4384-8B6A-3F5C95E6F48D"_cry_guid, "SetVolume", "Sets the player volume.", CEV_ARRAY(kSetVolumeParams), EType::Void, nullptr, false, 0, &FnSetVolume },
 				{ EKind::Control, "B68F6467-1C13-491C-B0F3-BFF0D3CBF1C6"_cry_guid, "SetOutput", "Chooses where the picture goes: only the surface texture, fullscreen on the screen, or a texture slot of a material.", CEV_ARRAY(kSetOutputParams), EType::Void, nullptr, false, 0, &FnSetOutput },
 				{ EKind::Control, "079109C0-A530-4D82-BF32-5B8AF724C720"_cry_guid, "SetVariant", "Chooses the variant (resolution) of a .cevvideo descriptor.", CEV_ARRAY(kSetVariantParams), EType::Void, nullptr, false, 0, &FnSetVariant },
@@ -315,7 +320,10 @@ namespace CEVPlayer
 				{ EKind::Query, "B6CA4AE6-2F74-4BB2-B153-BEF9AC675213"_cry_guid, "TextureId", "Renderer texture id of the output texture, 0 while there is none.", CEV_NOPARAMS, EType::Int, "TextureId", false, 0, &FnTextureId },
 				{ EKind::Query, "0CC4837F-F982-4246-9695-03991397069D"_cry_guid, "HasAlpha", "The video has an alpha channel.", CEV_NOPARAMS, EType::Bool, "HasAlpha", false, 0, &FnHasAlpha },
 				{ EKind::Query, "EAF2740F-37EB-47E9-BFAE-A538D53EC1AF"_cry_guid, "IsPremultiplied", "The output texture holds premultiplied alpha (true for the RGBA8 layout).", CEV_NOPARAMS, EType::Bool, "IsPremultiplied", false, 0, &FnIsPremultiplied },
-				{ EKind::Query, "B7A77A6C-E01F-4051-9B05-CA9596E6E49B"_cry_guid, "Language", "Audio language in use (descriptor name), empty without languages.", CEV_NOPARAMS, EType::String, "Language", false, 0, &FnLanguage },
+				{ EKind::Query, "E50C04FE-4B43-48A6-B7A5-F64795357D52"_cry_guid, "AudioTrack", "Audio track in use (descriptor name), empty without audio tracks (the embedded audio).", CEV_NOPARAMS, EType::String, "AudioTrack", false, 0, &FnAudioTrack },
+				{ EKind::Query, "05B781B5-FCAE-44BA-8262-0F8D22017AA3"_cry_guid, "AudioTrackCount", "Number of audio tracks the loaded .cevvideo descriptor lists (0 for a plain video).", CEV_NOPARAMS, EType::Int, "Count", false, 0, &FnAudioTrackCount },
+				{ EKind::Query, "8AB21BAE-69E5-4E26-8056-FA02FF7F8512"_cry_guid, "AudioTrackName", "Name of the audio track at Index (empty when out of range).", CEV_ARRAY(kAudioTrackIndexParams), EType::String, "Name", false, 0, &FnAudioTrackName },
+				{ EKind::Query, "F394A392-5673-4F2A-B032-5912BD0F61A5"_cry_guid, "AudioTrackLanguage", "Optional language tag of the audio track at Index (empty when untagged or out of range).", CEV_ARRAY(kAudioTrackIndexParams), EType::String, "Language", false, 0, &FnAudioTrackLanguage },
 				{ EKind::Query, "6AB75D22-6C00-4168-B33D-F06FDFACA93E"_cry_guid, "Variant", "Variant in use: 0 = main video, n = n-th variant.", CEV_NOPARAMS, EType::Int, "Variant", false, 0, &FnVariant },
 				{ EKind::Query, "97C49A10-C7A1-40AC-BF8B-D7688F2CF190"_cry_guid, "SurfaceId", "Surface id of the player, empty for a player made by Create.", CEV_NOPARAMS, EType::String, "SurfaceId", false, 0, &FnSurfaceId },
 				{ EKind::Query, "1DE894B9-3DBD-45B8-8614-441706F53725"_cry_guid, "Generation", "Counts changes of the texture (id, size or layout): fetch TextureId / Width / Height again when it changes.", CEV_NOPARAMS, EType::Int, "Generation", false, 0, &FnGeneration },
@@ -498,6 +506,8 @@ namespace CEVPlayer
 				"6215D8DE-93E8-4236-9DB5-9DDCFD4F1C0D"_cry_guid, // TextureName
 				"2819FAC7-8B52-4BA3-9FA7-25BE56E317AD"_cry_guid, // InterfaceVersion
 				"23441E42-DE20-4EA3-A312-F6D624D5D83C"_cry_guid, // Caps
+				"EB59C123-4D68-43F3-A979-65C544B6BA1C"_cry_guid, // SetLanguage (A1)
+				"B7A77A6C-E01F-4051-9B05-CA9596E6E49B"_cry_guid, // Language (A1)
 			};
 
 			const SSpan spans[3] = { Controls(), Queries(), Events() };

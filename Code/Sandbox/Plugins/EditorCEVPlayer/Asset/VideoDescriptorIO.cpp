@@ -76,6 +76,11 @@ namespace CEVEditor
 			return buf;
 		}
 
+		bool ParseBoolAttr(const std::string& text)
+		{
+			return text == "1" || _stricmp(text.c_str(), "true") == 0 || _stricmp(text.c_str(), "yes") == 0;
+		}
+
 		bool ReplacePrefix(std::string& value, const std::string& oldPrefix, const std::string& newPrefix)
 		{
 			if (oldPrefix.empty() || value.size() < oldPrefix.size())
@@ -87,14 +92,24 @@ namespace CEVEditor
 		}
 	}
 
-	int SDescriptor::FindLanguage(const std::string& name) const
+	int SDescriptor::FindAudioTrack(const std::string& name) const
 	{
-		for (size_t i = 0; i < languages.size(); ++i)
+		if (name.empty())
+			return -1;
+		for (size_t i = 0; i < audioTracks.size(); ++i)
 		{
-			if (_stricmp(languages[i].name.c_str(), name.c_str()) == 0)
+			if (_stricmp(audioTracks[i].name.c_str(), name.c_str()) == 0)
 				return static_cast<int>(i);
 		}
 		return -1;
+	}
+
+	std::string AudioTrackNameList(const SDescriptor& desc)
+	{
+		std::string out;
+		for (const SDescriptor::SAudioTrack& a : desc.audioTracks)
+			out += (out.empty() ? "" : ",") + a.name;
+		return out;
 	}
 
 	bool LoadDescriptor(const std::string& absPath, SDescriptor& out, std::string& error)
@@ -139,24 +154,37 @@ namespace CEVEditor
 				continue;
 			const char* const tag = section->getTag();
 			const int count = section->getChildCount() > 0 ? section->getChildCount() : 0;
-			if (_stricmp(tag, "Languages") == 0)
+			if (_stricmp(tag, "AudioTracks") == 0)
 			{
-				out.defaultLanguage = Attr(section, "default");
+				out.defaultTrack = Attr(section, "default");
+				out.followGameLanguage = ParseBoolAttr(Attr(section, "followGameLanguage"));
 				for (int i = 0; i < count; ++i)
 				{
 					XmlNodeRef node = section->getChild(i);
-					if (!node || _stricmp(node->getTag(), "Language") != 0)
+					if (!node || _stricmp(node->getTag(), "Track") != 0)
 						continue;
-					SDescriptor::SLanguage lang;
-					lang.name = Attr(node, "name");
-					const std::string embedded = Attr(node, "embedded");
-					lang.embedded = embedded == "1" || _stricmp(embedded.c_str(), "true") == 0 || _stricmp(embedded.c_str(), "yes") == 0;
-					lang.file = Attr(node, "file");
-					lang.trigger = Attr(node, "trigger");
-					lang.pauseTrigger = Attr(node, "pauseTrigger");
-					lang.resumeTrigger = Attr(node, "resumeTrigger");
-					out.languages.push_back(lang);
+					SDescriptor::SAudioTrack track;
+					track.name = Attr(node, "name");
+					track.language = Attr(node, "language");
+					track.file = Attr(node, "file");
+					track.trigger = Attr(node, "trigger");
+					track.pauseTrigger = Attr(node, "pauseTrigger");
+					track.resumeTrigger = Attr(node, "resumeTrigger");
+					// the runtime's precedence (DescriptorPlan): embedded audio, else the external file, else the trigger
+					if (ParseBoolAttr(Attr(node, "embedded")))
+						track.source = SDescriptor::SAudioTrack::ESource::Embedded;
+					else if (!track.file.empty())
+						track.source = SDescriptor::SAudioTrack::ESource::File;
+					else if (!track.trigger.empty() || !track.pauseTrigger.empty() || !track.resumeTrigger.empty())
+						track.source = SDescriptor::SAudioTrack::ESource::Trigger;
+					out.audioTracks.push_back(track);
 				}
+			}
+			else if (_stricmp(tag, "Languages") == 0)
+			{
+				// pre-A1 form (never released): not read; the runtime plays the embedded audio
+				CryWarning(VALIDATOR_MODULE_EDITOR, VALIDATOR_ERROR, "[CEVEditor] descriptor %s: <Languages> is not supported any more: use <AudioTracks default=\"...\"> "
+					"with <Track name=\"...\" embedded=\"1\" | file=\"...\" | trigger=\"...\" [language=\"...\"]/>; the descriptor is read without audio tracks", absPath.c_str());
 			}
 			else if (_stricmp(tag, "Variants") == 0)
 			{
@@ -204,31 +232,42 @@ namespace CEVEditor
 		AppendAttr(out, "trigger", d.trigger);
 		AppendAttr(out, "pauseTrigger", d.pauseTrigger);
 		AppendAttr(out, "resumeTrigger", d.resumeTrigger);
-		const bool hasChildren = !d.languages.empty() || !d.variants.empty() || !d.markers.empty();
+		const bool hasChildren = !d.audioTracks.empty() || !d.variants.empty() || !d.markers.empty();
 		if (!hasChildren)
 		{
 			out += "/>\n";
 			return out;
 		}
 		out += ">\n";
-		if (!d.languages.empty())
+		if (!d.audioTracks.empty())
 		{
-			out += "\t<Languages";
-			AppendAttr(out, "default", d.defaultLanguage);
+			out += "\t<AudioTracks";
+			AppendAttr(out, "default", d.defaultTrack);
+			if (d.followGameLanguage)
+				out += " followGameLanguage=\"1\"";
 			out += ">\n";
-			for (const SDescriptor::SLanguage& l : d.languages)
+			for (const SDescriptor::SAudioTrack& a : d.audioTracks)
 			{
-				out += "\t\t<Language";
-				AppendAttr(out, "name", l.name);
-				if (l.embedded)
+				out += "\t\t<Track";
+				AppendAttr(out, "name", a.name);
+				switch (a.source)
+				{
+				case SDescriptor::SAudioTrack::ESource::Embedded:
 					out += " embedded=\"1\"";
-				AppendAttr(out, "file", l.file);
-				AppendAttr(out, "trigger", l.trigger);
-				AppendAttr(out, "pauseTrigger", l.pauseTrigger);
-				AppendAttr(out, "resumeTrigger", l.resumeTrigger);
+					break;
+				case SDescriptor::SAudioTrack::ESource::File:
+					AppendAttr(out, "file", a.file);
+					break;
+				case SDescriptor::SAudioTrack::ESource::Trigger:
+					AppendAttr(out, "trigger", a.trigger);
+					AppendAttr(out, "pauseTrigger", a.pauseTrigger);
+					AppendAttr(out, "resumeTrigger", a.resumeTrigger);
+					break;
+				}
+				AppendAttr(out, "language", a.language);
 				out += "/>\n";
 			}
-			out += "\t</Languages>\n";
+			out += "\t</AudioTracks>\n";
 		}
 		if (!d.variants.empty())
 		{
@@ -265,10 +304,10 @@ namespace CEVEditor
 
 	namespace
 	{
-		bool SameLanguage(const SDescriptor::SLanguage& a, const SDescriptor::SLanguage& b)
+		bool SameTrack(const SDescriptor::SAudioTrack& a, const SDescriptor::SAudioTrack& b)
 		{
-			return a.name == b.name && a.embedded == b.embedded && a.file == b.file && a.trigger == b.trigger
-				&& a.pauseTrigger == b.pauseTrigger && a.resumeTrigger == b.resumeTrigger;
+			return a.name == b.name && a.source == b.source && a.file == b.file && a.trigger == b.trigger
+				&& a.pauseTrigger == b.pauseTrigger && a.resumeTrigger == b.resumeTrigger && a.language == b.language;
 		}
 
 		template<typename T>
@@ -277,9 +316,9 @@ namespace CEVEditor
 			return mine == base ? theirs : mine;
 		}
 
-		const SDescriptor::SLanguage* FindByName(const std::vector<SDescriptor::SLanguage>& list, const std::string& name)
+		const SDescriptor::SAudioTrack* FindByName(const std::vector<SDescriptor::SAudioTrack>& list, const std::string& name)
 		{
-			for (const SDescriptor::SLanguage& l : list)
+			for (const SDescriptor::SAudioTrack& l : list)
 			{
 				if (_stricmp(l.name.c_str(), name.c_str()) == 0)
 					return &l;
@@ -297,7 +336,8 @@ namespace CEVEditor
 		out.trigger = Pick(base.trigger, mine.trigger, theirs.trigger);
 		out.pauseTrigger = Pick(base.pauseTrigger, mine.pauseTrigger, theirs.pauseTrigger);
 		out.resumeTrigger = Pick(base.resumeTrigger, mine.resumeTrigger, theirs.resumeTrigger);
-		out.defaultLanguage = Pick(base.defaultLanguage, mine.defaultLanguage, theirs.defaultLanguage);
+		out.defaultTrack = Pick(base.defaultTrack, mine.defaultTrack, theirs.defaultTrack);
+		out.followGameLanguage = mine.followGameLanguage == base.followGameLanguage ? theirs.followGameLanguage : mine.followGameLanguage;
 		out.variantRule = Pick(base.variantRule, mine.variantRule, theirs.variantRule);
 
 		// variants / markers: whole list from whoever changed it (the user wins when both did)
@@ -312,38 +352,38 @@ namespace CEVEditor
 			out.markers = DescriptorsEqual(markerBase, markerMine) ? theirs.markers : mine.markers;
 		}
 
-		// languages by name
-		for (const SDescriptor::SLanguage& m : mine.languages)
+		// audio tracks by name
+		for (const SDescriptor::SAudioTrack& m : mine.audioTracks)
 		{
-			const SDescriptor::SLanguage* const b = FindByName(base.languages, m.name);
-			const SDescriptor::SLanguage* const t = FindByName(theirs.languages, m.name);
-			if (b != nullptr && SameLanguage(*b, m))
+			const SDescriptor::SAudioTrack* const b = FindByName(base.audioTracks, m.name);
+			const SDescriptor::SAudioTrack* const t = FindByName(theirs.audioTracks, m.name);
+			if (b != nullptr && SameTrack(*b, m))
 			{
 				if (t != nullptr)
-					out.languages.push_back(*t);   // untouched by the user: the file's version (a job may have filled the file / triggers)
+					out.audioTracks.push_back(*t);   // untouched by the user: the file's version (a job may have filled the file / triggers)
 				// else: the file dropped it and the user did not edit it
 			}
 			else
 			{
-				out.languages.push_back(m);        // edited or added by the user
+				out.audioTracks.push_back(m);        // edited or added by the user
 			}
 		}
-		for (const SDescriptor::SLanguage& b : base.languages)
+		for (const SDescriptor::SAudioTrack& b : base.audioTracks)
 		{
-			if (FindByName(mine.languages, b.name) != nullptr)
+			if (FindByName(mine.audioTracks, b.name) != nullptr)
 				continue;
 			// the user removed it: stays removed unless the file changed that entry meanwhile
-			const SDescriptor::SLanguage* const t = FindByName(theirs.languages, b.name);
-			if (t != nullptr && !SameLanguage(*t, b))
-				out.languages.push_back(*t);
+			const SDescriptor::SAudioTrack* const t = FindByName(theirs.audioTracks, b.name);
+			if (t != nullptr && !SameTrack(*t, b))
+				out.audioTracks.push_back(*t);
 		}
-		for (const SDescriptor::SLanguage& t : theirs.languages)
+		for (const SDescriptor::SAudioTrack& t : theirs.audioTracks)
 		{
-			if (FindByName(base.languages, t.name) == nullptr && FindByName(mine.languages, t.name) == nullptr)
-				out.languages.push_back(t);        // added by a job
+			if (FindByName(base.audioTracks, t.name) == nullptr && FindByName(mine.audioTracks, t.name) == nullptr)
+				out.audioTracks.push_back(t);        // added by a job
 		}
-		if (!out.defaultLanguage.empty() && out.FindLanguage(out.defaultLanguage) < 0)
-			out.defaultLanguage.clear();
+		if (!out.defaultTrack.empty() && out.FindAudioTrack(out.defaultTrack) < 0)
+			out.defaultTrack.clear();
 		return out;
 	}
 
@@ -381,8 +421,8 @@ namespace CEVEditor
 	{
 		int changes = 0;
 		changes += ReplacePrefix(desc.video, oldPrefix, newPrefix) ? 1 : 0;
-		for (SDescriptor::SLanguage& l : desc.languages)
-			changes += ReplacePrefix(l.file, oldPrefix, newPrefix) ? 1 : 0;
+		for (SDescriptor::SAudioTrack& a : desc.audioTracks)
+			changes += ReplacePrefix(a.file, oldPrefix, newPrefix) ? 1 : 0;
 		for (SDescriptor::SVariant& v : desc.variants)
 			changes += ReplacePrefix(v.file, oldPrefix, newPrefix) ? 1 : 0;
 		return changes;
@@ -415,10 +455,28 @@ namespace CEVEditor
 		}
 	}
 
-	void SDescriptor::SLanguage::Serialize(yasli::Archive& ar)
+	void SDescriptor::SAudioTrack::Serialize(yasli::Archive& ar)
 	{
 		SerializeString(ar, name, "name", "^Name");
-		ar(embedded, "embedded", "Embedded audio track");
+		ar.doc("Identifier the track is chosen by (SetAudioTrack, FlowGraph AudioTrack): 1 to 63 of A-Z a-z 0-9 _ . -");
+		Serialization::StringList sources;
+		sources.push_back("Embedded");
+		sources.push_back("File");
+		sources.push_back("Trigger");
+		Serialization::StringListValue sourceValue(sources, static_cast<int>(source));
+		ar(sourceValue, "source", "^Source");
+		if (ar.isInput() && sourceValue.index() >= 0 && sourceValue.index() <= 2)
+			source = static_cast<ESource>(sourceValue.index());
+		if (source == ESource::Trigger)
+		{
+			SerializeTrigger(ar, trigger, "trigger", "Start trigger");
+			SerializeTrigger(ar, pauseTrigger, "pauseTrigger", "Pause trigger");
+			SerializeTrigger(ar, resumeTrigger, "resumeTrigger", "Resume trigger");
+		}
+		SerializeString(ar, language, "language", "Language (optional)");
+		ar.doc("Optional tag, e.g. english. Only used when Follow game language is on.");
+		if (source != ESource::File)
+			return;
 		// the file is stored relative to the descriptor; the picker shows / takes a game path
 		const SDescriptorSerializeContext* const pContext = ar.context<SDescriptorSerializeContext>();
 		const std::string folder = pContext != nullptr ? pContext->folderRel : std::string();
@@ -439,9 +497,6 @@ namespace CEVEditor
 				p = p.substr(folder.size());
 			file = p;
 		}
-		SerializeTrigger(ar, trigger, "trigger", "Start trigger");
-		SerializeTrigger(ar, pauseTrigger, "pauseTrigger", "Pause trigger");
-		SerializeTrigger(ar, resumeTrigger, "resumeTrigger", "Resume trigger");
 	}
 
 	void SDescriptor::SMarker::Serialize(yasli::Archive& ar)
@@ -464,16 +519,31 @@ namespace CEVEditor
 		ar(Serialization::Range(avOffsetMs, -5000.0, 5000.0), "avOffsetMs", "A/V offset (ms)");
 		ar.doc("Positive: the picture is shown later than the sound by this much.");
 
-		Serialization::StringList names;
-		names.push_back("");
-		for (const SLanguage& l : languages)
-			names.push_back(l.name.c_str());
-		Serialization::StringListValue defaultValue(names, defaultLanguage.c_str());
-		ar(defaultValue, "defaultLanguage", "Default language");
-		if (ar.isInput())
-			defaultLanguage = defaultValue.c_str();
-
-		ar(languages, "languages", "Languages");
+		if (ar.openBlock("audio", "Audio tracks"))
+		{
+			if (ar.isEdit())
+			{
+				// the property tree: a list of the rows' names
+				Serialization::StringList names;
+				names.push_back("");
+				for (const SAudioTrack& a : audioTracks)
+					names.push_back(a.name.c_str());
+				Serialization::StringListValue defaultValue(names, defaultTrack.c_str());
+				ar(defaultValue, "defaultTrack", "Default track");
+				if (ar.isInput())
+					defaultTrack = defaultValue.c_str();
+			}
+			else
+			{
+				// other archives (JSON): a plain string - the rows are read after it, so the list would not know new names yet
+				SerializeString(ar, defaultTrack, "defaultTrack", "Default track");
+			}
+			ar.doc("Track played when nothing else chooses one; empty = the first track.");
+			ar(followGameLanguage, "followGameLanguage", "Follow game language");
+			ar.doc("When checked, the game's voice language (g_languageAudio, then g_language) is matched against each track's Language tag.");
+			ar(audioTracks, "audioTracks", "Tracks");
+			ar.closeBlock();
+		}
 		ar(markers, "markers", "Markers");
 	}
 }

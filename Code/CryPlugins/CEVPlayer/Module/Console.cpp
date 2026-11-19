@@ -21,7 +21,9 @@
 #include "Bindings/FlowTest.h"
 #include "Contract/ContractTest.h"
 #include "Contract/TexSource.h"
+#include "Bindings/ApiPlayers.h"
 #include "Player/PlayerManager.h"
+#include "Player/VideoPlayerImpl.h"
 
 namespace CEVPlayer
 {
@@ -487,11 +489,39 @@ namespace CEVPlayer
 			mEnv->pManager->ConsoleSeek(std::atof(args->GetArg(1)));
 		}
 
-		void CmdLang(IConsoleCmdArgs* args)
+		//! cev_audiotrack <handle|surface> [name]: a target that is a decimal number is a script player handle,
+		//! anything else a surface id. Without a name: reports the track in use and the listed ones.
+		void CmdAudioTrack(IConsoleCmdArgs* args)
 		{
 			if (args == nullptr || mEnv->pManager == nullptr)
 				return;
-			mEnv->pManager->ConsoleSetLanguage(args->GetArgCount() > 1 ? args->GetArg(1) : nullptr);
+			if (args->GetArgCount() < 2)
+			{
+				LogAlways("usage: cev_audiotrack <handle|surface> [name]");
+				return;
+			}
+			const char* const target = args->GetArg(1);
+			char* end = nullptr;
+			const long handle = std::strtol(target, &end, 10);
+			const bool isHandle = end != target && *end == '\0';
+			IVideoPlayer* const pPlayer = isHandle
+				? (mEnv->pApi != nullptr ? mEnv->pApi->Find(static_cast<int>(handle), false) : nullptr)
+				: mEnv->pManager->FindPlayerBySurface(target);
+			if (pPlayer == nullptr)
+			{
+				LogAlways("cev_audiotrack: no player with %s <%s>", isHandle ? "handle" : "surface id", target);
+				return;
+			}
+			const CVideoPlayerImpl* const pImpl = static_cast<const CVideoPlayerImpl*>(pPlayer); // every player is one
+			if (args->GetArgCount() < 3)
+			{
+				LogAlways("cev_audiotrack: <%s> plays audio track <%s> of %d", target, pPlayer->GetAudioTrack(), pImpl->GetAudioTrackCount());
+				for (int i = 0; i < pImpl->GetAudioTrackCount(); ++i)
+					LogAlways("cev_audiotrack:   %d <%s> language <%s>", i, pImpl->GetAudioTrackName(i), pImpl->GetAudioTrackLanguage(i));
+				return;
+			}
+			LogAlways("cev_audiotrack: <%s> -> <%s> (was <%s>)", target, args->GetArg(2), pPlayer->GetAudioTrack());
+			pPlayer->SetAudioTrack(args->GetArg(2));
 		}
 
 		void CmdApiTest(IConsoleCmdArgs* args)
@@ -583,7 +613,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_pause", CmdPause, VF_NULL, "Pause the video started by cev_play");
 		REGISTER_COMMAND("cev_resume", CmdResume, VF_NULL, "Resume the video started by cev_play");
 		REGISTER_COMMAND("cev_seek", CmdSeek, VF_NULL, "Seek the video started by cev_play. cev_seek <seconds>");
-		REGISTER_COMMAND("cev_lang", CmdLang, VF_NULL, "Select the audio language of the video started by cev_play. cev_lang <name> (without a name: show the current one)");
+		REGISTER_COMMAND("cev_audiotrack", CmdAudioTrack, VF_NULL, "Select the audio track of a player by its .cevvideo track name. cev_audiotrack <handle|surface> [name] (handle = script player handle, otherwise a surface id; without a name: show the current and the listed tracks)");
 		REGISTER_COMMAND("cev_apitest", CmdApiTest, VF_NULL, "Self test of the script API table: creates a player through the table functions, plays [path] (default Videos/vp9_alpha.webm), checks state / time after 2 s, stops and destroys it, logs PASS / FAIL");
 		REGISTER_COMMAND("cev_list", CmdList, VF_NULL, "List all CEVPlayer players with state, time and upload count");
 		REGISTER_COMMAND("cev_play_surface", CmdPlaySurface, VF_NULL, "Play a video into a surface player (texture $cev:<id>). cev_play_surface <id> <path> [loop]; without a path the surface player is destroyed");
@@ -625,7 +655,7 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 

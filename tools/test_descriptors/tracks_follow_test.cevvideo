@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A1 test: tracks_test.cevvideo with followGameLanguage="1": without SetAudioTrack the track whose language tag
+     matches g_languageAudio (then g_language) is chosen, otherwise the default. Also a missing external file
+     (falls back to the embedded audio) and a trigger-only track (the trigger does not exist in the test audio data:
+     warning, video clock). -->
+<CEVVideo version="1" route="mixed" video="opus_preskip.webm" avOffsetMs="0">
+  <AudioTracks default="music" followGameLanguage="1">
+    <Track name="music" file="audio_music.webm"/>
+    <Track name="commentary" file="audio_commentary.webm" language="japanese"/>
+    <Track name="english" embedded="1" language="english"/>
+    <Track name="missing" file="missing_fr.webm" language="french"/>
+    <Track name="cue_only" trigger="Play_Intro_DE" language="german"/>
+  </AudioTracks>
+</CEVVideo>

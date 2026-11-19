@@ -1,5 +1,5 @@
 // Right column of the video editor: stream information, file status (existence, source staleness), the descriptor (route, AV
-// offset, languages, markers) in the engine's property tree, the FFmpeg status and the operation buttons with the job list.
+// offset, audio tracks, markers) in the engine's property tree, the FFmpeg status and the operation buttons with the job list.
 // What the engine already provides is used from there (E1): Reimport is the asset's own (CAsset::Reimport), the FFmpeg path
 // is an editor preference, the folder is opened from the Asset Browser, results go to the notification center.
 #pragma once
@@ -70,7 +70,7 @@ namespace CEVEditor
 		QPushButton* m_pBtnReimport = nullptr;
 		QPropertyTreeLegacy* m_pTree = nullptr;
 		SDescriptor m_edit;                         //!< what the property tree edits (copy of the editor's descriptor)
-		SDescriptorSerializeContext m_context;      //!< folder of the descriptor, for the language file picker
+		SDescriptorSerializeContext m_context;      //!< folder of the descriptor, for the audio track file picker
 		std::unique_ptr<yasli::Context> m_pArchiveContext;
 		QLabel* m_pAce = nullptr;
 		QListWidget* m_pJobs = nullptr;

@@ -63,8 +63,12 @@ namespace CEVPlayer
 		void UnbindMaterial(IMaterial* pMaterial) override;
 		void AddListener(IVideoPlayerListener* pListener) override;
 		void RemoveListener(IVideoPlayerListener* pListener) override;
-		void SetLanguage(const char* name) override;
-		const char* GetLanguage() const override { return m_language.c_str(); }
+		void SetAudioTrack(const char* name) override;
+		const char* GetAudioTrack() const override { return m_audioTrack.c_str(); }
+		//! Audio tracks of the loaded descriptor (A1; 0 without a descriptor). Out of range: "".
+		int GetAudioTrackCount() const;
+		const char* GetAudioTrackName(int index) const;
+		const char* GetAudioTrackLanguage(int index) const;
 		void SetVariant(int variant) override;
 		int GetVariant() const override { return m_variantIndex < 0 ? 0 : m_variantIndex; }
 		const char* GetSurfaceId() const override { return m_surfaceId.c_str(); }
@@ -162,13 +166,13 @@ namespace CEVPlayer
 			double time = 0.0;                 // Marker: media time
 			char name[kMarkerNameLength] = {}; // Marker: name (truncated)
 		};
-		//! What Load() decided for one media: files, language and audio route.
+		//! What Load() decided for one media: files, audio track and audio route.
 		struct SPlan
 		{
 			std::string videoPath;
 			std::string externalPath; // external audio file (mixed route), empty = none
-			std::string language;
-			bool cue = false;         // route cue / trigger language: the audio is a CryAudio trigger
+			std::string audioTrack;
+			bool cue = false;         // route cue / trigger-only track: the audio is a CryAudio trigger
 			std::string trigger;      // cue: start trigger (empty = nothing to play)
 			std::string pauseTrigger;
 			std::string resumeTrigger;
@@ -190,10 +194,10 @@ namespace CEVPlayer
 		void EmitMarker(const SVideoDescriptor::SMarker& marker);
 		bool LoadInternal(const char* path, bool reload);
 		bool ChoosePlan(const char* path, SPlan& plan);
-		void ResolveAudio(SPlan& plan, bool report) const;
+		void ResolveAudio(SPlan& plan, bool report);
 		std::string PickVariantPath();
 		void BuildCores(const SPlan& plan);
-		void ReloadForLanguage();
+		void ReloadInPlace();
 		void UpdateMarkers(bool looped);
 		void ResyncMarkers();
 		// ---- the video core and the optional external audio core always move together
@@ -238,7 +242,7 @@ namespace CEVPlayer
 		std::unique_ptr<cev::AudioClock> m_audioClock; // null: the cores run on their InternalClock
 		std::unique_ptr<CCueClock> m_cueClock;         // cue route: transport of the CryAudio trigger (instead of m_audioClock)
 		std::unique_ptr<cev::PlayerCore> m_core;       // video (and the embedded audio track)
-		std::unique_ptr<cev::PlayerCore> m_audioCore;  // external audio file of a language, audio only
+		std::unique_ptr<cev::PlayerCore> m_audioCore;  // external audio file of a track, audio only
 		uint32_t m_id;
 		std::string m_textureName;
 		bool m_autoName = true;  // generated "$cev_video_<w>x<h>_<k>" (reusable, see CPlayerManager::MakeAutoTextureName)
@@ -265,15 +269,16 @@ namespace CEVPlayer
 		cev::Status m_loadStatus = cev::Status::Ok;
 		bool m_hasAudio = false;       // audible audio exists (embedded track or external file)
 
-		// descriptor / language / variant
+		// descriptor / audio track / variant
 		SVideoDescriptor m_desc;
 		bool m_descValid = false;
 		SPlan m_plan;
-		std::string m_requestedLanguage; // SetLanguage(), empty = default choice
-		std::string m_language;          // language in use
+		std::string m_requestedTrack;    // SetAudioTrack(), empty = automatic choice
+		std::string m_audioTrack;        // audio track in use
+		std::string m_unknownTrackWarned; // requested name already warned about as not listed (warn once)
 		int m_variantIndex = -1;         // -1 = main video
 		int m_variantRequest = kVariantFollowCvar; // SetVariant()
-		bool m_reloading = false;        // Load() in progress because of a language change
+		bool m_reloading = false;        // Load() in progress because of an audio track / variant / decoder change
 		double m_reloadTime = 0.0;
 		ERestore m_reloadRestore = ERestore::None;
 		bool m_silentWarned = false;

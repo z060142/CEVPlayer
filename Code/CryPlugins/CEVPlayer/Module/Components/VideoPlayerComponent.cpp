@@ -293,7 +293,7 @@ namespace CEVPlayer
 		desc.AddMember(&CVideoPlayerComponent::m_material, 'mtl_', "material", "Material", "Output Material: material name (empty = the material of this entity)", Schematyc::CSharedString());
 		desc.AddMember(&CVideoPlayerComponent::m_slot, 'slot', "slot", "Slot", "Output Material: texture slot of the material (0 = diffuse)", 0);
 		desc.AddMember(&CVideoPlayerComponent::m_fit, 'fit_', "fit", "Screen Fit", "Screen mode: how the picture is placed", EVideoFit::Letterbox);
-		desc.AddMember(&CVideoPlayerComponent::m_language, 'lang', "language", "Language", "Audio language of the .cevvideo descriptor (empty = default choice)", Schematyc::CSharedString());
+		desc.AddMember(&CVideoPlayerComponent::m_audioTrack, 'atrk', "audiotrack", "Audio Track", "Audio track name of the .cevvideo descriptor (empty = automatic choice)", Schematyc::CSharedString());
 		desc.AddMember(&CVideoPlayerComponent::m_loop, 'loop', "loop", "Loop", "Restart at 0 when the end is reached", false);
 		desc.AddMember(&CVideoPlayerComponent::m_autoplay, 'auto', "autoplay", "Autoplay", "Load and play when the game starts", false);
 		desc.AddMember(&CVideoPlayerComponent::m_skippable, 'skip', "skippable", "Skippable", "A key / mouse / gamepad button press stops the video and sends Skipped", false);
@@ -379,7 +379,7 @@ namespace CEVPlayer
 	{
 		using namespace Api;
 		const SValue loop[1] = { SValue::FromBool(m_loop) };
-		const SValue language[1] = { SValue::FromString(m_language.c_str()) };
+		const SValue audioTrack[1] = { SValue::FromString(m_audioTrack.c_str()) };
 		const SValue skippable[1] = { SValue::FromBool(m_skippable) };
 		const SValue decode[1] = { SValue::FromInt(static_cast<int>(m_decode)) };
 		const SValue pauseHidden[1] = { SValue::FromBool(m_pauseDecodeWhenHidden) };
@@ -390,7 +390,7 @@ namespace CEVPlayer
 		};
 		Call(*FindByName("SetDecode"), m_handle, decode, 1, nullptr);
 		Call(*FindByName("SetLoop"), m_handle, loop, 1, nullptr);
-		Call(*FindByName("SetLanguage"), m_handle, language, 1, nullptr);
+		Call(*FindByName("SetAudioTrack"), m_handle, audioTrack, 1, nullptr);
 		Call(*FindByName("SetSkippable"), m_handle, skippable, 1, nullptr);
 		Call(*FindByName("SetPauseDecodeWhenHidden"), m_handle, pauseHidden, 1, nullptr);
 		Call(*FindByName("SetOutput"), m_handle, output, 5, nullptr, EntityMaterial());

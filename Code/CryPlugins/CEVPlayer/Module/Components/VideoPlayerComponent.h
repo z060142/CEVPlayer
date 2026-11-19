@@ -65,7 +65,7 @@ namespace CEVPlayer
 		Schematyc::CSharedString m_material;   // Material: material name (empty = this entity's material)
 		int32                    m_slot = 0;   // Material: texture slot (0 = diffuse)
 		EVideoFit                m_fit = EVideoFit::Letterbox; // Screen
-		Schematyc::CSharedString m_language;
+		Schematyc::CSharedString m_audioTrack;
 		bool                     m_loop = false;
 		bool                     m_autoplay = false;
 		bool                     m_skippable = false;

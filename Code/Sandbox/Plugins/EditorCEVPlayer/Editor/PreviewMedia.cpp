@@ -110,21 +110,26 @@ namespace CEVEditor
 		out.trigger = desc.trigger;
 		out.pauseTrigger = desc.pauseTrigger;
 		out.resumeTrigger = desc.resumeTrigger;
-		out.defaultLanguage = desc.defaultLanguage;
-		for (const SDescriptor::SLanguage& l : desc.languages)
+		out.defaultTrack = desc.defaultTrack;
+		out.followGameLanguage = desc.followGameLanguage;
+		for (const SDescriptor::SAudioTrack& a : desc.audioTracks)
 		{
-			if (l.name.empty() || cev::FindDescriptorLanguage(out, l.name.c_str()) >= 0)
+			// what the module reads back from the XML DescriptorToXml writes for this row
+			cev::VideoDescriptor::SAudioTrack track;
+			track.name = a.name;
+			track.language = a.language;
+			track.embedded = a.source == SDescriptor::SAudioTrack::ESource::Embedded;
+			if (a.source == SDescriptor::SAudioTrack::ESource::File)
+				track.file = ResolveSibling(descriptorRel, a.file);
+			if (a.source == SDescriptor::SAudioTrack::ESource::Trigger)
+			{
+				track.trigger = a.trigger;
+				track.pauseTrigger = a.pauseTrigger;
+				track.resumeTrigger = a.resumeTrigger;
+			}
+			if (!track.embedded && track.file.empty() && track.trigger.empty() && !(out.route == cev::VideoRoute::Cue && !out.trigger.empty()))
 				continue;
-			cev::VideoDescriptor::SLanguage lang;
-			lang.name = l.name;
-			lang.embedded = l.embedded;
-			lang.file = ResolveSibling(descriptorRel, l.file);
-			lang.trigger = l.trigger;
-			lang.pauseTrigger = l.pauseTrigger;
-			lang.resumeTrigger = l.resumeTrigger;
-			if (!lang.embedded && lang.file.empty() && lang.trigger.empty() && !(out.route == cev::VideoRoute::Cue && !out.trigger.empty()))
-				continue;
-			out.languages.push_back(lang);
+			out.audioTracks.push_back(track);
 		}
 		for (const SDescriptor::SVariant& v : desc.variants)
 		{
@@ -146,8 +151,8 @@ namespace CEVEditor
 			out.markers.push_back(marker);
 		}
 		cev::SortDescriptorMarkers(out);
-		if (!out.defaultLanguage.empty() && cev::FindDescriptorLanguage(out, out.defaultLanguage.c_str()) < 0)
-			out.defaultLanguage.clear();
+		std::vector<cev::DescriptorTrackProblem> problems; // the module logs them; the preview only applies them
+		cev::SanitizeDescriptorAudioTracks(out, problems);
 		return out;
 	}
 }

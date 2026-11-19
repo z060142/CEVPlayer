@@ -61,11 +61,11 @@ namespace CEVEditor
 		}
 	}
 
-	std::string AceTriggerName(const char* kind, const std::string& assetName, const std::string& language)
+	std::string AceTriggerName(const char* kind, const std::string& assetName, const std::string& track)
 	{
 		std::string name = std::string(kind) + "_" + assetName;
-		if (!language.empty())
-			name += "_" + language;
+		if (!track.empty())
+			name += "_" + track;
 		return name;
 	}
 
@@ -84,7 +84,7 @@ namespace CEVEditor
 			const char* const types[3] = { "start", "pause", "resume" };
 			for (int i = 0; i < 3; ++i)
 			{
-				xml += "\t\t<Trigger name=\"" + XmlEscape(AceTriggerName(kinds[i], assetName, sound.language)) + "\">\n";
+				xml += "\t\t<Trigger name=\"" + XmlEscape(AceTriggerName(kinds[i], assetName, sound.track)) + "\">\n";
 				xml += "\t\t\t<Event name=\"" + file + "\" path=\"" + XmlEscape(path) + "\" type=\"" + types[i] + "\"";
 				if (i == 0)
 					xml += " volume=\"0\" loop_count=\"1\"";
@@ -131,7 +131,7 @@ namespace CEVEditor
 			}
 			for (const char* kind : { "Play", "Pause", "Resume" })
 			{
-				const std::string trigger = AceTriggerName(kind, assetName, sound.language);
+				const std::string trigger = AceTriggerName(kind, assetName, sound.track);
 				if (TriggerUsedElsewhere(trigger, libraryPath))
 				{
 					result.error = "the trigger name " + trigger + " is already used by another ACE library";
@@ -161,10 +161,10 @@ namespace CEVEditor
 			result.copiedRel.push_back(std::string(kAssetsDir) + assetName + "/" + fileName);
 
 			SAceTriggers t;
-			t.language = sound.language;
-			t.play = AceTriggerName("Play", assetName, sound.language);
-			t.pause = AceTriggerName("Pause", assetName, sound.language);
-			t.resume = AceTriggerName("Resume", assetName, sound.language);
+			t.track = sound.track;
+			t.play = AceTriggerName("Play", assetName, sound.track);
+			t.pause = AceTriggerName("Pause", assetName, sound.track);
+			t.resume = AceTriggerName("Resume", assetName, sound.track);
 			result.triggers.push_back(t);
 		}
 

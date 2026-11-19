@@ -101,7 +101,7 @@ namespace
 	CQuitListener* g_pQuitListener = nullptr;
 
 	// Options of the import commands. Scripts and ExecuteString treat `a=b` as a cvar assignment, so every option also exists as
-	// `key:value`:  name:<asset> lang:<language> crf:<0..63> height:<px> variants:<h,h,...> fps:<n>   and the words
+	// `key:value`:  name:<asset> track:<audio track name> crf:<0..63> height:<px> variants:<h,h,...> fps:<n>   and the words
 	// wav ogg split strip cue mixed overwrite recompress. crf / height imply recompress (re-encode of a WebM).
 	bool ParseImportOptions(IConsoleCmdArgs* pArgs, int first, CEVEditor::SImportOptions& options, const char* szCommand, bool* pSequences = nullptr)
 	{
@@ -114,7 +114,7 @@ namespace
 			const std::string key = sep == std::string::npos ? arg : arg.substr(0, sep);
 			const std::string value = sep == std::string::npos ? std::string() : arg.substr(sep + 1);
 			if (sep != std::string::npos && key == "name") options.assetName = value;
-			else if (sep != std::string::npos && key == "lang") options.language = value;
+			else if (sep != std::string::npos && key == "track") options.audioTrack = value;
 			else if (sep != std::string::npos && key == "crf")
 			{
 				options.crf = std::atoi(value.c_str());
@@ -161,7 +161,7 @@ namespace
 		using namespace CEVEditor;
 		if (pArgs->GetArgCount() < 3)
 		{
-			CryLogAlways("[CEVEditor] usage: cev_editor_import <absSrcPath|absPngFolder> <assetFolderRelativeToAssets> [name:<asset>] [lang:<language>] [wav] [ogg] [split|strip] [cue|mixed] [overwrite] [crf:N] [height:PX] [variants:540,360] [fps:N] [recompress]");
+			CryLogAlways("[CEVEditor] usage: cev_editor_import <absSrcPath|absPngFolder> <assetFolderRelativeToAssets> [name:<asset>] [track:<audio track>] [wav] [ogg] [split|strip] [cue|mixed] [overwrite] [crf:N] [height:PX] [variants:540,360] [fps:N] [recompress]");
 			return;
 		}
 		const std::string source = pArgs->GetArg(1);
@@ -617,7 +617,7 @@ namespace
 			CJobRunner::Get() != nullptr ? CJobRunner::Get()->RunningCount() : -1, CImportQueue::Get() != nullptr ? CImportQueue::Get()->Pending() : -1, GetOfflineOps().Name());
 	}
 
-	// ---- cev_editor_preview_test [png:<path>] [pause:<seconds>] [close] ----
+	// ---- cev_editor_preview_test [png:<path>] [pause:<seconds>] [track:<name>] [close] ----
 	// The preview of the open video editor: loads (waits for ready), plays 1 s (the frame serial must advance, the audio device
 	// must pull PCM unless there is no device / no audio), pauses (no paintEvent during the pause), optionally saves the picture
 	// widget as PNG, optionally closes the editor windows and checks that no preview timer and no decode thread is left.
@@ -628,6 +628,11 @@ namespace
 		std::string png;
 		double pauseSeconds = 5.0;
 		bool close = false;
+		std::string track;       // A1: switch to this audio track while playing (clock continuous, sound still pulled)
+		bool trackDone = false;
+		double trackTime0 = 0.0;
+		double trackWall0 = 0.0;
+		uint64_t trackCallbacks0 = 0;
 		int checks = 0;
 		int failed = 0;
 		int waitedMs = 0;
@@ -686,6 +691,49 @@ namespace
 		QTimer::singleShot(1500, [t]() { PreviewTestAfterClose(t); });
 	}
 
+	void PreviewTestAfterPlay(std::shared_ptr<SPreviewTest> t);
+
+	double PreviewTestWall()
+	{
+		return gEnv != nullptr && gEnv->pTimer != nullptr ? gEnv->pTimer->GetAsyncCurTime() : 0.0;
+	}
+
+	//! A1: 1 s after the switch: the new track is in use, the clock went on from where it was, the device still pulls PCM.
+	void PreviewTestAfterTrackSwitch(std::shared_ptr<SPreviewTest> t)
+	{
+		using namespace CEVEditor;
+		if (!t->panel)
+		{
+			t->Check(false, "panel still exists after the audio track switch");
+			PreviewTestEnd(t);
+			return;
+		}
+		CPreviewSession& session = t->panel->Session();
+		if (!session.IsReady() && session.IsLoading() && t->waitedMs < 15000)
+		{
+			t->waitedMs += 100;
+			QTimer::singleShot(100, [t]() { PreviewTestAfterTrackSwitch(t); });
+			return;
+		}
+		t->waitedMs = 0;
+		const double elapsed = PreviewTestWall() - t->trackWall0;
+		const double time = session.Time();
+		t->Check(_stricmp(session.AudioTrack().c_str(), t->track.c_str()) == 0, "audio track switched", session.AudioTrack() + session.Notes());
+		t->Check(session.State() == cev::PlayerState::Playing, "still playing after the switch", "state " + std::to_string(static_cast<int>(session.State())));
+		// continuous: from the time at the switch onwards, not back at 0 (loop off; the clip is longer than the test)
+		t->Check(time > t->trackTime0 + 0.2 && time < t->trackTime0 + elapsed + 0.5, "clock continuous across the switch",
+			std::to_string(t->trackTime0) + " s -> " + std::to_string(time) + " s in " + std::to_string(elapsed) + " s");
+		const uint64_t callbacks = CPreviewAudioSource::TotalCallbacks() - t->trackCallbacks0;
+		if (!session.HasAudio())
+			t->Check(false, "audio after the switch", "the media has no audio");
+		else if (!session.AudioDeviceRunning())
+			t->Check(true, "audio after the switch", "no audio device (" + session.AudioDeviceError() + "): playing silently");
+		else
+			t->Check(callbacks > 0, "audio device still pulls PCM after the switch", std::to_string(callbacks) + " callbacks");
+		t->trackDone = true;
+		PreviewTestAfterPlay(t);
+	}
+
 	void PreviewTestAfterPlay(std::shared_ptr<SPreviewTest> t)
 	{
 		using namespace CEVEditor;
@@ -703,8 +751,21 @@ namespace
 			t->Check(true, "audio", "the media has no audio");
 		else if (!session.AudioDeviceRunning())
 			t->Check(true, "audio", "no audio device (" + session.AudioDeviceError() + "): playing silently");
-		else
+		else if (!t->trackDone)
 			t->Check(callbacks > 0, "audio device pulls PCM", std::to_string(callbacks) + " callbacks in 1 s");
+		if (!t->track.empty() && !t->trackDone)
+		{
+			const std::vector<std::string>& names = session.AudioTrackNames();
+			const bool listed = std::any_of(names.begin(), names.end(), [t](const std::string& n) { return _stricmp(n.c_str(), t->track.c_str()) == 0; });
+			t->Check(listed, "the Audio track list offers the requested track", t->track);
+			t->trackTime0 = session.Time();
+			t->trackWall0 = PreviewTestWall();
+			t->trackCallbacks0 = CPreviewAudioSource::TotalCallbacks();
+			const bool selected = t->panel->SelectAudioTrack(t->track);
+			t->Check(selected, "audio track selected in the preview's Audio track list", t->track);
+			QTimer::singleShot(1000, [t]() { PreviewTestAfterTrackSwitch(t); });
+			return;
+		}
 		t->Check(t->panel->TimerActive(), "preview timer runs while visible");
 		t->panel->PlayPause(); // pause
 		t->Check(session.State() == cev::PlayerState::Paused, "paused", "state " + std::to_string(static_cast<int>(session.State())));
@@ -772,6 +833,8 @@ namespace
 				t->pauseSeconds = std::max(0.5, std::atof(arg.c_str() + 6));
 			else if (arg == "close")
 				t->close = true;
+			else if (arg.compare(0, 6, "track:") == 0 || arg.compare(0, 6, "track=") == 0)
+				t->track = arg.substr(6);
 			else if (!t->png.empty())
 				t->png += " " + arg; // a path with spaces arrives as several arguments
 		}
@@ -1011,13 +1074,60 @@ namespace
 		marker.name = "e1_marker";
 		marker.time = 1.25;
 		d.markers.push_back(marker);
-		const bool hasLanguage = !d.languages.empty();
-		if (hasLanguage)
-			d.languages.front().trigger = t->trigger;
+		// A1: audio tracks - add three (File / Trigger / Embedded), change the first one, then remove one in a second edit
+		const size_t tracksBefore = d.audioTracks.size();
+		const std::string firstName = tracksBefore > 0 ? d.audioTracks.front().name : std::string();
+		if (tracksBefore > 0)
+			d.audioTracks.front().language = "english";
+		{
+			SDescriptor::SAudioTrack music;
+			music.name = "a1_music";
+			music.source = SDescriptor::SAudioTrack::ESource::File;
+			music.file = "a1_music.webm";
+			SDescriptor::SAudioTrack commentary;
+			commentary.name = "a1_commentary";
+			commentary.source = SDescriptor::SAudioTrack::ESource::Trigger;
+			commentary.trigger = t->trigger;
+			commentary.language = "japanese";
+			SDescriptor::SAudioTrack removed;
+			removed.name = "a1_removed";
+			removed.source = SDescriptor::SAudioTrack::ESource::Embedded;
+			d.audioTracks.push_back(music);
+			d.audioTracks.push_back(commentary);
+			d.audioTracks.push_back(removed);
+		}
+		d.defaultTrack = "a1_music";
+		d.followGameLanguage = true;
 		pAsset->SetModified(false);
 		std::string error;
 		const bool applied = pPanel->ApplyThroughSerializationForTest(d, error);
 		t->Check(applied, "edit applied through SDescriptor::Serialize (JSON archive -> tree object -> tree change handler)", error);
+		{
+			SDescriptor second = pPanel->EditedDescriptor();
+			const int index = second.FindAudioTrack("a1_removed");
+			t->Check(index >= 0, "track a1_removed added through the serialization path");
+			if (index >= 0)
+				second.audioTracks.erase(second.audioTracks.begin() + index);
+			std::string error2;
+			t->Check(pPanel->ApplyThroughSerializationForTest(second, error2), "second edit (remove a1_removed) applied through SDescriptor::Serialize", error2);
+		}
+		auto checkTracks = [t, tracksBefore, firstName](const SDescriptor& s, const char* where)
+		{
+			const int music = s.FindAudioTrack("a1_music");
+			const int commentary = s.FindAudioTrack("a1_commentary");
+			std::string names;
+			for (const SDescriptor::SAudioTrack& a : s.audioTracks)
+				names += (names.empty() ? "" : ",") + a.name + "[" + a.language + "]";
+			t->Check(s.audioTracks.size() == tracksBefore + 2 && s.FindAudioTrack("a1_removed") < 0 && music >= 0 && commentary >= 0,
+				(std::string("audio tracks added / removed ") + where).c_str(), names);
+			t->Check(music >= 0 && s.audioTracks[music].source == SDescriptor::SAudioTrack::ESource::File && s.audioTracks[music].file == "a1_music.webm" && s.audioTracks[music].language.empty(),
+				(std::string("File track a1_music (no language) ") + where).c_str());
+			t->Check(commentary >= 0 && s.audioTracks[commentary].source == SDescriptor::SAudioTrack::ESource::Trigger && s.audioTracks[commentary].trigger == t->trigger
+				&& s.audioTracks[commentary].language == "japanese", (std::string("Trigger track a1_commentary took an existing trigger name and the language tag ") + where).c_str(), t->trigger);
+			if (tracksBefore > 0)
+				t->Check(s.audioTracks.front().name == firstName && s.audioTracks.front().language == "english", (std::string("first track changed (language tag english) ") + where).c_str(), firstName);
+			t->Check(s.defaultTrack == "a1_music" && s.followGameLanguage, (std::string("Default track a1_music and Follow game language ") + where).c_str(), s.defaultTrack);
+		};
 		const SDescriptor& state = pEditor->State().descriptor;
 		t->Check(pAsset->IsModified(), "asset is modified after the edit");
 		t->Check(state.avOffsetMs == 123.5, "A/V offset in the editor", std::to_string(state.avOffsetMs));
@@ -1025,10 +1135,7 @@ namespace
 		t->Check(markerInState, "marker in the editor");
 		const SStaticResourceSelectorEntry* const pSelector = GetIEditor()->GetResourceSelectorHost() != nullptr ? GetIEditor()->GetResourceSelectorHost()->GetSelector("AudioTrigger") : nullptr;
 		t->Check(pSelector != nullptr, "the AudioTrigger resource selector is registered (Audio Controls Editor)");
-		if (hasLanguage)
-			t->Check(!state.languages.empty() && state.languages.front().trigger == t->trigger, "language trigger field took an existing trigger name", t->trigger);
-		else
-			t->Check(true, "language trigger", "the asset has no language");
+		checkTracks(state, "in the editor");
 
 		// ---- save, then the file on disk
 		const bool saved = pEditor->OnSave();
@@ -1037,8 +1144,13 @@ namespace
 		const bool read = LoadDescriptor(AssetsAbsolute(DescriptorRel(*pAsset)), disk, error);
 		t->Check(read && disk.avOffsetMs == 123.5, "A/V offset on disk after reloading", read ? std::to_string(disk.avOffsetMs) : error);
 		t->Check(read && std::any_of(disk.markers.begin(), disk.markers.end(), [](const SDescriptor::SMarker& m) { return m.name == "e1_marker" && std::fabs(m.time - 1.25) < 1e-6; }), "marker on disk after reloading");
-		if (hasLanguage)
-			t->Check(read && !disk.languages.empty() && disk.languages.front().trigger == t->trigger, "trigger on disk after reloading");
+		if (read)
+			checkTracks(disk, "on disk after reloading");
+		else
+			t->Check(false, "descriptor read back", error);
+		const std::string xml = ReadTextFile(AssetsAbsolute(DescriptorRel(*pAsset)));
+		t->Check(xml.find("<AudioTracks default=\"a1_music\" followGameLanguage=\"1\">") != std::string::npos && xml.find("<Languages") == std::string::npos,
+			"the file has <AudioTracks default= followGameLanguage=\"1\"> and no <Languages>");
 		pEditor->RefreshAssetState();
 		t->Check(pPanel->EditedDescriptor().avOffsetMs == 123.5, "property tree shows the saved value after the reload");
 
@@ -1271,7 +1383,7 @@ CEditorCEVPlayerPlugin::CEditorCEVPlayerPlugin()
 	CEVEditor::SetOfflineOps(CEVEditor::GetRealOfflineOps());
 	if (gEnv != nullptr && gEnv->pConsole != nullptr)
 	{
-		REGISTER_COMMAND("cev_editor_import", CmdImport, VF_NULL, "cev_editor_import <absSrcPath|absPngFolder> <assetFolder> [name:..] [lang:..] [wav] [ogg] [split|strip] [cue|mixed] [overwrite] [crf:N] [height:PX] [variants:540,360] [fps:N] [recompress]: import a video (webm mp4 mov mkv avi) or a folder of PNG files as a video asset without UI");
+		REGISTER_COMMAND("cev_editor_import", CmdImport, VF_NULL, "cev_editor_import <absSrcPath|absPngFolder> <assetFolder> [name:..] [track:..] [wav] [ogg] [split|strip] [cue|mixed] [overwrite] [crf:N] [height:PX] [variants:540,360] [fps:N] [recompress]: import a video (webm mp4 mov mkv avi) or a folder of PNG files as a video asset without UI");
 		REGISTER_COMMAND("cev_editor_import_batch", CmdImportBatch, VF_NULL, "cev_editor_import_batch <absFolderOrListFile> <assetFolder> [options] [sequences]: import many files on one queue (one ffmpeg at a time) with a summary");
 		REGISTER_COMMAND("cev_editor_import_cancel", CmdImportCancel, VF_NULL, "cev_editor_import_cancel: cancel the running import and drop the queued ones");
 		REGISTER_COMMAND("cev_editor_ffmpeg_status", CmdFfmpegStatus, VF_NULL, "cev_editor_ffmpeg_status [redetect]: log the ffmpeg in use (path, version, missing features)");
@@ -1283,7 +1395,7 @@ CEditorCEVPlayerPlugin::CEditorCEVPlayerPlugin()
 		REGISTER_COMMAND("cev_editor_open", CmdOpen, VF_NULL, "cev_editor_open [<asset.cevvideo>]: open the CEV Video Editor (on that asset)");
 		REGISTER_COMMAND("cev_editor_close", CmdClose, VF_NULL, "cev_editor_close: close the CEV Video Editor windows");
 		REGISTER_COMMAND("cev_editor_status", CmdStatus, VF_NULL, "cev_editor_status: log preview / job counters of the CEV editor");
-		REGISTER_COMMAND("cev_editor_preview_test", CmdPreviewTest, VF_NULL, "cev_editor_preview_test [png:<path>] [pause:<s>] [close]: self test of the preview of the open video editor (load, play 1 s, pause, no repaint while paused, PNG, close)");
+		REGISTER_COMMAND("cev_editor_preview_test", CmdPreviewTest, VF_NULL, "cev_editor_preview_test [png:<path>] [pause:<s>] [track:<name>] [close]: self test of the preview of the open video editor (load, play 1 s, optionally switch the audio track while playing, pause, no repaint while paused, PNG, close)");
 		REGISTER_COMMAND("cev_editor_info_test", CmdInfoTest, VF_NULL, "cev_editor_info_test [legacy:<asset.cevvideo>] [alt:<abs webm>] [trigger:<name>] [ffmpeg:<path>]: self test of the info panel on the open (scratch) asset: property tree edit, save, Reimport, source check, FFmpeg preference");
 		REGISTER_COMMAND("cev_editor_info_grab", CmdInfoGrab, VF_NULL, "cev_editor_info_grab png:<path>: save the info panel of the open video editor as PNG (visible part and whole content)");
 		REGISTER_COMMAND("cev_editor_preview_dock", CmdPreviewDock, VF_NULL, "cev_editor_preview_dock <float|dock|tab_other|tab_preview>: move the preview panel through the docking manager (test)");

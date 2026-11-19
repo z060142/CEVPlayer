@@ -1,11 +1,11 @@
 // DescriptorPlan: engine independent part of a video descriptor ("<name>.cevvideo"): the data model and the
 // decisions taken from it when media is loaded - which video file (main video or a variant), which audio source
-// (embedded track, external language file, or a cue trigger), the A/V offset and the markers.
+// (embedded track, external audio file, or a cue trigger), the A/V offset and the markers.
 //
 // Shared by the runtime module (Module/Player: it reads the XML through the engine and resolves file names with
 // CryPak) and the Sandbox preview (it reads the descriptor with its own reader). Reading the file, resolving names
-// and logging stay with the caller: every function here only takes the parsed data, the caller's language / variant
-// requests and a file existence callback, and reports what it decided (including what it had to skip) so that the
+// and logging stay with the caller: every function here only takes the parsed data, the caller's audio track /
+// variant requests and a file existence callback, and reports what it decided (including what it had to skip) so that the
 // caller can log it in its own words. No engine header, no I/O, no allocation besides the std::string results.
 #pragma once
 
@@ -20,9 +20,12 @@ namespace cev
 
 	struct VideoDescriptor
 	{
-		struct SLanguage
+		//! One audio track (A1). `name` is the author's identifier the track is chosen by; `language` is an optional
+		//! tag that only matters when the descriptor sets followGameLanguage.
+		struct SAudioTrack
 		{
 			std::string name;
+			std::string language;      // optional tag (free text, an engine language name such as "english" is advised)
 			std::string file;          // resolved path of the external audio file ("" = none)
 			std::string trigger;       // cue route trigger name, "" = the root trigger
 			std::string pauseTrigger;  // cue route: event action "pause" trigger, "" = the root one
@@ -45,11 +48,12 @@ namespace cev
 		VideoRoute route = VideoRoute::Embedded;
 		std::string video;         // resolved path of the main video
 		double avOffsetMs = 0.0;   // applied with PlayerCore::SetAvOffset (picture later by this much, see PlayerCore.h)
-		std::string trigger;       // cue route default trigger (languages without their own use it)
+		std::string trigger;       // cue route default trigger (tracks without their own use it)
 		std::string pauseTrigger;  // cue route default pause trigger
 		std::string resumeTrigger; // cue route default resume trigger
-		std::string defaultLanguage;
-		std::vector<SLanguage> languages;
+		std::string defaultTrack;          // name of the default audio track, "" = the first one
+		bool followGameLanguage = false;   // match g_languageAudio / g_language against the tracks' language tags
+		std::vector<SAudioTrack> audioTracks;
 		std::vector<SVariant> variants;
 		std::vector<SMarker> markers; // sorted by time (SortDescriptorMarkers)
 	};
@@ -59,8 +63,29 @@ namespace cev
 
 	const char* VideoRouteName(VideoRoute route);
 
-	//! Index of the language called `name` (ASCII case insensitive), -1 when there is none or `name` is empty.
-	int FindDescriptorLanguage(const VideoDescriptor& desc, const char* name);
+	//! Longest audio track name.
+	constexpr size_t kMaxAudioTrackNameLength = 63;
+
+	//! A valid audio track name: 1 to kMaxAudioTrackNameLength of A-Z a-z 0-9 _ . -
+	bool IsValidAudioTrackName(const char* name);
+
+	//! Index of the audio track called `name` (ASCII case insensitive), -1 when there is none or `name` is empty.
+	int FindDescriptorAudioTrack(const VideoDescriptor& desc, const char* name);
+
+	//! Index of the first audio track whose language tag is `language` (ASCII case insensitive), -1 when there is
+	//! none or `language` is empty.
+	int FindDescriptorAudioTrackByLanguage(const VideoDescriptor& desc, const char* language);
+
+	struct DescriptorTrackProblem
+	{
+		enum Kind : unsigned char { InvalidName, Duplicate, UnknownDefault };
+		Kind kind = InvalidName;
+		std::string name; // the offending track name (UnknownDefault: the default's name)
+	};
+
+	//! Drops tracks with an invalid name and later duplicates of a name (the first one stays) and clears a default
+	//! that names no remaining track. `problems` is cleared and receives one entry per change, in list order.
+	void SanitizeDescriptorAudioTracks(VideoDescriptor& desc, std::vector<DescriptorTrackProblem>& problems);
 
 	//! Stable sort of the markers by time.
 	void SortDescriptorMarkers(VideoDescriptor& desc);
@@ -68,24 +93,32 @@ namespace cev
 	//! A/V offset of the descriptor in seconds (PlayerConfig::avOffsetSeconds; PlayerCore clamps it).
 	inline double DescriptorAvOffsetSeconds(const VideoDescriptor& desc) { return desc.avOffsetMs / 1000.0; }
 
+	//! Why a track was chosen (ResolveDescriptorAudio).
+	enum class DescriptorTrackReason : unsigned char { None, Requested, GameLanguage, Default, First };
+
 	struct DescriptorAudioPlan
 	{
-		std::string language;       // language in use ("" = none matched)
+		std::string track;          // audio track in use ("" = the descriptor has no tracks: embedded audio)
+		DescriptorTrackReason reason = DescriptorTrackReason::None;
+		bool unknownRequest = false; // a track was requested by a name the descriptor does not list (ignored)
 		std::string externalPath;   // external audio file (mixed route), "" = none
-		bool cue = false;           // the audio is a cue trigger (route cue, or a trigger-only language of a mixed video)
+		bool cue = false;           // the audio is a cue trigger (route cue, or a trigger-only track of a mixed video)
 		std::string trigger;        // cue: start trigger ("" = nothing to play)
 		std::string pauseTrigger;
 		std::string resumeTrigger;
-		std::string missingExternal; // the language names this external file but it does not exist: embedded track used
+		std::string missingExternal; // the track names this external file but it does not exist: embedded track used
 	};
 
-	//! Audio source for the descriptor. `requests` are tried in order (the first one that names a listed language
-	//! wins; empty / unknown names are skipped), e.g. { SetLanguage(), g_languageAudio, g_language, default }.
-	//! Route cue: always cue, the language (if any) may override the triggers. Route embedded: the embedded track
-	//! whatever the language says. Route mixed: the language's external file when it exists, a trigger-only
-	//! language makes it cue, otherwise the embedded track.
-	void ResolveDescriptorAudio(const VideoDescriptor& desc, const char* const* requests, size_t requestCount,
-		DescriptorFileExistsFn exists, void* user, DescriptorAudioPlan& out);
+	//! Audio source for the descriptor (A1). The track is chosen in this order: (1) `requestedTrack` (SetAudioTrack;
+	//! an unknown name sets unknownRequest and counts as not given); (2) only when desc.followGameLanguage is set:
+	//! `gameLanguages` in order (e.g. { g_languageAudio, g_language }) matched against the tracks' language tags;
+	//! (3) the default track; (4) the first track. Without tracks: the embedded audio. `gameLanguages` is not read
+	//! at all when followGameLanguage is off.
+	//! Route cue: always cue, the track (if any) may override the triggers. Route embedded: the embedded audio
+	//! whatever the track says. Route mixed: the track's external file when it exists, a trigger-only track makes it
+	//! cue, otherwise the embedded audio.
+	void ResolveDescriptorAudio(const VideoDescriptor& desc, const char* requestedTrack, const char* const* gameLanguages,
+		size_t gameLanguageCount, DescriptorFileExistsFn exists, void* user, DescriptorAudioPlan& out);
 
 	struct DescriptorVariantChoice
 	{

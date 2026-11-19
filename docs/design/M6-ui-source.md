@@ -138,8 +138,8 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
   | | `CEVPlayer:UI:SurfaceEvents`——SurfaceID → Ready、NewFrame、Resized、Closed | 以 ID 訂閱，不必持有 Handle |
   | 子抽屜 `CEVPlayer:Advanced`（進階） | `Open`——Video、Output（Surface／Screen／Material）與其參數、Decode；Open／Close → Handle、Ready、Error | Create、Load、SetOutput、Destroy |
   | | `Transport`——Handle；Play、Pause、Stop、Seek（＋Seconds） | Play、Pause、Resume、Stop、Seek（Play 兼作繼續） |
-  | | `Settings`——Handle；Loop、Rate、Volume、Language、Variant、Skippable（哪個埠被觸發就套用哪一項） | SetLoop、SetRate、SetVolume、SetLanguage、SetVariant、SetSkippable |
-  | | `Info`——Handle；Get（或每幀）→ State、Time、Duration、Width、Height、HasAlpha、Language、Variant、DecodeBackend、FrameSerial、SurfaceId | State、Time、Duration、Width、Height、HasAlpha、Language、Variant |
+  | | `Settings`——Handle；Loop、Rate、Volume、AudioTrack、Variant、Skippable（哪個埠被觸發就套用哪一項；A1 起 Language 改 AudioTrack） | SetLoop、SetRate、SetVolume、SetAudioTrack、SetVariant、SetSkippable |
+  | | `Info`——Handle；Get（或每幀）→ State、Time、Duration、Width、Height、HasAlpha、AudioTrack、Variant、DecodeBackend、FrameSerial、SurfaceId（A1 起 Language 改 AudioTrack） | State、Time、Duration、Width、Height、HasAlpha、AudioTrack、Variant |
   | | `Events`——Handle → Ready、Started、NewFrame、Marker、Looped、Ended、Skipped、Error | 不變 |
 
 - 抽屜的位置：主抽屜 `CEVPlayer` 直接放兩個開箱即用節點，`UI` 與 `Advanced` 是它之下的子抽屜（使用者 2026-11-19：「把 basic 獨立抽屜取消放在主抽屜，Advanced 跟 UI 的抽屜保留放在主抽屜內，主抽屜改名 CEVPlayer」）。CryVS 的全域函式命名空間對應為 `CEVPlayer`、`CEVPlayer::UI`、`CEVPlayer::Advanced`（目錄路徑 `Function::CEVPlayer::…`）。

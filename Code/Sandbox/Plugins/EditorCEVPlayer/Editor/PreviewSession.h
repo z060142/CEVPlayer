@@ -4,8 +4,9 @@
 //
 // What it plays is decided like the runtime module decides it (CEVCore/DescriptorPlan.h, shared code): variant (the
 // cvar cev_variant when the runtime plug-in registered it; the preview is never fullscreen, so no automatic choice),
-// language chain g_languageAudio, g_language, default language of the descriptor, external language file of the mixed
-// route, A/V offset. Limitation: a cue route (audio from an audio middleware trigger) is not auditioned; the preview
+// audio track (the one chosen in the preview's Audio track list, else the descriptor default, else the first one; the
+// game language cvars are NOT followed here, a followGameLanguage descriptor only gets a note), external audio file of
+// the mixed route, A/V offset. Limitation: a cue route (audio from an audio middleware trigger) is not auditioned; the preview
 // plays the embedded track instead and says so.
 //
 // Main thread only (the audio device thread only reaches the Core's audio path). Like the runtime module the video
@@ -16,6 +17,7 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "CEVCore/AudioClock.h"
 #include "CEVCore/DecodePool.h"
@@ -27,7 +29,7 @@ namespace CEVEditor
 {
 	enum class EPreviewAudio
 	{
-		AsAuthored,    //!< route and language of the descriptor (cue route: the embedded track, see above)
+		AsAuthored,    //!< route and audio track of the descriptor (cue route: the embedded track, see above)
 		EmbeddedTrack, //!< the audio track inside the video, whatever the descriptor says
 		Muted,         //!< as authored, volume 0
 	};
@@ -41,6 +43,7 @@ namespace CEVEditor
 		std::string videoRel;        //!< main video, game relative (EmbeddedTrack)
 		double avOffsetMs = 0.0;     //!< EmbeddedTrack: the offset of the edited descriptor
 		EPreviewAudio audio = EPreviewAudio::AsAuthored;
+		std::string audioTrack;      //!< AsAuthored / Muted: audio track to audition, "" = the descriptor's automatic choice
 		float volume = 1.f;
 	};
 
@@ -87,8 +90,12 @@ namespace CEVEditor
 		bool HasAudio() const { return m_hasAudio; }
 		bool GetFrame(cev::FrameView& out) const;
 		uint64_t FrameSerial() const;
-		//! Short notes for the status line (variant, language, external file, cue limitation, no audio device).
+		//! Short notes for the status line (variant, audio track, external file, cue limitation, no audio device).
 		const std::string& Notes() const { return m_notes; }
+		//! Audio tracks of the loaded descriptor (A1) and the one in use ("" = none / embedded track mode).
+		const std::vector<std::string>& AudioTrackNames() const { return m_trackNames; }
+		const std::string& AudioTrack() const { return m_audioTrack; }
+		bool FollowsGameLanguage() const { return m_followGameLanguage; }
 		bool AudioDeviceRunning() const { return m_output.IsRunning(); }
 		const std::string& AudioDeviceError() const { return m_audioError; }
 
@@ -107,7 +114,7 @@ namespace CEVEditor
 		std::shared_ptr<cev::DecodePool> m_pool;
 		std::unique_ptr<cev::AudioClock> m_audioClock;
 		std::unique_ptr<cev::PlayerCore> m_core;       // video (and the embedded audio track)
-		std::unique_ptr<cev::PlayerCore> m_audioCore;  // external language file, audio only
+		std::unique_ptr<cev::PlayerCore> m_audioCore;  // external audio track file, audio only
 		CPreviewAudioOutput m_output;
 		uint32_t m_deviceRate = 0;
 		std::string m_audioError;
@@ -123,6 +130,9 @@ namespace CEVEditor
 		std::string m_errorText;
 		std::string m_notes;
 		std::string m_externalPath;
+		std::vector<std::string> m_trackNames;
+		std::string m_audioTrack;
+		bool m_followGameLanguage = false;
 		double m_audioWaitSince = -1.0;
 		uint32_t m_seenLoops = 0;
 		static std::atomic<int> s_livePools;

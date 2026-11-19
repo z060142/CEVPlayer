@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A1 test: the pre-A1 <Languages> form is not read any more. Loading this descriptor logs one error that names
+     <AudioTracks>, and the video still plays with its embedded audio. -->
+<CEVVideo version="1" route="mixed" video="opus_preskip.webm">
+  <Languages default="english">
+    <Language name="english" embedded="1"/>
+    <Language name="japanese" file="audio_ja.webm"/>
+  </Languages>
+</CEVVideo>

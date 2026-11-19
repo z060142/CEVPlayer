@@ -850,7 +850,7 @@ namespace CEVPlayer
 
 			class CSettingsNode final : public CNodeBase
 			{
-				enum EIn { eI_Handle, eI_Loop, eI_Rate, eI_Volume, eI_Language, eI_Variant, eI_Skippable, eI_PauseDecodeWhenHidden };
+				enum EIn { eI_Handle, eI_Loop, eI_Rate, eI_Volume, eI_AudioTrack, eI_Variant, eI_Skippable, eI_PauseDecodeWhenHidden };
 				enum EOut { eO_Done, eO_Error };
 
 			public:
@@ -864,7 +864,7 @@ namespace CEVPlayer
 						InputPortConfig<bool>("Loop", false, _HELP("Applied when triggered: restart at the beginning when the end is reached.")),
 						InputPortConfig<float>("Rate", 1.f, _HELP("Applied when triggered: playback speed 0.25 to 4 (1 = normal).")),
 						InputPortConfig<float>("Volume", 1.f, _HELP("Applied when triggered: player volume 0 to 1.")),
-						InputPortConfig<string>("Language", string(), _HELP("Applied when triggered: audio language of the .cevvideo descriptor (empty = default choice).")),
+						InputPortConfig<string>("AudioTrack", string(), _HELP("Applied when triggered: audio track name of the .cevvideo descriptor (empty = automatic choice).")),
 						InputPortConfig<int>("Variant", -2, _HELP("Applied when triggered: -2 follows cev_variant, -1 automatic, 0 main video, n the n-th variant.")),
 						InputPortConfig<bool>("Skippable", false, _HELP("Applied when triggered: a button press stops the playing video and sends Skipped.")),
 						InputPortConfig<bool>("PauseDecodeWhenHidden", true, _HELP("Applied when triggered: a surface no UI shows only decodes, and stops decoding after cev_hiddenStopSeconds.")),
@@ -893,8 +893,8 @@ namespace CEVPlayer
 						Result(pActInfo, Run("SetRate", handle, { F(GetPortFloat(pActInfo, eI_Rate)) }));
 					if (IsPortActive(pActInfo, eI_Volume))
 						Result(pActInfo, Run("SetVolume", handle, { F(GetPortFloat(pActInfo, eI_Volume)) }));
-					if (IsPortActive(pActInfo, eI_Language))
-						Result(pActInfo, Run("SetLanguage", handle, { S(GetPortString(pActInfo, eI_Language).c_str()) }));
+					if (IsPortActive(pActInfo, eI_AudioTrack))
+						Result(pActInfo, Run("SetAudioTrack", handle, { S(GetPortString(pActInfo, eI_AudioTrack).c_str()) }));
 					if (IsPortActive(pActInfo, eI_Variant))
 						Result(pActInfo, Run("SetVariant", handle, { I(GetPortInt(pActInfo, eI_Variant)) }));
 					if (IsPortActive(pActInfo, eI_Skippable))
@@ -910,7 +910,7 @@ namespace CEVPlayer
 			class CInfoNode final : public CNodeBase
 			{
 				enum EIn { eI_Get, eI_Handle, eI_EveryFrame };
-				enum EOut { eO_State, eO_Time, eO_Duration, eO_Width, eO_Height, eO_HasAlpha, eO_Language, eO_Variant, eO_DecodeBackend, eO_FrameSerial, eO_SurfaceId, eO_Error };
+				enum EOut { eO_State, eO_Time, eO_Duration, eO_Width, eO_Height, eO_HasAlpha, eO_AudioTrack, eO_Variant, eO_DecodeBackend, eO_FrameSerial, eO_SurfaceId, eO_Error };
 
 			public:
 				virtual IFlowNodePtr Clone(SActivationInfo*) override { return new CInfoNode(); }
@@ -932,7 +932,7 @@ namespace CEVPlayer
 						OutputPortConfig<int>("Width", _HELP("Picture width in pixels, 0 until loaded.")),
 						OutputPortConfig<int>("Height", _HELP("Picture height in pixels, 0 until loaded.")),
 						OutputPortConfig<bool>("HasAlpha", _HELP("The video has an alpha channel.")),
-						OutputPortConfig<string>("Language", _HELP("Audio language in use, empty without languages.")),
+						OutputPortConfig<string>("AudioTrack", _HELP("Audio track in use, empty without audio tracks.")),
 						OutputPortConfig<int>("Variant", _HELP("Variant in use: 0 = main video, n = n-th variant.")),
 						OutputPortConfig<int>("DecodeBackend", _HELP("Decoder in use: 0 = CPU, 1 = GPU.")),
 						OutputPortConfig<string>("FrameSerial", _HELP("Number of uploaded pictures as decimal text.")),
@@ -942,7 +942,7 @@ namespace CEVPlayer
 					};
 					config.pInputPorts = in;
 					config.pOutputPorts = out;
-					config.sDescription = _HELP("Reads the state, time, size, language, variant, decoder, frame serial and surface id of a player handle.");
+					config.sDescription = _HELP("Reads the state, time, size, audio track, variant, decoder, frame serial and surface id of a player handle.");
 					config.SetCategory(EFLN_APPROVED);
 				}
 
@@ -985,7 +985,7 @@ namespace CEVPlayer
 					ActivateOutput(pActInfo, eO_Width, Q("Width", handle).i);
 					ActivateOutput(pActInfo, eO_Height, Q("Height", handle).i);
 					ActivateOutput(pActInfo, eO_HasAlpha, Q("HasAlpha", handle).b);
-					ActivateOutput(pActInfo, eO_Language, string(Q("Language", handle).s.c_str()));
+					ActivateOutput(pActInfo, eO_AudioTrack, string(Q("AudioTrack", handle).s.c_str()));
 					ActivateOutput(pActInfo, eO_Variant, Q("Variant", handle).i);
 					ActivateOutput(pActInfo, eO_DecodeBackend, Q("DecodeBackend", handle).i);
 					ActivateOutput(pActInfo, eO_FrameSerial, string(Q("FrameSerial", handle).s.c_str()));

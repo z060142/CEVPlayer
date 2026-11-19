@@ -79,8 +79,6 @@ namespace CEVPlayer
 		void ConsolePause();
 		void ConsoleResume();
 		void ConsoleSeek(double seconds);
-		//! cev_lang: nullptr / empty only reports the current language and the ones the descriptor offers.
-		void ConsoleSetLanguage(const char* name);
 		//! cev_play_surface <id> <path> [loop]: creates the surface player (or reuses it) and plays `path` into its
 		//! texture; path nullptr / empty destroys that surface player.
 		void ConsolePlaySurface(const char* surfaceId, const char* path, bool loop);

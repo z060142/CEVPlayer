@@ -11,7 +11,7 @@ namespace yasli { class Archive; }
 namespace CEVEditor
 {
 	//! Context of SDescriptor::Serialize (yasli::Context): the folder of the descriptor (relative to Assets, trailing slash), so
-	//! that the language files are shown / chosen as game paths and stored relative to the descriptor.
+	//! that the audio track files are shown / chosen as game paths and stored relative to the descriptor.
 	struct SDescriptorSerializeContext
 	{
 		std::string folderRel;
@@ -19,14 +19,18 @@ namespace CEVEditor
 
 	struct SDescriptor
 	{
-		struct SLanguage
+		//! One audio track (A1): chosen by name; `language` is an optional tag that only matters with followGameLanguage.
+		//! The source decides which field is written: embedded="1", file="..." or trigger="..." (+ pause / resume).
+		struct SAudioTrack
 		{
+			enum class ESource { Embedded, File, Trigger };
 			std::string name;
-			bool embedded = false;
+			ESource source = ESource::Embedded;
 			std::string file;
 			std::string trigger;
 			std::string pauseTrigger;
 			std::string resumeTrigger;
+			std::string language;
 
 			void Serialize(yasli::Archive& ar);
 		};
@@ -50,20 +54,25 @@ namespace CEVEditor
 		std::string trigger;
 		std::string pauseTrigger;
 		std::string resumeTrigger;
-		std::string defaultLanguage;
-		std::vector<SLanguage> languages;
+		std::string defaultTrack;           // "" = the first track
+		bool followGameLanguage = false;    // runtime: match g_languageAudio / g_language against the language tags
+		std::vector<SAudioTrack> audioTracks;
 		std::string variantRule;            // "" = the runtime default
 		std::vector<SVariant> variants;
 		std::vector<SMarker> markers;
 
-		int FindLanguage(const std::string& name) const;
-		//! The fields the user edits in the info panel's property tree: audio route, A/V offset, default language, languages
-		//! (name, embedded, external file, ACE triggers), markers. The video, the root triggers and the variants are not part
-		//! of it (they keep their values on input).
+		int FindAudioTrack(const std::string& name) const;
+		//! The fields the user edits in the info panel's property tree: audio route, A/V offset, the "Audio tracks" block
+		//! (Default track, Follow game language, rows of name / source / file or ACE triggers / language), markers. The
+		//! video, the root triggers and the variants are not part of it (they keep their values on input).
 		void Serialize(yasli::Archive& ar);
 	};
 
-	//! Reads the descriptor file (absolute UTF-8 path). Needs gEnv->pSystem (XML parser of the engine).
+	//! The audio track names, comma separated (Details audioTrackNames).
+	std::string AudioTrackNameList(const SDescriptor& desc);
+
+	//! Reads the descriptor file (absolute UTF-8 path). Needs gEnv->pSystem (XML parser of the engine). A pre-A1
+	//! <Languages> element is not read: it is reported in the log as an error and the descriptor has no audio tracks.
 	bool LoadDescriptor(const std::string& absPath, SDescriptor& out, std::string& error);
 	//! Writes it (UTF-8 XML, `version="1"`). Returns false and an error text when the file cannot be written.
 	bool SaveDescriptor(const std::string& absPath, const SDescriptor& desc, std::string& error);
@@ -74,9 +83,9 @@ namespace CEVEditor
 	//! Three way merge for "the file changed on disk (a job rewrote it) while the user has unsaved edits in memory":
 	//! `base` = what was last read from / written to the file, `mine` = the edited copy, `theirs` = the file now.
 	//! Every field the user changed (mine != base) keeps the user's value, every other field takes the file's.
-	//! Languages are matched by name; lists (markers, variants) are taken as a whole from whoever changed them.
+	//! Audio tracks are matched by name; lists (markers, variants) are taken as a whole from whoever changed them.
 	SDescriptor MergeDescriptors(const SDescriptor& base, const SDescriptor& mine, const SDescriptor& theirs);
-	//! Rewrites every file name (video, languages, variants) that starts with `oldPrefix` (case insensitive, like
+	//! Rewrites every file name (video, audio tracks, variants) that starts with `oldPrefix` (case insensitive, like
 	//! CAssetType::RenameAsset does for the files) so that it starts with `newPrefix`. Returns the number of changes.
 	int RenameDescriptorFiles(SDescriptor& desc, const std::string& oldPrefix, const std::string& newPrefix);
 }

@@ -52,6 +52,8 @@ namespace CEVEditor
 		CVideoPreviewWidget* PictureWidget() const { return m_pPicture; }
 		bool TimerActive() const { return m_timer.isActive(); }
 		void PlayPause() { OnPlayPause(); }
+		//! Chooses `name` in the Audio track list (A1); false when it is not listed.
+		bool SelectAudioTrack(const std::string& name);
 		//! Preview timers running in the process right now.
 		static int ActiveTimers();
 
@@ -69,6 +71,7 @@ namespace CEVEditor
 		void OnSliderMoved(int value);
 		void OnLoopToggled(bool on);
 		void OnAudioModeChanged(int index);
+		void OnAudioTrackChanged(int index);
 		void OnVolumeChanged(int value);
 		void OnTimer();
 
@@ -80,6 +83,7 @@ namespace CEVEditor
 		double Fps() const;
 		QString Timecode(double seconds) const;
 		void Reload();
+		void FillTrackList();
 		float Volume() const;
 
 		CPreviewSession m_session;
@@ -90,6 +94,8 @@ namespace CEVEditor
 		bool m_minimized = false;
 		bool m_sliderUpdating = false;
 		bool m_loggedFirstFrame = false;
+		bool m_trackListUpdating = false;
+		std::string m_trackChoice;   // name chosen in the Audio track list, "" = automatic
 		uint64_t m_lastSerial = 0;
 		QTimer m_timer;
 
@@ -104,6 +110,7 @@ namespace CEVEditor
 		QSlider* m_pSlider = nullptr;
 		QSlider* m_pVolume = nullptr;
 		QComboBox* m_pAudio = nullptr;
+		QComboBox* m_pTrack = nullptr;
 		QComboBox* m_pFit = nullptr;
 		QComboBox* m_pBackground = nullptr;
 	};

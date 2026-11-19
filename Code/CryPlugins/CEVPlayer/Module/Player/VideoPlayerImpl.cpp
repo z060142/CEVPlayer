@@ -253,7 +253,7 @@ namespace CEVPlayer
 		m_desc = SVideoDescriptor();
 		m_descValid = false;
 		m_variantIndex = -1;
-		m_language.clear();
+		m_audioTrack.clear();
 		if (!pathOk || gEnv == nullptr || gEnv->pCryPak == nullptr || !gEnv->pCryPak->IsFileExist(path))
 		{
 			m_phase = EPhase::Failed;
@@ -273,7 +273,7 @@ namespace CEVPlayer
 			return false;
 		}
 		m_plan = plan;
-		m_language = plan.language;
+		m_audioTrack = plan.audioTrack;
 
 		BuildCores(plan);
 		const cev::Status status = m_core->Load(std::make_unique<CCryPakByteSource>(plan.videoPath.c_str()));
@@ -300,12 +300,12 @@ namespace CEVPlayer
 		return true;
 	}
 
-	//! Fills language, external file and cue flag from the descriptor and the language requests (the decision is
+	//! Fills audio track, external file and cue flag from the descriptor and the track request (the decision is
 	//! cev::ResolveDescriptorAudio, shared with the Sandbox preview; the warnings are logged here).
-	void CVideoPlayerImpl::ResolveAudio(SPlan& plan, bool report) const
+	void CVideoPlayerImpl::ResolveAudio(SPlan& plan, bool report)
 	{
 		plan.externalPath.clear();
-		plan.language.clear();
+		plan.audioTrack.clear();
 		plan.cue = false;
 		plan.trigger.clear();
 		plan.pauseTrigger.clear();
@@ -313,22 +313,33 @@ namespace CEVPlayer
 		if (!m_descValid)
 			return;
 
-		// request chain: SetLanguage, g_languageAudio, g_language, descriptor default
-		const char* const candidates[4] = { m_requestedLanguage.c_str(), CVarString("g_languageAudio"), CVarString("g_language"), m_desc.defaultLanguage.c_str() };
+		// SetAudioTrack, then (followGameLanguage only) the game's language cvars against the tracks' language tags,
+		// then the descriptor default, then the first track
+		const char* gameLanguages[2] = { "", "" };
+		if (m_desc.followGameLanguage)
+		{
+			gameLanguages[0] = CVarString("g_languageAudio");
+			gameLanguages[1] = CVarString("g_language");
+		}
 		cev::DescriptorAudioPlan audio;
-		cev::ResolveDescriptorAudio(m_desc, candidates, 4, &PakFileExists, nullptr, audio);
-		plan.language = audio.language;
+		cev::ResolveDescriptorAudio(m_desc, m_requestedTrack.c_str(), gameLanguages, 2, &PakFileExists, nullptr, audio);
+		plan.audioTrack = audio.track;
 		plan.externalPath = audio.externalPath;
 		plan.cue = audio.cue;
 		plan.trigger = audio.trigger;
 		plan.pauseTrigger = audio.pauseTrigger;
 		plan.resumeTrigger = audio.resumeTrigger;
+		if (audio.unknownRequest && m_unknownTrackWarned != m_requestedTrack)
+		{
+			m_unknownTrackWarned = m_requestedTrack;
+			LogWarning("player %u: audio track <%s> is not listed in <%s>, using the automatic choice", m_id, m_requestedTrack.c_str(), m_path.c_str());
+		}
 		if (!report)
 			return;
 		if (m_desc.route == EVideoRoute::Cue && plan.trigger.empty())
-			LogWarning("player %u: <%s> uses route=\"cue\" but has no trigger for language <%s>: playing without audio", m_id, m_path.c_str(), plan.language.c_str());
+			LogWarning("player %u: <%s> uses route=\"cue\" but has no trigger for audio track <%s>: playing without audio", m_id, m_path.c_str(), plan.audioTrack.c_str());
 		else if (!audio.missingExternal.empty())
-			LogWarning("player %u: audio file <%s> of language <%s> not found, using the embedded track", m_id, audio.missingExternal.c_str(), plan.language.c_str());
+			LogWarning("player %u: audio file <%s> of audio track <%s> not found, using the embedded audio", m_id, audio.missingExternal.c_str(), plan.audioTrack.c_str());
 	}
 
 	int CVideoPlayerImpl::VariantTargetHeight() const
@@ -374,8 +385,8 @@ namespace CEVPlayer
 			m_descValid = true;
 			plan.videoPath = PickVariantPath();
 			ResolveAudio(plan, true);
-			Log("player %u: descriptor <%s> route=%s video=<%s> language=<%s>%s%s markers=%u", m_id, path, RouteName(m_desc.route), plan.videoPath.c_str(),
-				plan.language.c_str(), plan.externalPath.empty() ? "" : " external=", plan.externalPath.c_str(), static_cast<unsigned>(m_desc.markers.size()));
+			Log("player %u: descriptor <%s> route=%s video=<%s> audiotrack=<%s>%s%s markers=%u", m_id, path, RouteName(m_desc.route), plan.videoPath.c_str(),
+				plan.audioTrack.c_str(), plan.externalPath.empty() ? "" : " external=", plan.externalPath.c_str(), static_cast<unsigned>(m_desc.markers.size()));
 			if (m_desc.avOffsetMs != 0.0)
 			{
 				Log("player %u: avOffsetMs=%.1f of <%s> applied (picture %s)", m_id, m_desc.avOffsetMs, path, m_desc.avOffsetMs > 0.0 ? "later" : "earlier");
@@ -451,7 +462,7 @@ namespace CEVPlayer
 			acfg.outputRgba = false;
 			acfg.enableStats = false;
 			acfg.decodeAudio = true;
-			acfg.decodeVideo = false; // an external language file is audio only: never decode its picture, even if it has one
+			acfg.decodeVideo = false; // an external audio track file is audio only: never decode its picture, even if it has one
 			acfg.externalClock = m_audioClock.get(); // the same clock as the video: the audio is the master
 			acfg.outputSampleRate = CAudioMixer::kDeviceRate;
 			m_audioCore = std::make_unique<cev::PlayerCore>(acfg);
@@ -472,7 +483,7 @@ namespace CEVPlayer
 		m_desc = SVideoDescriptor();
 		m_descValid = false;
 		m_plan = SPlan();
-		m_language.clear();
+		m_audioTrack.clear();
 		m_reloading = false;
 		m_playPending = false;
 		m_seekPending = false;
@@ -543,7 +554,7 @@ namespace CEVPlayer
 
 		if (m_reloading)
 		{
-			// Language change: continue where the old media was, without reporting a new Ready / Started.
+			// Audio track / variant / decoder change: continue where the old media was, without reporting a new Ready / Started.
 			m_reloading = false;
 			CoresSeek(m_reloadTime);
 			m_needUpload = true;
@@ -688,7 +699,7 @@ namespace CEVPlayer
 			if (choice.variant != m_variantIndex)
 			{
 				Log("player %u: start with variant %d instead of %d (target height %d)", m_id, choice.variant, m_variantIndex, target);
-				ReloadForLanguage();
+				ReloadInPlace();
 				if (m_phase == EPhase::Loading)
 				{
 					m_reloading = true;
@@ -703,7 +714,7 @@ namespace CEVPlayer
 		{
 			// M9: the decoder choice changed since the load: a start from Stopped / Ended reloads with it (at 0).
 			Log("player %u: start with decode mode %d instead of %d", m_id, EffectiveDecodeMode(), m_loadedDecodeMode);
-			ReloadForLanguage();
+			ReloadInPlace();
 			if (m_phase == EPhase::Loading)
 			{
 				m_reloading = true;
@@ -868,28 +879,41 @@ namespace CEVPlayer
 		return true;
 	}
 
-	// ------------------------------------------------------------------------------------------------ languages
-	void CVideoPlayerImpl::SetLanguage(const char* name)
+	// ------------------------------------------------------------------------------------------------ audio tracks
+	void CVideoPlayerImpl::SetAudioTrack(const char* name)
 	{
 		if (m_destroyed)
 			return;
 		const std::string requested = name != nullptr ? name : "";
-		if (!requested.empty() && m_descValid && FindLanguage(m_desc, requested.c_str()) < 0)
+		if (!requested.empty() && !m_descValid && (m_phase == EPhase::Ready || m_phase == EPhase::Loading) && m_unknownTrackWarned != requested)
 		{
-			LogWarning("player %u: language <%s> is not listed in <%s>, ignored", m_id, requested.c_str(), m_path.c_str());
-			return;
+			m_unknownTrackWarned = requested;
+			LogWarning("player %u: <%s> has no descriptor and therefore no audio tracks, audio track <%s> ignored", m_id, m_path.c_str(), requested.c_str());
 		}
-		if (!requested.empty() && !m_descValid && (m_phase == EPhase::Ready || m_phase == EPhase::Loading))
-			LogWarning("player %u: <%s> has no descriptor and therefore no languages, language <%s> ignored", m_id, m_path.c_str(), requested.c_str());
-		m_requestedLanguage = requested;
+		m_requestedTrack = requested; // an unknown name is kept (a later Load may list it); ResolveAudio warns once
 		if (!m_descValid || (m_phase != EPhase::Ready && m_phase != EPhase::Loading))
 			return; // applied by the next Load()
 
 		SPlan next = m_plan;
 		ResolveAudio(next, false);
-		if (next.language == m_plan.language && next.externalPath == m_plan.externalPath && next.cue == m_plan.cue && next.trigger == m_plan.trigger)
+		if (next.audioTrack == m_plan.audioTrack && next.externalPath == m_plan.externalPath && next.cue == m_plan.cue && next.trigger == m_plan.trigger)
 			return; // same audio source
-		ReloadForLanguage();
+		ReloadInPlace();
+	}
+
+	int CVideoPlayerImpl::GetAudioTrackCount() const
+	{
+		return m_descValid ? static_cast<int>(m_desc.audioTracks.size()) : 0;
+	}
+
+	const char* CVideoPlayerImpl::GetAudioTrackName(int index) const
+	{
+		return index >= 0 && index < GetAudioTrackCount() ? m_desc.audioTracks[static_cast<size_t>(index)].name.c_str() : "";
+	}
+
+	const char* CVideoPlayerImpl::GetAudioTrackLanguage(int index) const
+	{
+		return index >= 0 && index < GetAudioTrackCount() ? m_desc.audioTracks[static_cast<size_t>(index)].language.c_str() : "";
 	}
 
 	void CVideoPlayerImpl::SetVariant(int variant)
@@ -903,11 +927,11 @@ namespace CEVPlayer
 		m_variantRequest = variant;
 		if (!m_descValid || m_desc.variants.empty() || (m_phase != EPhase::Ready && m_phase != EPhase::Loading))
 			return; // applied by the next Load()
-		ReloadForLanguage();
+		ReloadInPlace();
 	}
 
-	//! Remembers time and state, loads the media again (new language or variant) and continues there.
-	void CVideoPlayerImpl::ReloadForLanguage()
+	//! Remembers time and state, loads the media again (new audio track, variant or decoder) and continues there.
+	void CVideoPlayerImpl::ReloadInPlace()
 	{
 		const bool wasReady = m_phase == EPhase::Ready;
 		double time = 0.0;
@@ -927,7 +951,7 @@ namespace CEVPlayer
 		const bool seekPending = m_seekPending;
 		const double seekTime = m_seekTime;
 		const std::string path = m_path;
-		Log("player %u: language / variant change, reloading <%s> at %.2fs", m_id, path.c_str(), time);
+		Log("player %u: audio track / variant change, reloading <%s> at %.2fs", m_id, path.c_str(), time);
 
 		if (!LoadInternal(path.c_str(), true))
 			return; // OnError is queued
@@ -1390,7 +1414,7 @@ namespace CEVPlayer
 			const cev::LoadState ls = m_core->GetLoadState();
 			if (ls == cev::LoadState::Ready)
 			{
-				// The external language file loads in parallel: wait for it (a Ready video must not drop an audio
+				// The external audio track file loads in parallel: wait for it (a Ready video must not drop an audio
 				// file that is merely still loading). Failed / Ready-without-audio is handled by OnLoaded().
 				bool audioPending = m_audioCore && m_audioCore->GetLoadState() == cev::LoadState::Loading;
 				if (audioPending)
@@ -1658,11 +1682,11 @@ namespace CEVPlayer
 			else
 				std::snprintf(cue, sizeof(cue), "  cue=<%s> triggerPos=n/a", m_cueClock->Trigger().c_str());
 		}
-		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  %s%s  decode=%s  uploads=%llu  tex=%s(%d) %s %dx%d rgba=%d%s  audio=%s  peak=%.3f  clock=%s%s  lang=%s  variant=%s  <%s>",
+		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  %s%s  decode=%s  uploads=%llu  tex=%s(%d) %s %dx%d rgba=%d%s  audio=%s  peak=%.3f  clock=%s%s  track=%s  variant=%s  <%s>",
 			m_id, StateName(GetState()), GetTime(), GetDuration(), GetWidth(), GetHeight(), HasAlpha() ? " alpha" : "",
 			VisibilityName(), m_ownedByOpen ? "  owner=open" : "", decode,
 			static_cast<unsigned long long>(m_uploads), m_textureName.c_str(), m_textureId, LayoutName(), m_textureWidth, m_textureHeight, m_core->GetOutputRgba() ? 1 : 0, m_fullscreen ? (m_fullscreenHidden ? "  fullscreen(hidden)" : "  fullscreen") : "",
 			!m_hasAudio ? "none" : (m_voice >= 0 ? (m_audioCore ? "external" : "embedded") : (m_cueClock ? "cue" : "silent")), peak, ClockSourceName(), cue,
-			m_language.empty() ? "-" : m_language.c_str(), m_variantIndex < 0 ? "main" : std::to_string(m_variantIndex).c_str(), m_path.c_str());
+			m_audioTrack.empty() ? "-" : m_audioTrack.c_str(), m_variantIndex < 0 ? "main" : std::to_string(m_variantIndex).c_str(), m_path.c_str());
 	}
 }

@@ -7,7 +7,7 @@
 //   <name>_source.<ext>           source copy of an FFmpeg import / re-encode (never shipped; no copy for a PNG sequence)
 //   <name>_<height>p.webm         variants listed in the descriptor <Variants>
 //   <name>_silent.webm            picture only copy (after "strip audio")
-//   <name>_<language>.webm|.wav|.ogg   external audio tracks (split / exported)
+//   <name>_<track>.webm|.wav|.ogg   external audio tracks (split / exported), named after the descriptor's audio track
 // The SDL_mixer copies live in audio/sdlmixer/assets/cev/<name>/ and the ACE library in audio/sdlmixer/ace/cev_<name>.xml
 // (Details sdlFiles / aceLibrary), they are not Files of the asset.
 #pragma once
@@ -40,7 +40,7 @@ namespace CEVEditor
 		constexpr const char* kAlpha          = "alpha";              // 0 / 1
 		constexpr const char* kAudioTracks    = "audioTracks";
 		constexpr const char* kRoute          = "route";
-		constexpr const char* kLanguages      = "languages";          // comma separated names
+		constexpr const char* kTrackNames     = "audioTrackNames";    // comma separated names of the descriptor's audio tracks
 		constexpr const char* kSdlFiles       = "sdlFiles";           // ';' separated paths relative to Assets
 		constexpr const char* kAceLibrary     = "aceLibrary";         // path relative to Assets
 		constexpr const char* kTranscoded     = "transcoded";         // 1: <name>.webm was made by FFmpeg from the source copy / PNG sequence

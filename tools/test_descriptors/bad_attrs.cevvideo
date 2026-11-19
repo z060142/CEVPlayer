@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- M2a test: wrong values everywhere: every one gets a default + warning, the video still plays. -->
 <CEVVideo version="abc" route="banana" video="opus_preskip.webm" avOffsetMs="soon">
-  <Languages default="klingon">
-    <Language embedded="1"/>
-    <Language name="english"/>
-    <Language name="english" embedded="1"/>
-  </Languages>
+  <AudioTracks default="klingon" followGameLanguage="perhaps">
+    <Track embedded="1"/>
+    <Track name="english"/>
+    <Track name="two words" embedded="1"/>
+    <Track name="english" embedded="1"/>
+    <Track name="English" embedded="1"/>
+  </AudioTracks>
   <Variants rule="whatever">
     <Variant file="nothing.webm" width="x" height="-4"/>
   </Variants>

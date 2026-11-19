@@ -46,7 +46,7 @@ namespace CEVEditor
 		ESourceKind m_kind;
 		bool m_batch;
 		QLineEdit* m_pName = nullptr;
-		QLineEdit* m_pLanguage = nullptr;
+		QLineEdit* m_pAudioTrack = nullptr;
 		QComboBox* m_pRoute = nullptr;
 		QLineEdit* m_pTrigger = nullptr;
 		QComboBox* m_pSplit = nullptr;

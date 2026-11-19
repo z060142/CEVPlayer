@@ -77,3 +77,9 @@
 - 官方版與 CECE 的 CEVPlayer 目標 0 錯誤 0 警告；官方版建置不引用任何 CryVS 標頭（以 `/showIncludes` 或 grep 建置 log 驗證）。
 - 冒煙：GameLauncher 載入後 log 顯示新 FlowGraph 節點與 Schematyc 元件註冊成功；Sandbox 啟動關閉 PASS。
 - 描述表 GUID 重複檢查（啟動時 assert/log）。
+
+## 2026-11-19 修訂（A1；音軌就是音軌，本節優先於上文的對應段落）
+
+- 描述檔：`<Languages>`／`<Language>` 改為 `<AudioTracks default="<名字>" followGameLanguage="0|1">`，每條 `<Track name="…" embedded="1" | file="…" | trigger="…" [pauseTrigger= resumeTrigger=] [language="…"]>`。`name` 是作者自取的識別字（`[A-Za-z0-9_.-]`，1～63，不分大小寫，不重複；不合法或重複的條目略過並警告），`language` 是選用標記。舊的 `<Languages>` 不讀：記一則錯誤（指出改用 `<AudioTracks>`），影片照常以內嵌聲音播放。
+- 選軌（Core `ResolveDescriptorAudio`）：(1) `SetAudioTrack(name)`（名字不存在：警告一次、視為未指定）；(2) 只有 `followGameLanguage="1"` 時，`g_languageAudio`、再 `g_language`，比對各音軌的 `language` 標記；(3) `default`；(4) 第一條；沒有音軌時是內嵌聲音。`followGameLanguage` 預設 0，不讀任何遊戲語言 cvar。
+- 介面（不留舊名）：`IVideoPlayer::SetAudioTrack/GetAudioTrack`（介面版本仍為 5）；描述表 `SetAudioTrack`（參數 `Track`）、查詢 `AudioTrack`、`AudioTrackCount`、`AudioTrackName(Index)`、`AudioTrackLanguage(Index)`；`SetLanguage`（EB59C123-…）與 `Language`（B7A77A6C-…）的 GUID 退役（`ApiTable.h` 退役清單，自檢會擋）。FlowGraph `Settings` 的 `AudioTrack` 埠、`Info` 的 `AudioTrack` 輸出；Schematyc 屬性 `Audio Track`（成員 id `'atrk'`）、CryVS 屬性與 `CEVPlayer::Advanced::SetAudioTrack`（全域函式 GUID 沿用原 SetLanguage 者）。主控台 `cev_lang` 改為 `cev_audiotrack <handle|surface> [name]`。

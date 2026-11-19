@@ -17,6 +17,9 @@
 //   6215D8DE-93E8-4236-9DB5-9DDCFD4F1C0D  query TextureName
 //   2819FAC7-8B52-4BA3-9FA7-25BE56E317AD  query InterfaceVersion   (console: cev_info)
 //   23441E42-DE20-4EA3-A312-F6D624D5D83C  query Caps               (console: cev_info)
+// RETIRED in A1 (audio tracks are tracks, not languages; replaced by SetAudioTrack / AudioTrack with new GUIDs):
+//   EB59C123-4D68-43F3-A979-65C544B6BA1C  control SetLanguage
+//   B7A77A6C-E01F-4051-9B05-CA9596E6E49B  query Language
 #pragma once
 
 #include <cstddef>
@@ -185,7 +188,7 @@ namespace CEVPlayer
 			eCryVS_VideoAdvanced_SetLoop,
 			eCryVS_VideoAdvanced_SetRate,
 			eCryVS_VideoAdvanced_SetVolume,
-			eCryVS_VideoAdvanced_SetLanguage,
+			eCryVS_VideoAdvanced_SetAudioTrack, // A1: was SetLanguage (same GUID, see ApiTable.cpp)
 			eCryVS_VideoAdvanced_SetVariant,
 			eCryVS_VideoAdvanced_SetSkippable,
 			eCryVS_VideoAdvanced_Info,

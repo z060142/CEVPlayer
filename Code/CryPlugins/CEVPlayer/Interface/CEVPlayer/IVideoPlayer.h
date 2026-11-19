@@ -50,7 +50,8 @@ namespace CEVPlayer
 	//! 4: IVideoPlayer::SetVariant / GetVariant (per player variant choice of a .cevvideo descriptor).
 	//! 5: IVideoPlugin::CreatePlayerForSurface / FindPlayerBySurface, IVideoPlayer::GetSurfaceId / GetGeneration /
 	//!    GetPixelLayout / GetDecodeBackend. M6b (same version, never released before): the legacy IVideoPlugin
-	//!    virtuals were removed.
+	//!    virtuals were removed. A1 (same version, never released before): SetLanguage / GetLanguage became
+	//!    SetAudioTrack / GetAudioTrack (audio tracks are chosen by name; a language is only an optional tag).
 	constexpr uint32_t kVideoPlayerInterfaceVersion = 5;
 
 	//! IVideoPlayer::GetPixelLayout(). Values match the CTS_LAYOUT_* values of the texture source contract.
@@ -145,7 +146,7 @@ namespace CEVPlayer
 
 		// ---- media ----
 		//! Starts loading `path` (any CryPak path, e.g. "Videos/intro.webm" or the runtime descriptor
-		//! "Videos/intro.cevvideo": video file, languages, variants, markers). Returns false when the request is
+		//! "Videos/intro.cevvideo": video file, audio tracks, variants, markers). Returns false when the request is
 		//! rejected immediately (empty path, file does not exist, unusable descriptor); OnError is then also sent.
 		//! Replaces a previously loaded video (the texture is kept when the size does not change).
 		virtual bool Load(const char* path) = 0;
@@ -202,16 +203,17 @@ namespace CEVPlayer
 		virtual void AddListener(IVideoPlayerListener* pListener) = 0;
 		virtual void RemoveListener(IVideoPlayerListener* pListener) = 0;
 
-		// ---- appended in version 3 (languages) ----
-		//! Selects the audio language by the name used in the .cevvideo descriptor (case insensitive). Without a
-		//! call the language comes from the cvars g_languageAudio / g_language, then the descriptor default, then
-		//! the embedded audio track. Allowed at any time: while a video plays, the media is reloaded in place and
-		//! continues at the same position (a short glitch is possible). nullptr / empty = back to the default
-		//! choice. A name the descriptor does not list is ignored with a warning; videos without a descriptor
-		//! have no languages.
-		virtual void SetLanguage(const char* name) = 0;
-		//! The language in use (descriptor name), empty for a video without languages (the embedded track).
-		virtual const char* GetLanguage() const = 0;
+		// ---- appended in version 3 (audio tracks; renamed in A1, see kVideoPlayerInterfaceVersion) ----
+		//! Selects the audio track by its name in the .cevvideo descriptor's <AudioTracks> (case insensitive).
+		//! Without a call the track is: the one whose language tag matches g_languageAudio / g_language (only when
+		//! the descriptor sets followGameLanguage="1"), then the descriptor default, then the first track; a video
+		//! without tracks plays its embedded audio. Allowed at any time: while a video plays, the media is reloaded
+		//! in place and continues at the same position (a short glitch is possible). nullptr / empty = back to the
+		//! automatic choice. A name the descriptor does not list is warned about once and counts as not given;
+		//! videos without a descriptor have no tracks.
+		virtual void SetAudioTrack(const char* name) = 0;
+		//! The audio track in use (descriptor name), empty for a video without tracks (the embedded audio).
+		virtual const char* GetAudioTrack() const = 0;
 
 		// ---- appended in version 4 (variants) ----
 		//! Chooses the variant of a .cevvideo descriptor for this player: kVariantFollowCvar (default) = the cvar

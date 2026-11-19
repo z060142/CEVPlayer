@@ -447,10 +447,7 @@ namespace CEVEditor
 		editAsset.SetFiles(files);
 		CDetails details(*pAsset);
 		details.Set(DetailKey::kRoute, m_state.descriptor.route);
-		std::vector<std::string> languageNames;
-		for (const SDescriptor::SLanguage& l : m_state.descriptor.languages)
-			languageNames.push_back(l.name);
-		details.Set(DetailKey::kLanguages, JoinList(languageNames, ','));
+		details.Set(DetailKey::kTrackNames, AudioTrackNameList(m_state.descriptor));
 		m_state.details = details;
 		editAsset.SetDetails(details.ToPairs());
 		CryLogAlways("[CEVEditor] saved '%s'", m_state.assetName.c_str());

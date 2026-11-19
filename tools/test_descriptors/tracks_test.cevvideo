@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A1 test: three named audio tracks on one video. Tracks are chosen by name (SetAudioTrack / cev_audiotrack);
+     the language tags only matter with followGameLanguage="1" (see tracks_follow_test.cevvideo). "music" and
+     "commentary" are external audio files (audio_music.webm 330 Hz, audio_commentary.webm 660 Hz from
+     tools/make_test_media.sh), "english" is the embedded track of opus_preskip.webm (440 Hz). -->
+<CEVVideo version="1" route="mixed" video="opus_preskip.webm" avOffsetMs="0">
+  <AudioTracks default="music">
+    <Track name="music" file="audio_music.webm"/>
+    <Track name="commentary" file="audio_commentary.webm" language="japanese"/>
+    <Track name="english" embedded="1" language="english"/>
+  </AudioTracks>
+  <Markers>
+    <Marker name="start_mark" time="1.0"/>
+    <Marker name="mid_mark" time="3.0"/>
+  </Markers>
+</CEVVideo>
