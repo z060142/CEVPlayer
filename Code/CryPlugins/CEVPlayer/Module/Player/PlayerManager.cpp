@@ -58,6 +58,30 @@ namespace CEVPlayer
 			return static_cast<double>(privateBytes ? pmc.PrivateUsage : pmc.WorkingSetSize) / (1024.0 * 1024.0);
 		}
 
+		//! M9 measurement: whole-process CPU time / wall time since the previous call, in % of one core (-1 the first
+		//! time). Called once per stats second.
+		double ProcessCpuPercent()
+		{
+			static ULONGLONG s_lastCpu = 0;
+			static LARGE_INTEGER s_lastWall = {};
+			FILETIME c, e, k, u;
+			if (!::GetProcessTimes(::GetCurrentProcess(), &c, &e, &k, &u))
+				return -1.0;
+			const ULONGLONG cpu = (static_cast<ULONGLONG>(k.dwHighDateTime) << 32 | k.dwLowDateTime) + (static_cast<ULONGLONG>(u.dwHighDateTime) << 32 | u.dwLowDateTime);
+			LARGE_INTEGER now, freq;
+			::QueryPerformanceCounter(&now);
+			::QueryPerformanceFrequency(&freq);
+			double pct = -1.0;
+			if (s_lastWall.QuadPart != 0 && now.QuadPart > s_lastWall.QuadPart)
+			{
+				const double wall = static_cast<double>(now.QuadPart - s_lastWall.QuadPart) / static_cast<double>(freq.QuadPart);
+				pct = static_cast<double>(cpu - s_lastCpu) * 1e-7 / wall * 100.0;
+			}
+			s_lastCpu = cpu;
+			s_lastWall = now;
+			return pct;
+		}
+
 		//! This process's local video memory use on adapter 0 (IDXGIAdapter3::QueryVideoMemoryInfo), MB; -1 = unavailable.
 		double ProcessGpuMemoryMb()
 		{
@@ -118,9 +142,9 @@ namespace CEVPlayer
 			"convert_avg_ms,convert_p99_ms,upload_avg_ms,upload_p99_ms,uploads_per_s,upload_bytes_per_frame,upload_bytes_per_s,frames_decoded,dropped,ring_avg,"
 			"proc_ws_mb,proc_private_mb,gpu_local_mb,players,"
 			"visibility,decode_only_frames,copy_bytes,color_bytes,catchups,catchup_last_ms,catchup_last_frames,variant,hint_consumers,hint_px_h,layout,rgba_buffers,"
-			"decode,decode_hw,readback_avg_ms,readback_p99_ms\n");
+			"decode,decode_hw,readback_avg_ms,readback_p99_ms,proc_cpu_pct\n");
 		// baseline row (player 0): memory before / without the measured players
-		std::fprintf(s_statsFile, "0.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,%.1f,%.1f,%.1f,%u,-,0,0,0,0,0,0,0,0,0,-,0,-,0,0,0\n", ProcessMemoryMb(false), ProcessMemoryMb(true),
+		std::fprintf(s_statsFile, "0.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,%.1f,%.1f,%.1f,%u,-,0,0,0,0,0,0,0,0,0,-,0,-,0,0,0,0\n", ProcessMemoryMb(false), ProcessMemoryMb(true),
 			ProcessGpuMemoryMb(), GetPlayerCount());
 		std::fflush(s_statsFile);
 		LogAlways("cev_stats_file: writing <%s> (one row per player per second while cev_stats is on)", path);
@@ -638,6 +662,7 @@ namespace CEVPlayer
 		m_statsNextTime = now + 1.f;
 
 		s_statsLines.clear();
+		const double cpuPct = ProcessCpuPercent(); // one value per second for all rows
 		char line[800];
 		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
 		{
@@ -658,7 +683,7 @@ namespace CEVPlayer
 			std::snprintf(line, sizeof(line),
 				"[CEV stats] #%u t=%.1f/%.1f decodeMs avg=%.2f p99=%.2f convertMs avg=%.2f p99=%.2f (copy %.2f/%.2f color %.2f/%.2f) uploadMs avg=%.2f p99=%.2f uploads=%llu (+%llu/s) dropped=%llu allocs=%llu ring=%.1f clock=%s avOffsetMs=%.1f"
 				" | %s decodeOnly=%llu copyB=%llu colorB=%llu catchUp=%llu last %.2fms/%uf variant=%d hints=%u px_h=%d layout=%s rgbaBuffers=%u"
-				" | decode=%s hw=%d readbackMs avg=%.2f p99=%.2f",
+				" | decode=%s hw=%d readbackMs avg=%.2f p99=%.2f procCpu=%.0f%%",
 				p->Id(), p->GetTime(), p->GetDuration(), s.decodeMs.avg, s.decodeMs.p99, s.convertMs.avg, s.convertMs.p99,
 				s.copyMs.avg, s.copyMs.p99, s.colorMs.avg, s.colorMs.p99, uploadAvg, uploadP99,
 				static_cast<unsigned long long>(uploads), static_cast<unsigned long long>(perSecond),
@@ -667,11 +692,11 @@ namespace CEVPlayer
 				p->VisibilityName(), static_cast<unsigned long long>(s.framesDecodeOnly), static_cast<unsigned long long>(s.copyBytes),
 				static_cast<unsigned long long>(s.colorBytes), static_cast<unsigned long long>(s.catchUps), static_cast<double>(s.lastCatchUpMs),
 				s.lastCatchUpFrames, p->GetVariant(), p->HintConsumers(), p->HintPixelHeight(), p->LayoutName(), p->Core().RgbaBufferCount(),
-				decode, backend.hardware ? 1 : 0, s.readbackMs.avg, s.readbackMs.p99);
+				decode, backend.hardware ? 1 : 0, s.readbackMs.avg, s.readbackMs.p99, cpuPct);
 			if (s_statsFile != nullptr)
 			{
 				const uint64_t bytes = p->LastUploadBytes();
-				std::fprintf(s_statsFile, "%.2f,%u,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%.2f,%.1f,%.1f,%.1f,%u,%s,%llu,%llu,%llu,%llu,%.3f,%u,%d,%u,%d,%s,%u,%s,%d,%.3f,%.3f\n",
+				std::fprintf(s_statsFile, "%.2f,%u,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%.2f,%.1f,%.1f,%.1f,%u,%s,%llu,%llu,%llu,%llu,%.3f,%u,%d,%u,%d,%s,%u,%s,%d,%.3f,%.3f,%.1f\n",
 					now - s_statsFileStart, p->Id(), p->GetTime(), p->GetWidth(), p->GetHeight(), p->HasAlpha() ? 1 : 0,
 					s.decodeMs.avg, s.decodeMs.p99, s.copyMs.avg, s.copyMs.p99, s.colorMs.avg, s.colorMs.p99, s.convertMs.avg, s.convertMs.p99,
 					uploadAvg, uploadP99, static_cast<unsigned long long>(perSecond), static_cast<unsigned long long>(bytes),
@@ -681,7 +706,7 @@ namespace CEVPlayer
 					p->VisibilityName(), static_cast<unsigned long long>(s.framesDecodeOnly), static_cast<unsigned long long>(s.copyBytes),
 					static_cast<unsigned long long>(s.colorBytes), static_cast<unsigned long long>(s.catchUps), static_cast<double>(s.lastCatchUpMs),
 					s.lastCatchUpFrames, p->GetVariant(), p->HintConsumers(), p->HintPixelHeight(), p->LayoutName(), p->Core().RgbaBufferCount(),
-					decode, backend.hardware ? 1 : 0, s.readbackMs.avg, s.readbackMs.p99);
+					decode, backend.hardware ? 1 : 0, s.readbackMs.avg, s.readbackMs.p99, cpuPct);
 				std::fflush(s_statsFile);
 			}
 			s_statsLines.push_back(line);
