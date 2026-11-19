@@ -218,6 +218,18 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 - 載入期間的聲音不在該文件的保證內，由 M10 自行驗證。Sandbox 開關卡時沒有載入迴圈（不支援）；非同步／分段載入時主迴圈照跑，走一般的 tick。
 - 對 M6～M9 的要求：播放器的 tick 從現在起就寫成「不假設主執行緒、時間由呼叫者給 dt」，M10 才不必重寫。
 
+### 9.1 主線探測的結果（CE-89，2026-11-19；主線量測，CE 倉 `docs/10-loading-time.md` §10.5，證據 `E:/coding3/xt-bench/ce-89/`）
+
+M10 尚未開工：等 patch 17（CE-90）併入、主線通知。以下是寫 M10 任務單時必須照顧的事實（launcher Profile DX11、很短的關卡；超過約 0.3 秒的載入、D3D debug layer、非同步載入未測）：
+
+- `gfx_loadtimethread 1`（launcher 預設）時載入期迴圈一定會跑，而且唯一的回呼位被 CFlashUI 佔用——多回呼的 patch 是必要條件（來源 order 100、UI 200，如上）。
+- 在 `LoadtimeUpdate`（渲染執行緒、鎖外）建立／更新貼圖可行（1400 圈）。
+- **渲染幀編號在迴圈裡不凍結，而且主執行緒同步時會倒退**（實測 32,33,34,35,34,35…）。任何以 `GetRenderFrameID`／主幀編號當鍵的邏輯（LRU、環、「每幀一次」、消費端 120 次更新的過期計數）在載入模式都必須改用播放器自己的單調計數器。M10 的第一步是盤點這些用法。
+- 迴圈 dt 中位數約 8.3 ms（120 Hz vsync），但每次實際載入有一次 100～160 ms 的停頓（與貼圖預載同時）。時鐘與聲音必須容忍：照實際時間前進，不追幀。
+- 換關卡時 `LEVEL_UNLOAD`～`LEVEL_POST_UNLOAD` 之間也有一段迴圈，期間渲染資源會被釋放並重建（POST_UNLOAD 後約 6 ms）。UI 消費端只在 LOADINGSCREEN → LOAD_END 之間繪製；我方貼圖同樣會受影響，視為一次 `generation` 改變（需實測我方貼圖是否真的被釋放）。
+- 停止迴圈會卡主執行緒 15～34 ms（載入結束、執行緒換回時的時鐘跳動要一併容忍）。
+- `OnLoadingProgress` 每次載入最多觸發一次且值為 0，不能當進度來源。
+
 ## 10. 階段 0 的結果與對本設計的修訂（2026-11-19；細節在 `docs/research/05a-standalone.md`、`05b-engine.md`，原始資料在 `E:/coding3/xt-bench/cev-s0/`）
 
 本機：13600K、RTX 4070 Ti；引擎樹 `CRYENGINE_Source_CEVPlayer_XTFrame`（Profile，CryXTUI v0.17.0）。耗時為 ms、平均／p99。
