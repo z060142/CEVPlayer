@@ -790,8 +790,9 @@ namespace CEVPlayer
 		{
 			if (cev::Succeeded(CoresSeek(seconds)))
 			{
+				// No m_needUpload here (M10b): the picture still held is the one before the seek; uploading it again
+				// would replace the pixels twice (contentSerial +2). The target frame is uploaded once it is decoded.
 				m_endedSent = false;
-				m_needUpload = true;
 				m_markerResync = true;
 			}
 		}
@@ -1577,15 +1578,18 @@ namespace CEVPlayer
 	// ------------------------------------------------------------------------------------------------ level loading
 	void CVideoPlayerImpl::ReapplyLevelLoadPause()
 	{
-		if (m_manager.IsLevelLoading() && m_phase == EPhase::Ready && m_core->GetState() == cev::PlayerState::Playing)
+		// M10: a player that runs in the loading loop (also one created during the load) is not paused
+		if (m_manager.IsLevelLoading() && !(m_manager.LoadModeActive() && RunsDuringLoad()) && m_phase == EPhase::Ready && m_core->GetState() == cev::PlayerState::Playing)
 		{
 			CoresPause();
 			m_pausedByLevelLoad = true;
 		}
 	}
 
-	void CVideoPlayerImpl::OnLevelLoadBegin()
+	void CVideoPlayerImpl::OnLevelLoadBegin(bool keepRunning)
 	{
+		if (keepRunning)
+			return; // M10: ticked by the loading loop, the clock keeps running
 		if (m_phase == EPhase::Ready && m_core->GetState() == cev::PlayerState::Playing)
 		{
 			CoresPause();

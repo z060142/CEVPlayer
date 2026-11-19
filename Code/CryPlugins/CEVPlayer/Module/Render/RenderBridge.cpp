@@ -83,6 +83,31 @@ namespace CEVPlayer
 				LogAlways("renderer probe: CEVPlayer_Patched not found, stage 1 (CPU conversion, aux fullscreen)");
 		}
 
+		bool LoadtimeAvailable()
+		{
+#if CEV_HAVE_LOADTIME_CALLBACKS && CRY_PLATFORM_WINDOWS
+			static int s_cached = -1; // -1 not read yet, 0 no, 1 yes
+			if (s_cached >= 0)
+				return s_cached != 0;
+			if (!Available())
+				return false; // no renderer yet: not cached, read again once there is one
+			s_cached = 0;
+			if (const char* moduleName = RendererModuleName(gEnv->pRenderer))
+			{
+				if (HMODULE hModule = ::GetModuleHandleA(moduleName))
+				{
+					using PFN_XUI2DPatched = int (*)();
+					if (const PFN_XUI2DPatched pPatched = reinterpret_cast<PFN_XUI2DPatched>(::GetProcAddress(hModule, "XUI2D_Patched")))
+						s_cached = (pPatched() & 128) != 0 ? 1 : 0;
+				}
+			}
+			LogAlways("renderer probe: load-time callbacks %s (XUI2D_Patched bit 7)", s_cached != 0 ? "available" : "not available");
+			return s_cached != 0;
+#else
+			return false;
+#endif
+		}
+
 		int Stage()
 		{
 			return s_stage;

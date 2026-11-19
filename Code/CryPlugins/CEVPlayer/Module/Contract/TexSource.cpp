@@ -314,6 +314,12 @@ namespace CEVPlayer
 				out.swap(*s_pCommands);
 		}
 
+		bool HasPendingCommands()
+		{
+			SExclusive lock;
+			return s_pCommands != nullptr && !s_pCommands->empty();
+		}
+
 		void SetOwnedByOpen(const char* name, bool owned, const char* src)
 		{
 			SExclusive lock;

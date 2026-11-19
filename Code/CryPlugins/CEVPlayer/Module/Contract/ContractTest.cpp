@@ -34,7 +34,7 @@ namespace CEVPlayer
 
 			struct STest
 			{
-				enum class EStep { Idle, WaitReadyA, Playing, PlayAdvance, PausedSettle, PausedHold, Evict, WaitReadyB, M7 };
+				enum class EStep { Idle, WaitReadyA, Playing, PlayAdvance, PausedSettle, PausedHold, PausedSeek, Evict, WaitReadyB, M7 };
 				EStep step = EStep::Idle;
 				const CryTexSourceApi* api = nullptr;
 				IVideoPlayer* player = nullptr;
@@ -1108,6 +1108,12 @@ namespace CEVPlayer
 					t.Check(t.api->open(kSurface, m.pathSmall.c_str(), &o) == 2, "open of a surface made by level logic -> 2");
 					t.api->close(kSurface); // not ours: nothing happens
 					t.Check(t.api->open(kM7Missing, "Videos/no_such_file.webm", nullptr) == 1, "open of a missing file -> 1 (the error comes later)");
+					t.Check(HasPendingCommands(), "M10: HasPendingCommands after open is true");
+					return true;
+				});
+				add([](STest& t, double) {
+					// one manager tick ran since the previous step
+					t.Check(!HasPendingCommands(), "M10: HasPendingCommands after the next tick is false");
 					return true;
 				});
 				add([](STest& t, double now) {
@@ -1534,6 +1540,18 @@ namespace CEVPlayer
 					return;
 				t.Query(kSurface, info);
 				t.Check(info.contentSerial == t.serial, "contentSerial does not move while paused");
+				// M10b: one seek while paused replaces the picture once (the target frame), not twice
+				t.serial = info.contentSerial;
+				t.player->Seek(1.0);
+				t.mark = now;
+				t.step = STest::EStep::PausedSeek;
+				return;
+
+			case STest::EStep::PausedSeek:
+				if (now - t.mark < 0.5)
+					return;
+				t.Query(kSurface, info);
+				t.Check(info.contentSerial == t.serial + 1u, "a seek while paused increases contentSerial by exactly 1 (" + Num(static_cast<long long>(t.serial)) + " -> " + Num(static_cast<long long>(info.contentSerial)) + ")");
 				t.Hint(kConsumerC, 1u, 100, 100, 1u);
 				t.Hint(kConsumerD, 1u, 50, 50, 1u);
 				t.frames = 0;

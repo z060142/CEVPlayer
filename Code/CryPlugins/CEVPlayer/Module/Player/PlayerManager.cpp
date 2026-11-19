@@ -220,9 +220,29 @@ namespace CEVPlayer
 		CPlayerManager& m_manager;
 	};
 
+#if CEV_HAVE_LOADTIME_CALLBACKS
+	//! M10: the order-100 callback of the renderer's loading loop (engine patch 17). Its update is the players' tick
+	//! while the main thread is held by a level load.
+	class CPlayerManager::CLoadtimeCallback final : public ILoadtimeCallback
+	{
+	public:
+		explicit CLoadtimeCallback(CPlayerManager& manager) : m_manager(manager) {}
+		void LoadtimeUpdate(float dt) override { m_manager.LoadtimeTick(dt); }
+		bool LoadtimeRender() override { return true; }
+
+	private:
+		CPlayerManager& m_manager;
+	};
+#else
+	class CPlayerManager::CLoadtimeCallback final {};
+#endif
+
 	CPlayerManager::CPlayerManager()
 		: m_consoleListener(std::make_unique<CConsoleListener>(*this))
 		, m_levelListener(std::make_unique<CLevelListener>(*this))
+#if CEV_HAVE_LOADTIME_CALLBACKS
+		, m_loadtimeCallback(std::make_unique<CLoadtimeCallback>(*this))
+#endif
 	{
 		m_players.reserve(16);
 		m_snapshot.reserve(16);
@@ -269,9 +289,10 @@ namespace CEVPlayer
 			return;
 		m_levelLoading = true;
 		m_levelDeadline = NowSeconds() + kLoadIdleTimeout;
-		LogDebug("level loading started (%s): clocks paused, no renderer calls", why);
+		const bool loadMode = LoadModeActive();
+		LogDebug("level loading started (%s): %s", why, loadMode ? "texture-only players keep running in the loading loop" : "clocks paused, no renderer calls");
 		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
-			p->OnLevelLoadBegin();
+			p->OnLevelLoadBegin(loadMode && p->RunsDuringLoad());
 	}
 
 	void CPlayerManager::EndLevelLoading(const char* why)
@@ -319,7 +340,50 @@ namespace CEVPlayer
 
 	bool CPlayerManager::RenderCallsAllowed() const
 	{
-		return !m_shutdown && !m_levelLoading && RenderBridge::Available();
+		// During a level load only the loading-loop tick may call the renderer (M10); calls from the main thread
+		// (e.g. destroying a player) are still deferred (zombies).
+		return !m_shutdown && RenderBridge::Available() && (!m_levelLoading || m_inLoadTick);
+	}
+
+	bool CPlayerManager::LoadModeActive() const
+	{
+		return mEnv->m_cevLoadtime != 0 && m_loadtimeRegistered;
+	}
+
+	void CPlayerManager::UpdateLoadtimeRegistration()
+	{
+#if CEV_HAVE_LOADTIME_CALLBACKS
+		if (!IsMainThread())
+			return;
+		std::lock_guard<std::recursive_mutex> lock(m_tickMutex);
+		const bool want = !m_shutdown && mEnv->m_cevLoadtime != 0 && RenderBridge::LoadtimeAvailable()
+			&& (!m_players.empty() || Contract::HasPendingCommands());
+		if (want == m_loadtimeRegistered || gEnv == nullptr || gEnv->pRenderer == nullptr)
+			return;
+		if (want)
+			gEnv->pRenderer->AddLoadtimeCallback(m_loadtimeCallback.get(), 100);
+		else
+			gEnv->pRenderer->RemoveLoadtimeCallback(m_loadtimeCallback.get());
+		m_loadtimeRegistered = want;
+		LogDebug("loading-loop callback %s", want ? "registered (order 100)" : "removed");
+#endif
+	}
+
+	void CPlayerManager::LoadtimeTick(float dt)
+	{
+		std::lock_guard<std::recursive_mutex> lock(m_tickMutex);
+		if (m_shutdown || mEnv->m_cevLoadtime == 0)
+			return;
+		dt = std::min(std::max(dt, 0.f), 0.25f); // a longer gap is a stall: the clocks do not catch up
+		m_clock += static_cast<double>(dt);
+		m_inLoadTick = true;
+		ProcessContractCommands();
+		for (size_t i = 0; i < m_players.size(); ++i)
+		{
+			if (m_players[i]->RunsDuringLoad())
+				m_players[i]->Tick(dt);
+		}
+		m_inLoadTick = false;
 	}
 
 	std::shared_ptr<cev::DecodePool> CPlayerManager::AcquirePool()
@@ -375,6 +439,7 @@ namespace CEVPlayer
 
 	IVideoPlayer* CPlayerManager::CreatePlayerForSurface(const char* surfaceId)
 	{
+		std::lock_guard<std::recursive_mutex> lock(m_tickMutex);
 		if (m_shutdown)
 			return nullptr;
 		if (!IsValidSurfaceId(surfaceId))
@@ -388,11 +453,14 @@ namespace CEVPlayer
 			return nullptr;
 		}
 		m_players.push_back(std::make_unique<CVideoPlayerImpl>(*this, m_nextId++, nullptr, surfaceId));
-		return m_players.back().get();
+		IVideoPlayer* const pPlayer = m_players.back().get();
+		UpdateLoadtimeRegistration();
+		return pPlayer;
 	}
 
 	IVideoPlayer* CPlayerManager::CreatePlayer(const char* textureName)
 	{
+		std::lock_guard<std::recursive_mutex> lock(m_tickMutex);
 		if (m_shutdown)
 			return nullptr;
 		if (textureName != nullptr && textureName[0] != '\0')
@@ -408,13 +476,16 @@ namespace CEVPlayer
 			}
 		}
 		m_players.push_back(std::make_unique<CVideoPlayerImpl>(*this, m_nextId++, textureName));
-		return m_players.back().get();
+		IVideoPlayer* const pPlayer = m_players.back().get();
+		UpdateLoadtimeRegistration();
+		return pPlayer;
 	}
 
 	void CPlayerManager::DestroyPlayer(IVideoPlayer* pPlayer)
 	{
 		if (pPlayer == nullptr)
 			return;
+		std::lock_guard<std::recursive_mutex> lock(m_tickMutex);
 		CVideoPlayerImpl* const impl = Find(pPlayer);
 		if (impl == nullptr || impl->IsDestroyed())
 			return;
@@ -444,6 +515,7 @@ namespace CEVPlayer
 			}
 			break;
 		}
+		UpdateLoadtimeRegistration();
 	}
 
 	void CPlayerManager::ReapPendingDestroy()
@@ -497,6 +569,7 @@ namespace CEVPlayer
 	// ------------------------------------------------------------------------------------------------ frame
 	void CPlayerManager::CheckLevelLoadingTimeout()
 	{
+		std::lock_guard<std::recursive_mutex> lock(m_tickMutex);
 		if (m_shutdown)
 			return;
 		if (m_levelLoading && NowSeconds() > m_levelDeadline)
@@ -509,7 +582,10 @@ namespace CEVPlayer
 	void CPlayerManager::UpdateBeforeRender(float dt)
 	{
 		// No renderer calls and no frame stepping while a level loads or after shutdown. Clocks of playing
-		// players are paused for the duration (OnSystemEvent), so nothing is lost.
+		// players are paused for the duration (OnSystemEvent), so nothing is lost; texture-only players run in the
+		// loading loop instead (LoadtimeTick, M10).
+		std::lock_guard<std::recursive_mutex> lock(m_tickMutex);
+		UpdateLoadtimeRegistration();
 		if (m_shutdown)
 			return;
 		m_clock += static_cast<double>(dt);
@@ -627,6 +703,7 @@ namespace CEVPlayer
 
 	void CPlayerManager::UpdateAfterRender()
 	{
+		std::lock_guard<std::recursive_mutex> lock(m_tickMutex);
 		if (!RenderCallsAllowed())
 			return;
 
@@ -717,13 +794,19 @@ namespace CEVPlayer
 	// ------------------------------------------------------------------------------------------------ engine events
 	void CPlayerManager::OnSystemEvent(ESystemEvent event, UINT_PTR wparam)
 	{
+		std::lock_guard<std::recursive_mutex> lock(m_tickMutex);
 		switch (event)
 		{
 		case ESYSTEM_EVENT_CHANGE_FOCUS:
 			m_audio.SetFocus(wparam != 0); // muted while unfocused when cev_muteOnFocusLoss is set
 			break;
 		case ESYSTEM_EVENT_LEVEL_LOAD_START_LOADINGSCREEN:
+			UpdateLoadtimeRegistration(); // before BeginLevelLoading: it decides who keeps running
 			BeginLevelLoading("loading screen started");
+			break;
+		case ESYSTEM_EVENT_LEVEL_LOAD_START:
+			// after every listener's LOADINGSCREEN handling: catches an `open` sent while a UI warmed up
+			UpdateLoadtimeRegistration();
 			break;
 		case ESYSTEM_EVENT_LEVEL_LOAD_END:
 		case ESYSTEM_EVENT_LEVEL_GAMEPLAY_START:
@@ -757,11 +840,13 @@ namespace CEVPlayer
 
 	void CPlayerManager::Shutdown()
 	{
+		std::lock_guard<std::recursive_mutex> lock(m_tickMutex);
 		if (m_shutdown)
 			return;
 		// The renderer is still alive when this runs (FULL_SHUTDOWN is sent before the plug-ins and the renderer
 		// are released, FAST_SHUTDOWN just before the renderer is). Release every texture now.
 		m_shutdown = true;
+		UpdateLoadtimeRegistration(); // m_shutdown: always removes the loading-loop callback
 		UnregisterLevelListener();
 		m_levelLoading = false;
 		m_pConsolePlayer = nullptr;

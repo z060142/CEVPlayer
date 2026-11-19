@@ -30,6 +30,7 @@
 #include "Bindings/ApiPlayers.h"
 #include "Player/PlayerManager.h"
 #include "Player/VideoPlayerImpl.h"
+#include "Render/RenderBridge.h"
 
 namespace CEVPlayer
 {
@@ -461,6 +462,13 @@ namespace CEVPlayer
 			std::string s_readbackDir;      // P4: where the read-back frames go (empty: no file, only the counts)
 			CVideoPlayerImpl* s_p6Player = nullptr;
 			uint64_t s_p6LastSerial = 0;
+			// M10b sub-modes (argument 6): "open:<surface>:<path>" sends a contract `open` (autoplay, loop) at
+			// LEVEL_LOAD_START_LOADINGSCREEN through the exported CryTexSource_v1 table (scenario C);
+			// "destroy:<surface>" destroys that surface player at LEVEL_LOAD_START like `cev_play_surface <id>` (scenario G).
+			std::string s_openSurface;
+			std::string s_openSrc;
+			bool s_opened = false;
+			std::string s_destroySurface;
 
 			std::mutex s_mutex; // guards the loop statistics below (render thread writes, main thread reads)
 			int s_loopIndex = 0;
@@ -495,23 +503,27 @@ namespace CEVPlayer
 					static_cast<int>(ms / 1000 % 60), static_cast<int>(ms % 1000), CryGetCurrentThreadId() == gEnv->mMainThreadId ? "main" : "other", buf);
 			}
 
-			// P1: the renderer module's XUI2D_Patched export (extern "C" int XUI2D_Patched()), -1 when there is none.
-			int ReadPatchedBits(const char** pModule)
+			//! M10b: the contract table of this module, found the way a consumer finds it.
+			const CryTexSourceApi* ContractApi()
 			{
-				static const char* const modules[] = { "CryRenderD3D11.dll", "CryRenderD3D12.dll", "CryRenderVulkan.dll" };
-				for (const char* name : modules)
-				{
-					if (HMODULE h = ::GetModuleHandleA(name))
-					{
-						*pModule = name;
-						using Fn = int (*)();
-						if (Fn fn = reinterpret_cast<Fn>(::GetProcAddress(h, "XUI2D_Patched")))
-							return fn();
-						return -1;
-					}
-				}
-				*pModule = "(no renderer module)";
-				return -1;
+				HMODULE self = nullptr;
+				::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(&ContractApi), &self);
+				using PFN_Source = const CryTexSourceApi* (*)(void);
+				const PFN_Source fn = self != nullptr ? reinterpret_cast<PFN_Source>(::GetProcAddress(self, "CryTexSource_v1")) : nullptr;
+				return fn != nullptr ? fn() : nullptr;
+			}
+
+			//! M10b: the contract snapshot of a surface (query through the exported table).
+			void LogSnapshot(const char* where, const std::string& name)
+			{
+				const CryTexSourceApi* const api = name.empty() ? nullptr : ContractApi();
+				if (api == nullptr)
+					return;
+				CryTexSourceInfo info = {};
+				info.size = sizeof(info);
+				const int r = api->query(name.c_str(), &info);
+				PLog("snapshot %s <%s>: query %d state=%u serial=%llu t=%.3f/%.3f loops=%u tex=%d gen=%u", where, name.c_str(), r, info.state,
+					static_cast<unsigned long long>(info.contentSerial), info.timeSeconds, info.durationSeconds, info.loopCount, info.textureId, info.generation);
 			}
 
 			// P3: describes our texture id now; returns 1 valid, 0 not.
@@ -639,6 +651,16 @@ namespace CEVPlayer
 				s_p6LastSerial = serial;
 			}
 
+			// M10b: listener events of the P6 player (scenario B: Ended once, dispatched on the main thread after the load)
+			struct SEventLog final : public IVideoPlayerListener
+			{
+				void OnEnded(IVideoPlayer& p) override { PLog("event Ended (player time %.3f)", p.GetTime()); }
+				void OnLooped(IVideoPlayer& p) override { PLog("event Looped (player time %.3f)", p.GetTime()); }
+				void OnError(IVideoPlayer&, int code, const char* message) override { PLog("event Error %d (%s)", code, message != nullptr ? message : ""); }
+			};
+			SEventLog s_eventLog;
+			IVideoPlayer* s_eventPlayer = nullptr;
+
 			// P7: a second callback added and removed from the main thread while the loop runs.
 			struct SDummy final : public ILoadtimeCallback
 			{
@@ -705,6 +727,13 @@ namespace CEVPlayer
 						cry_sprintf(where, "loop %d iteration %u", s_loopIndex, s_iterations);
 						LogP6(where);
 					}
+					if ((s_iterations % 10) == 1)
+					{
+						char where[64];
+						cry_sprintf(where, "loop %d iteration %u", s_loopIndex, s_iterations);
+						LogSnapshot(where, s_p6Surface);
+						LogSnapshot(where, s_openSurface);
+					}
 				}
 
 				bool LoadtimeRender() override
@@ -755,16 +784,46 @@ namespace CEVPlayer
 					if (event == ESYSTEM_EVENT_LEVEL_LOAD_START_LOADINGSCREEN)
 					{
 						s_p8Pending = true;
+						if (!s_openSurface.empty())
+						{
+							if (const CryTexSourceApi* const api = ContractApi())
+							{
+								CryTexSourceOpen options = {};
+								options.size = sizeof(options);
+								options.flags = 1u | 2u; // autoplay, loop
+								options.volume = 1.f;
+								const int r = api->open(s_openSurface.c_str(), s_openSrc.c_str(), &options);
+								s_opened = s_opened || r == 1;
+								PLog("C: contract open(<%s>, <%s>, autoplay loop) at LOADINGSCREEN returned %d, HasPendingCommands %d", s_openSurface.c_str(), s_openSrc.c_str(), r,
+									Contract::HasPendingCommands() ? 1 : 0);
+							}
+							LogSnapshot("at LOADINGSCREEN", s_openSurface);
+						}
 						if (!s_p6Surface.empty() && mEnv->pManager != nullptr)
 						{
 							s_p6Player = static_cast<CVideoPlayerImpl*>(mEnv->pManager->FindPlayerBySurface(s_p6Surface.c_str()));
 							if (s_p6Player != nullptr)
+							{
 								s_p6LastSerial = s_p6Player->GetFrameSerial();
+								if (s_eventPlayer != s_p6Player)
+								{
+									s_p6Player->AddListener(&s_eventLog);
+									s_eventPlayer = s_p6Player;
+								}
+							}
 							LogP6("at LOADINGSCREEN");
 						}
 					}
 					if (event == ESYSTEM_EVENT_LEVEL_LOAD_START)
 					{
+						if (!s_destroySurface.empty() && mEnv->pManager != nullptr)
+						{
+							PLog("G: destroying surface <%s> on the main thread at LEVEL_LOAD_START (cev_play_surface <id>)", s_destroySurface.c_str());
+							if (s_p6Player != nullptr && stricmp(s_p6Surface.c_str(), s_destroySurface.c_str()) == 0)
+								s_p6Player = nullptr;
+							mEnv->pManager->ConsolePlaySurface(s_destroySurface.c_str(), nullptr, false);
+							PLog("G: destroyed; players %u, loading-loop callback registered %d", mEnv->pManager->GetPlayerCount(), mEnv->pManager->LoadtimeRegistered() ? 1 : 0);
+						}
 						if (!s_p7Done)
 						{
 							s_p7Done = true;
@@ -792,6 +851,8 @@ namespace CEVPlayer
 						if (s_p7Done)
 							PLog("P7 check: dummy calls %u, calls after remove %u", s_dummy.calls.load(), s_dummy.callsAfterRemove.load());
 						LogP6(name);
+						LogSnapshot(name, s_p6Surface);
+						LogSnapshot(name, s_openSurface);
 					}
 				}
 			};
@@ -811,6 +872,18 @@ namespace CEVPlayer
 					gEnv->pRenderer->RemoveTexture(static_cast<unsigned int>(s_texId));
 				s_texId = 0;
 				s_p6Player = nullptr;
+				if (s_eventPlayer != nullptr && mEnv->pManager != nullptr && mEnv->pManager->IsPlayer(s_eventPlayer))
+					s_eventPlayer->RemoveListener(&s_eventLog);
+				s_eventPlayer = nullptr;
+				if (s_opened && !s_openSurface.empty())
+				{
+					if (const CryTexSourceApi* const api = ContractApi())
+						api->close(s_openSurface.c_str());
+					PLog("C: contract close(<%s>)", s_openSurface.c_str());
+				}
+				s_opened = false;
+				s_openSurface.clear();
+				s_destroySurface.clear();
 				s_on = false;
 				PLog("off: callback removed, texture released");
 			}
@@ -835,15 +908,14 @@ namespace CEVPlayer
 					return;
 				}
 			}
-			const char* module = nullptr;
-			const int bits = ReadPatchedBits(&module);
-			PLog("P1: %s XUI2D_Patched() = %d (0x%x), bit 7 (load-time callbacks) %s", module, bits, bits < 0 ? 0 : bits, (bits >= 0 && (bits & 128) != 0) ? "SET" : "not set");
+			const bool available = RenderBridge::LoadtimeAvailable();
+			PLog("P1: load-time callbacks (XUI2D_Patched bit 7) %s", available ? "SET" : "not set");
 			if (args == nullptr || args->GetArgCount() < 2 || std::atoi(args->GetArg(1)) == 0)
 			{
 				Off();
 				return;
 			}
-			if (bits < 0 || (bits & 128) == 0)
+			if (!available)
 			{
 				PLog("unavailable: the renderer does not report load-time callbacks");
 				return;
@@ -853,7 +925,19 @@ namespace CEVPlayer
 			s_stallMs = args->GetArgCount() > 2 ? std::atoi(args->GetArg(2)) : 0;
 			s_drawMode = args->GetArgCount() > 3 ? std::atoi(args->GetArg(3)) : 1;
 			s_p6Surface = args->GetArgCount() > 4 && std::strcmp(args->GetArg(4), "-") != 0 ? args->GetArg(4) : "";
-			s_readbackDir = args->GetArgCount() > 5 ? args->GetArg(5) : "";
+			s_readbackDir = args->GetArgCount() > 5 && std::strcmp(args->GetArg(5), "-") != 0 ? args->GetArg(5) : "";
+			if (args->GetArgCount() > 6)
+			{
+				const std::string mode = args->GetArg(6);
+				if (mode.compare(0, 5, "open:") == 0 && mode.find(':', 5) != std::string::npos)
+				{
+					const size_t colon = mode.find(':', 5);
+					s_openSurface = mode.substr(5, colon - 5);
+					s_openSrc = mode.substr(colon + 1);
+				}
+				else if (mode.compare(0, 8, "destroy:") == 0)
+					s_destroySurface = mode.substr(8);
+			}
 			s_texBuf.assign(static_cast<size_t>(kTexSize) * kTexSize, 0xFFFF00FFu);
 			s_texId = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(reinterpret_cast<unsigned char*>(s_texBuf.data()), kTexSize, kTexSize, eTF_R8G8B8A8, eTF_R8G8B8A8, 0,
 				false, FILTER_BILINEAR, 0, "$CevProbeLoadtime", FT_NOMIPS));
@@ -871,7 +955,8 @@ namespace CEVPlayer
 			s_on = true;
 			char desc[256];
 			TexState(desc, sizeof(desc));
-			PLog("on: callback registered (order 100), stall %d ms, draw mode %d, P6 surface <%s>, texture %s", s_stallMs, s_drawMode, s_p6Surface.c_str(), desc);
+			PLog("on: callback registered (order 100), stall %d ms, draw mode %d, P6 surface <%s>, open <%s> <%s>, destroy <%s>, texture %s", s_stallMs, s_drawMode, s_p6Surface.c_str(),
+				s_openSurface.c_str(), s_openSrc.c_str(), s_destroySurface.c_str(), desc);
 		}
 
 		void Shutdown()
@@ -1057,9 +1142,17 @@ namespace CEVPlayer
 			mEnv->pManager->ConsolePlaySurface(args->GetArg(1), args->GetArgCount() > 2 ? args->GetArg(2) : nullptr, loop);
 		}
 
+		//! M10: one line on the loading-loop state (cev_info, cev_surfaces).
+		void LogLoadtimeState(const char* cmd)
+		{
+			LogAlways("%s: loadtime: available=%d registered=%d cev_loadtime=%d", cmd, RenderBridge::LoadtimeAvailable() ? 1 : 0,
+				mEnv->pManager != nullptr && mEnv->pManager->LoadtimeRegistered() ? 1 : 0, mEnv->m_cevLoadtime);
+		}
+
 		void CmdSurfaces(IConsoleCmdArgs*)
 		{
 			Contract::LogSurfaces();
+			LogLoadtimeState("cev_surfaces");
 		}
 
 		void CmdContractSelfTest(IConsoleCmdArgs* args)
@@ -1092,6 +1185,7 @@ namespace CEVPlayer
 				kVideoPlayerInterfaceVersion, kPluginCaps, Contract::ApiVersion(), Contract::SurfaceCount(), mEnv->pManager != nullptr ? mEnv->pManager->GetPlayerCount() : 0u);
 			LogAlways("cev_info: API table %u controls, %u queries, %u events; %u FlowGraph node classes",
 				static_cast<unsigned>(Api::Controls().size()), static_cast<unsigned>(Api::Queries().size()), static_cast<unsigned>(Api::Events().size()), Api::FlowNodeCount());
+			LogLoadtimeState("cev_info");
 		}
 
 		void CmdFlowTest(IConsoleCmdArgs* args)
@@ -1141,7 +1235,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");
 		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> draws the surface's texture top left as it is (an R8 packed texture shows the planes in grey); no argument = off");
 #if CEV_HAVE_LOADTIME_CALLBACKS
-		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir] registers an order-100 loading-loop callback that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
+		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>] registers an order-100 loading-loop callback that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
 #endif
 		REGISTER_COMMAND("cev_stats_file", DevProbe::CmdStatsFile, VF_NULL, "Measurement: cev_stats_file <path>|off writes the per-second cev_stats rows as CSV (turns cev_stats on)");
 
@@ -1159,6 +1253,7 @@ namespace CEVPlayer
 		ConsoleRegistrationHelper::Register("cev_volume", &mEnv->m_cevVolume, 1.f, VF_NULL, "Master volume of all videos (0.0 - 1.0), multiplied with the player volume");
 		REGISTER_CVAR2("cev_allowPlanar", &mEnv->m_cevAllowPlanar, 1, VF_NULL, "1 = surface players switch to a packed planar texture (R8: Y, U, V [, A]) while every consumer of the texture source contract accepts it; 0 = always RGBA8");
 		ConsoleRegistrationHelper::Register("cev_hiddenStopSeconds", &mEnv->m_cevHiddenStopSeconds, 2.f, VF_NULL, "Surface players that no consumer sees only decode (no copy / conversion / upload); after this many seconds hidden in a row they stop decoding the video. 0 = never stop");
+		REGISTER_CVAR2("cev_loadtime", &mEnv->m_cevLoadtime, 1, VF_NULL, "Keep texture-only players running during level loading screens (needs a renderer with load-time callbacks). 0 = pause everything while a level loads");
 	}
 
 	void UnregisterConsole()
@@ -1175,7 +1270,7 @@ namespace CEVPlayer
 		pConsole->RemoveCommand("cev_probe_loadtime");
 #endif
 
-		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_decodeMode", "cev_decodeAutoMinHeight", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds", "cev_allowPlanar" };
+		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_decodeMode", "cev_decodeAutoMinHeight", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds", "cev_allowPlanar", "cev_loadtime" };
 		for (const char* name : variables)
 			pConsole->UnregisterVariable(name, true);
 	}

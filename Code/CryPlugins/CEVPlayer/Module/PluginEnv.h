@@ -42,6 +42,7 @@ namespace CEVPlayer
 		int m_cevVariant = -1;    // cev_variant: -1 = automatic, 0 = main video, n = n-th <Variant> of the descriptor
 		float m_cevHiddenStopSeconds = 2.f; // cev_hiddenStopSeconds: hidden surface players stop decoding after this long (0 = never)
 		int m_cevAllowPlanar = 1;  // cev_allowPlanar: 0 = surface players always use RGBA8 (no packed planar layouts)
+		int m_cevLoadtime = 1;     // cev_loadtime (M10): 0 = pause everything while a level loads
 	};
 
 	extern SPluginEnv* mEnv;

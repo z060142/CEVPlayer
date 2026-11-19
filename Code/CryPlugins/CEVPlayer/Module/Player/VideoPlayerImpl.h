@@ -84,9 +84,13 @@ namespace CEVPlayer
 		void Tick(float dt);
 		//! Sends the queued events to the listeners (end of the frame update).
 		void DispatchEvents();
-		//! Level loading started / ended: pauses / resumes the clock without any renderer call.
-		void OnLevelLoadBegin();
+		//! Level loading started / ended: pauses / resumes the clock without any renderer call. keepRunning (M10): the
+		//! player runs in the loading loop, its clock is not paused.
+		void OnLevelLoadBegin(bool keepRunning);
 		void OnLevelLoadEnd();
+		//! M10: the player outputs only to its texture (not fullscreen, no material binding), so it can run in the
+		//! renderer's loading loop.
+		bool RunsDuringLoad() const { return !m_fullscreen && m_bindings.empty(); }
 		//! Stops decoding / audio and drops listeners and outputs that need no renderer. After this only
 		//! ReleaseRenderResources() and the destructor are valid.
 		void PrepareDestroy();

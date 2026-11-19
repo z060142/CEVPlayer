@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,19 @@ namespace CEVPlayer
 		void UpdateBeforeRender(float dt);
 		//! UpdateAfterRender: draws the fullscreen outputs on top of the frame and the stats overlay.
 		void UpdateAfterRender();
+		//! M10: the tick of the renderer's loading loop (render thread, LoadtimeUpdate of the order-100 callback). Applies
+		//! the queued contract commands and ticks the players that run during loads (RunsDuringLoad). No listener
+		//! dispatch: events stay queued until the first UpdateBeforeRender after the load. No engine timer is read.
+		void LoadtimeTick(float dt);
+		//! M10: adds / removes the loading-loop callback depending on intent (live players or queued contract commands).
+		//! Main thread only; a call from another thread returns at once.
+		void UpdateLoadtimeRegistration();
+		//! M10: players that output only to their texture keep running during level loads (cev_loadtime, callback
+		//! registered).
+		bool LoadModeActive() const;
+		bool LoadtimeRegistered() const { return m_loadtimeRegistered; }
+		//! M10: the lock every tick entry holds (main thread entries and the loading-loop tick never run at once).
+		std::recursive_mutex& TickMutex() { return m_tickMutex; }
 
 		// ---- engine events ----
 		void OnSystemEvent(ESystemEvent event, UINT_PTR wparam = 0);
@@ -91,6 +105,7 @@ namespace CEVPlayer
 	private:
 		class CConsoleListener;
 		class CLevelListener;
+		class CLoadtimeCallback;
 
 		CVideoPlayerImpl* Find(const IVideoPlayer* pPlayer) const;
 		void ReapZombies(bool force);
@@ -129,5 +144,11 @@ namespace CEVPlayer
 		float m_statsNextTime = 0.f;
 		double m_clock = 0.0;        // sum of the dt given to UpdateBeforeRender (stats timing)
 		std::vector<IVideoPlayer*> m_consoleSurfaces; // created by cev_play_surface
+
+		// M10: level loading loop
+		std::recursive_mutex m_tickMutex;
+		std::unique_ptr<CLoadtimeCallback> m_loadtimeCallback; // only with CEV_HAVE_LOADTIME_CALLBACKS
+		bool m_loadtimeRegistered = false;
+		bool m_inLoadTick = false;   // set while LoadtimeTick runs (renderer calls are allowed then)
 	};
 }
