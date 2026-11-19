@@ -167,6 +167,35 @@ namespace CEVPlayer
 		extern const CryGUID kFitTypeGuid;
 		extern const CryGUID kDecodeModeTypeGuid;
 
+		//! CryVS global functions (three namespaces = three drawers, Bindings/CryVSEnv.cpp). Fixed GUIDs, like the table's.
+		enum ECryVSFunction : uint32_t
+		{
+			eCryVS_Video_PlayOnScreen = 0,
+			eCryVS_Video_PlayOnMaterial,
+			eCryVS_Video_Stop,
+			eCryVS_VideoUI_PlayToSurface,
+			eCryVS_VideoUI_StopSurface,
+			eCryVS_VideoUI_SurfaceInfo,
+			eCryVS_VideoAdvanced_Open,
+			eCryVS_VideoAdvanced_Close,
+			eCryVS_VideoAdvanced_Play,
+			eCryVS_VideoAdvanced_Pause,
+			eCryVS_VideoAdvanced_Stop,
+			eCryVS_VideoAdvanced_Seek,
+			eCryVS_VideoAdvanced_SetLoop,
+			eCryVS_VideoAdvanced_SetRate,
+			eCryVS_VideoAdvanced_SetVolume,
+			eCryVS_VideoAdvanced_SetLanguage,
+			eCryVS_VideoAdvanced_SetVariant,
+			eCryVS_VideoAdvanced_SetSkippable,
+			eCryVS_VideoAdvanced_Info,
+			eCryVS_FunctionCount
+		};
+		extern const CryGUID kCryVSFunctionGuids[eCryVS_FunctionCount];
+		//! CryVS component signals of the WatchSurfaceID mode that are not table events (Ready / NewFrame reuse the events).
+		extern const CryGUID kCryVSResizedSignalGuid;
+		extern const CryGUID kCryVSClosedSignalGuid;
+
 		//! Number of FlowGraph node classes (the composite nodes of FlowApiNodes.cpp).
 		uint32_t FlowNodeCount();
 		//! Name of the n-th FlowGraph node class ("Video:PlayOnScreen", ...), nullptr past the end.

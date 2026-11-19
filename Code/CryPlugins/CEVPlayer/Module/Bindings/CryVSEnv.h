@@ -7,11 +7,16 @@ namespace CEVPlayer
 {
 	namespace CryVSBind
 	{
-		//! ESYSTEM_EVENT_GAME_POST_INIT: when gEnv->pCryVS exists, registers the component, its functions and signals
-		//! (generated from the API table) once and connects to the framework's envRefresh signal, which clears the
-		//! whole registry on every refresh, to register them again. gEnv->pCryVS == nullptr: nothing happens.
+		//! ESYSTEM_EVENT_GAME_POST_INIT: when gEnv->pCryVS exists, registers the types, the global functions of the three
+		//! drawers (Video, VideoUI, VideoAdvanced), the component with its member functions and its signals (each element
+		//! only when the registry does not have it yet), connects to the framework's envRefresh signal (which clears the
+		//! whole registry) to register them again, and adds the console command cev_cryvstest. gEnv->pCryVS == nullptr:
+		//! nothing happens.
 		void Initialize();
-		//! Plug-in shutdown: disconnects from envRefresh and makes the component stop using the player API.
+		//! Plug-in UpdateBeforeRender: components in WatchSurfaceID mode follow their surface; cev_cryvstest steps.
+		void Tick();
+		//! Plug-in shutdown: disconnects from envRefresh, stops the self test and makes the components stop using the
+		//! player API. (The registry has no removal API; see CryVSEnv.cpp.)
 		void Shutdown();
 	}
 }

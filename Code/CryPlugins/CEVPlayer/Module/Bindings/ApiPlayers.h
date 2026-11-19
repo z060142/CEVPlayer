@@ -59,6 +59,9 @@ namespace CEVPlayer
 			//! SetDecode: the decoder choice of a player (EDecodeMode value). Recorded only, the backend is the CPU.
 			void SetDecodeMode(int handle, int mode);
 			int GetDecodeMode(int handle) const;
+			//! The handle exists and its player was made through Create / CreateForSurface by a script (not owned by a
+			//! component, not an AttachSurface record): DestroyScriptOwned would destroy it.
+			bool IsScriptOwned(int handle) const;
 			//! The player behind a handle, nullptr (and a warning when `warn`) for an invalid one.
 			IVideoPlayer* Find(int handle, bool warn = true);
 			uint32_t Count() const { return static_cast<uint32_t>(m_records.size()); }

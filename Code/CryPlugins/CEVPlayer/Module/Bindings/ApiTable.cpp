@@ -29,6 +29,31 @@ namespace CEVPlayer
 		const CryGUID kVideoFileNameTypeGuid  = "DA1FFCAF-AF64-482B-BF62-B2C6002197F2"_cry_guid;
 		const CryGUID kFitTypeGuid            = "4DF842EF-5FF7-4794-B8E8-180FB499CEEA"_cry_guid;
 		const CryGUID kDecodeModeTypeGuid     = "14025090-A62F-4DC1-9A6E-47A9F50D5278"_cry_guid;
+		// CryVS global functions, in ECryVSFunction order (M6c).
+		const CryGUID kCryVSFunctionGuids[eCryVS_FunctionCount] =
+		{
+			"27AF1B77-C05D-456D-B465-016FB958F9D9"_cry_guid, // Video::PlayOnScreen
+			"BD64D321-5F54-4C88-BE59-9F89D90883E7"_cry_guid, // Video::PlayOnMaterial
+			"35BF4E46-7F0D-49AC-A196-B57EAB16D689"_cry_guid, // Video::Stop
+			"4276BD72-C99B-40B4-95C1-213C80FFEB98"_cry_guid, // VideoUI::PlayToSurface
+			"4212CE2B-B8C1-44E0-A010-E1B1391AF471"_cry_guid, // VideoUI::StopSurface
+			"70FA6405-329B-4335-AB42-5334E1F8DA79"_cry_guid, // VideoUI::SurfaceInfo
+			"30F7ED4B-1FC5-43E9-952A-80A3847F199F"_cry_guid, // VideoAdvanced::Open
+			"4CA6690D-4E60-4EBC-8782-1B0C9F2414A0"_cry_guid, // VideoAdvanced::Close
+			"414E5002-C895-45FD-A347-81D12E7C8465"_cry_guid, // VideoAdvanced::Play
+			"AF12D09D-DD5A-440F-B6F8-D21D5139C43D"_cry_guid, // VideoAdvanced::Pause
+			"46CA5F4B-83E0-4C20-892D-F47737861B40"_cry_guid, // VideoAdvanced::Stop
+			"404EFDA7-98CF-461A-BC27-62B92AEF6787"_cry_guid, // VideoAdvanced::Seek
+			"4ACC3D98-043C-4CA7-A43C-9DB7D96F69BA"_cry_guid, // VideoAdvanced::SetLoop
+			"285B5336-FBD5-4D52-A878-40FD620E7932"_cry_guid, // VideoAdvanced::SetRate
+			"C24FFE00-8215-4B4C-80D5-3996D2650B39"_cry_guid, // VideoAdvanced::SetVolume
+			"888EAF9B-3128-4510-9C50-9B26353DA322"_cry_guid, // VideoAdvanced::SetLanguage
+			"D71E69BE-A424-451D-8840-A7BCFE53ADDD"_cry_guid, // VideoAdvanced::SetVariant
+			"20A1CC28-BE7C-4382-8F5C-FAD6955C25D2"_cry_guid, // VideoAdvanced::SetSkippable
+			"13B9D4C4-43B4-4602-9E42-E8A6F07B4974"_cry_guid, // VideoAdvanced::Info
+		};
+		const CryGUID kCryVSResizedSignalGuid = "8431E4A5-BEA5-4461-B110-4B7883761FBC"_cry_guid;
+		const CryGUID kCryVSClosedSignalGuid  = "AAE0463C-E424-4A35-8737-00D3F22801F1"_cry_guid;
 		// Retired (see ApiTable.h): 6215D8DE-93E8-4236-9DB5-9DDCFD4F1C0D (TextureName), 2819FAC7-8B52-4BA3-9FA7-25BE56E317AD
 		// (InterfaceVersion), 23441E42-DE20-4EA3-A312-F6D624D5D83C (Caps).
 
@@ -455,6 +480,10 @@ namespace CEVPlayer
 			note(kVideoFileNameTypeGuid, "video file name type");
 			note(kFitTypeGuid, "video fit type");
 			note(kDecodeModeTypeGuid, "decode mode type");
+			for (uint32_t i = 0; i < eCryVS_FunctionCount; ++i)
+				note(kCryVSFunctionGuids[i], "CryVS global function");
+			note(kCryVSResizedSignalGuid, "CryVS Resized signal");
+			note(kCryVSClosedSignalGuid, "CryVS Closed signal");
 
 			// retired GUIDs must never come back
 			static const CryGUID retired[] =
