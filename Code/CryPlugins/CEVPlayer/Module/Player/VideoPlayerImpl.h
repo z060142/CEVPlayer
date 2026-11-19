@@ -143,6 +143,10 @@ namespace CEVPlayer
 		//! "audio" while an audio voice drives the clock (AudioClock), "cue" while the playback position of the cue
 		//! trigger does, otherwise "internal" (wall clock / video clock).
 		const char* ClockSourceName() const { return m_voice >= 0 ? "audio" : (m_cueClock ? m_cueClock->SourceName() : "internal"); }
+		//! Measurement (M10a): audio frames the output device consumed through this player's AudioClock (0 without one).
+		uint64_t ProbeAudioFramesConsumed() const { return m_audioClock ? m_audioClock->FramesConsumed() : 0; }
+		//! Measurement (M10a): of those, the frames that counted as media time (decoded audio, not silence).
+		uint64_t ProbeAudioFramesCounted() const { return m_audioClock ? m_audioClock->FramesCounted() : 0; }
 		//! Level unload: a cue trigger is stopped (the engine drops the level's audio data).
 		void OnLevelUnload();
 		//! Lateness of the picture on screen against the clock (clock time - presented frame timestamp, ms).

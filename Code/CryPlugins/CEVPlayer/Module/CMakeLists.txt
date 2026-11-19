@@ -104,6 +104,23 @@ if(CEV_HAVE_CRYVS)
 else()
 	message(STATUS "CEVPlayer: no CryVS headers, building without the CryVS bindings")
 endif()
+# M10: loading-loop callbacks (IRenderer::AddLoadtimeCallback, an engine patch). Only compiled when the engine's
+# IRenderer.h declares it; a stock engine keeps the old behaviour (clocks paused while a level loads). The renderer is
+# checked again at run time (XUI2D_Patched bit 7) before the interface is used.
+set(CEV_HAVE_LOADTIME_CALLBACKS OFF)
+set(CEV_IRENDERER_H "${CRYENGINE_DIR}/Code/CryEngine/CryCommon/CryRenderer/IRenderer.h")
+if(EXISTS "${CEV_IRENDERER_H}")
+	file(STRINGS "${CEV_IRENDERER_H}" CEV_LOADTIME_HITS REGEX "AddLoadtimeCallback")
+	if(CEV_LOADTIME_HITS)
+		set(CEV_HAVE_LOADTIME_CALLBACKS ON)
+	endif()
+endif()
+if(CEV_HAVE_LOADTIME_CALLBACKS)
+	message(STATUS "CEVPlayer: IRenderer.h declares AddLoadtimeCallback (CEV_HAVE_LOADTIME_CALLBACKS=1)")
+	target_compile_definitions(${THIS_PROJECT} PRIVATE CEV_HAVE_LOADTIME_CALLBACKS=1)
+else()
+	message(STATUS "CEVPlayer: no AddLoadtimeCallback in IRenderer.h, building without loading-loop callbacks")
+endif()
 set_target_properties(${THIS_PROJECT} PROPERTIES LINK_FLAGS "/ignore:4099 /ignore:4075 /ignore:4098")
 
 # CEVPlayerCore: CE independent decoding core (static library). It links the imported SDK targets libvpx / libwebm /
