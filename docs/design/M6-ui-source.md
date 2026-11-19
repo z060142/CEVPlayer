@@ -130,6 +130,7 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
   - `Video:Play`——輸入 Video（檔案）、Output（Surface／Screen／Material）、SurfaceID 或材質與槽、Loop、Autoplay、Decode（Auto／GPU／CPU）、Play／Stop／Pause／Resume；輸出 Ready（帶 SurfaceID、TextureId、Width、Height、Duration、HasAlpha、DecodeBackend）、Started、Ended、Looped、Error（帶代碼與文字）。一個節點就能播。
   - `Video:Stop`、`Video:Pause`（以 SurfaceID 或 Handle 指定）、`Video:Events`（以 SurfaceID 訂閱，不必持有 Handle）。
 - **進階**（類別 `VideoAdvanced`）：現有由描述表產生的 `Control:*` 與 `Query:*`，整理成一個名詞（`SurfaceId`；貼圖以 `TextureId` 查詢），補 `FrameSerial`、`IsLoaded`、`IsLooping`、`HasAudio`、`PixelLayout`、`DecodeBackend`、`Rate`、`Volume`、`Path`、解除材質綁定；幀序號改以兩個 32 位元埠或字串輸出，不再 2^31 回繞。逐一清單在 M6 的任務單定（依 `Module/Bindings/ApiTable.cpp`）。
+- **連通 UI**（類別 `VideoUI`；使用者 2026-11-19：「連通 UI 的節點開一個獨立抽屜」）：與 Surface ID 有關的節點獨立一個抽屜——以 Surface ID 播放到 UI（`VideoUI:PlayToSurface`）、查詢 surface 的資料給任何 UI 系統用（`VideoUI:SurfaceInfo`：TextureId、Width、Height、PixelLayout、FrameSerial、HasAlpha、Premultiplied）、surface 的事件（`VideoUI:SurfaceEvents`：Ready／NewFrame／Resized／Closed）。開箱即用的 `Video:Play` 因此只管 Screen 與 Material 兩種輸出。逐一清單在 M6 的任務單定。
 - 「路不鎖死」：任何 UI 系統都可以只靠節點輸出的 `TextureId`／`Width`／`Height`（RGBA8）使用，不必實作契約；完整的好處（§5、§6）只在經由契約時生效。
 
 ## 5. 節流與打包平面（M7、M8）
@@ -177,7 +178,7 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 | M7 | `hint`：可見性（§5.3）、開始時選變體、匯入 `-g`、結尾判定、量測欄位；契約 v2 的 `state`／時間與 `open`／`close`／`control` | 暫停時 `contentSerial` 不動；不可見時複製／轉色／上傳為零、2 秒後解碼為零、重新可見的補解時間有上限；`<video src>` 經由 `open` 播放 |
 | M8 | 打包排列、按需 RGBA、`eTF_R8` 上傳、`acceptLayouts` 協商 | 兩種排列的畫面在消費端逐像素比對差 ≤ 2 級；協商切換時聲音不中斷；基準表更新為實測 |
 | M9 | 解碼後端介面、Media Foundation 後端（讀回）、`Decode` 選項 | 無元件的機器自動退回；GPU／CPU 輸出逐像素差 ≤ 2 級；基準表加入 GPU 解碼 |
-| M10 | 關卡讀取期間推進 | 未設計——等 XTFrame 主線的機制 |
+| M10 | 關卡讀取期間推進 | 機制由 XTFrame 主線定（CE 倉 `docs/10-loading-time.md`，§10.2 第 14～18 點是來源端的規則）；**等主線通知引擎 patch（CE-90）併入後才實作**。要點見 §9 |
 
 消費端與執行期的對應工作（不在本倉）：CryXTUI——自動接上未綁定的 `engine://<id>`、持有參考與每幀確認、預乘修正、`hint`、平面取樣的著色（CE-86／CE-87 與其後續）；XTFrame 主倉——外部貼圖內容版本與使用情形（T-746）、「打包平面外部貼圖」的取樣能力（需求另送主線，編號由主線取）。
 
@@ -189,3 +190,13 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 - 裝置重設沒有處理；其他插件握有貼圖參考時的關機順序靠 §3 規則 2。
 - VP9 Video Extensions 不保證存在；VP8 的硬體解碼支援面很窄。
 - Core 沒有 CI；M4、M5 的畫面驗收尚未執行。
+
+## 9. 關卡讀取期間（M10 的前提，2026-11-19 由 XTFrame 主線提供；細節可能因其探測而修訂）
+
+- 同步載入關卡時主執行緒卡在 `LoadLevel`，畫面由引擎的載入期迴圈在**渲染執行緒**推動：每圈呼叫 `ILoadtimeCallback::LoadtimeUpdate(dt)`、`LoadtimeRender()`、present。主線的引擎 patch 17 讓多個回呼可以註冊（`IRenderer::AddLoadtimeCallback(cb, order)`）。
+- CEVPlayer 註冊自己的回呼，order 100（UI 消費端用 200，所以同一圈內先上傳、UI 後取樣）。載入期間 `LoadtimeUpdate(dt)` 就是播放器的 tick：在渲染執行緒、用它給的 dt（引擎計時器在載入期間不前進）。
+- 在回呼裡呼叫 `UpdateTextureInVideoMemory` 立即執行且合法；載入期間從主執行緒呼叫會被延後到載入結束；從其他執行緒（含解碼執行緒）呼叫不合法。
+- tick 會換兩次執行緒（載入開始：主 → 渲染；載入結束：渲染 → 主），兩個入口不會同時執行。tick 的程式不得假設固定執行緒，載入迴圈裡不得使用只限主執行緒的引擎服務：不碰 entity／flow／Schematyc、不開新檔（CryPak 讀取在迴圈期間被鎖——載入中途開新影片要另外測）、不依賴 `gEnv->pTimer` 或主幀編號。
+- 契約函式在載入期間由渲染執行緒呼叫；§3 規則 10（契約函式不呼叫引擎）已滿足。
+- 載入期間的聲音不在該文件的保證內，由 M10 自行驗證。Sandbox 開關卡時沒有載入迴圈（不支援）；非同步／分段載入時主迴圈照跑，走一般的 tick。
+- 對 M6～M9 的要求：播放器的 tick 從現在起就寫成「不假設主執行緒、時間由呼叫者給 dt」，M10 才不必重寫。
