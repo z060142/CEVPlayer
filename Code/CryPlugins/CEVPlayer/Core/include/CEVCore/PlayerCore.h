@@ -27,6 +27,7 @@
 #include "CEVCore/Resampler.h"
 #include "CEVCore/Stats.h"
 #include "CEVCore/Status.h"
+#include "CEVCore/VideoDecoderBackend.h"
 #include "CEVCore/WebmDemuxer.h"
 
 namespace cev
@@ -56,6 +57,11 @@ namespace cev
 		// with Unsupported / StatusDetail::NoSupportedTrack.
 		bool decodeVideo = true;
 		uint32_t videoThreads = 0;           // libvpx threads, 0 = auto from the resolution
+		// M9: decoder backend (VideoDecoderBackend.h), decided at Load(). Cpu = libvpx (default; the editor preview
+		// always uses it). Gpu / Auto try Media Foundation and fall back to libvpx with a reason
+		// (GetDecodeBackend()). Auto uses the GPU only for videos at least autoMinHeight tall.
+		DecodeMode decodeMode = DecodeMode::Cpu;
+		uint32_t autoMinHeight = 1080;
 		uint32_t audioBufferMs = 500;        // PCM ring size
 		ColorStandard colorStandard = ColorStandard::Auto;
 		bool enableStats = false;
@@ -231,6 +237,9 @@ namespace cev
 		bool DecoderAtEnd() const;           // all packets of all streams were decoded
 		bool VideoDecoderAtEnd() const;      // all video packets decoded (or no video)
 		uint32_t DecodeErrors() const;
+		// M9: the backend in use (consumer thread). Valid once Ready; may change once during playback when Media
+		// Foundation fails (device removed) and the player continues on libvpx (reason set).
+		DecodeBackendInfo GetDecodeBackend() const;
 
 		struct Impl;
 

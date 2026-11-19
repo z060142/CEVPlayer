@@ -37,6 +37,7 @@
 #include "CEVCore/Resampler.h"
 #include "CEVCore/Stats.h"
 #include "CEVCore/VideoDecoder.h"
+#include "CEVCore/VideoDecoderBackend.h"
 #include "CEVCore/WebmDemuxer.h"
 
 #include "ReferenceSampler.h"
@@ -417,11 +418,14 @@ namespace
 		}
 	};
 
+	DecodeMode g_decodeMode = DecodeMode::Cpu; // M9: backend of the players MakeConfig() configures
+
 	PlayerConfig MakeConfig(ManualClock& clk)
 	{
 		PlayerConfig cfg;
 		cfg.externalClock = &clk;
 		cfg.enableStats = true;
+		cfg.decodeMode = g_decodeMode;
 		return cfg;
 	}
 
@@ -4079,7 +4083,483 @@ namespace
 			g_context.c_str(), exact == compared ? "ok" : "FAILED", info.width, info.height, info.hasAlpha ? " alpha" : "",
 			info.colorStandard == ColorStandard::BT709 ? "BT709" : "BT601", info.colorRange == ColorRange::Full ? "full" : "limited",
 			static_cast<int>(info.chromaSiting), compared, exact, compared, maxDiff, diffCount ? sumDiff / static_cast<double>(diffCount) : 0.0);
+	
+	// =================================================================================================================
+	// M9: decoder backends (libvpx / Media Foundation), Decode = Auto | GPU | CPU
+	// =================================================================================================================
+	bool g_mfChecked = false;
+	bool g_mfUsable = false;
+	std::string g_mfWhy;
+
+	//! Media Foundation hardware decode usable on this machine? (opens a backend on a VP9 clip once). When not, every
+	//! MF item is reported as skipped instead of failing.
+	bool MfUsable()
+	{
+		if (g_mfChecked)
+			return g_mfUsable;
+		g_mfChecked = true;
+		if (!MediaFoundationCompiled())
+		{
+			g_mfWhy = "not compiled (no Windows)";
+			return false;
+		}
+		std::unique_ptr<WebmDemuxer> d;
+		if (Failed(WebmDemuxer::Open(OpenSource(g_mediaDir + "/vp9_alpha.webm", true), d)) || !d)
+		{
+			g_mfWhy = "cannot open vp9_alpha.webm";
+			return false;
+		}
+		MediaFoundationConfig mc;
+		mc.stream = d->Video();
+		mc.maxPacketSize = d->Video().maxPacketSize;
+		mc.maxAdditionalSize = d->Video().maxAdditionalSize;
+		std::unique_ptr<IVideoDecoderBackend> b;
+		char why[192] = {};
+		g_mfUsable = Succeeded(CreateMediaFoundationBackend(mc, b, why, sizeof(why))) && b != nullptr;
+		if (g_mfUsable)
+		{
+			const DecodeBackendInfo bi = b->Info();
+			Log("  m9: Media Foundation usable, adapter \"%s\", alpha %s\n", bi.adapter, bi.alphaHardware ? "hardware" : "libvpx");
+		}
+		g_mfWhy = why;
+		return g_mfUsable;
 	}
+
+	void LogSkip(const char* what)
+	{
+		Log("  %-34s SKIPPED: no hardware VP9 decode (%s)\n", what, g_mfWhy.c_str());
+	}
+
+	struct PlaneDiff
+	{
+		uint64_t differing = 0;
+		int maxDiff = 0;
+		double sum = 0.0;
+		uint64_t count = 0;
+	};
+
+	//! The packed buffer of the Media Foundation backend equals libvpx's byte for byte (Y, U, V, A), every frame.
+	void TestMfBytes(const std::string& path)
+	{
+		const size_t slash = path.find_last_of("/\\");
+		g_context = std::string("mf bytes ") + (slash == std::string::npos ? path : path.substr(slash + 1));
+		if (!MfUsable())
+		{
+			LogSkip(g_context.c_str());
+			return;
+		}
+		std::unique_ptr<WebmDemuxer> d;
+		CHECK(Succeeded(WebmDemuxer::Open(OpenSource(path, true), d)));
+		if (!d)
+			return;
+		const VideoStreamInfo& v = d->Video();
+		FrameFormat f;
+		f.width = v.width;
+		f.height = v.height;
+		f.hasAlpha = v.hasAlpha;
+		f.withRgba = false;
+		FrameRing ringL, ringM;
+		CHECK(Succeeded(ringL.Init(f, 2)));
+		CHECK(Succeeded(ringM.Init(f, 6)));
+		CHECK(ringL.IsPacked() && ringM.IsPacked());
+		std::unique_ptr<IVideoDecoderBackend> lb, mb;
+		CHECK(Succeeded(CreateLibvpxBackend(v, 4, lb)));
+		MediaFoundationConfig mc;
+		mc.stream = v;
+		mc.maxPacketSize = v.maxPacketSize;
+		mc.maxAdditionalSize = v.maxAdditionalSize;
+		char why[192] = {};
+		CHECKF(Succeeded(CreateMediaFoundationBackend(mc, mb, why, sizeof(why))), "MF backend: %s", why);
+		if (!lb || !mb)
+			return;
+		CHECK(mb->Info().kind == DecodeBackendKind::MediaFoundation && mb->Info().hardware);
+		CHECK(mb->MaxInFlight() == 3 && lb->MaxInFlight() == 1);
+
+		const size_t packedBytes = static_cast<size_t>(ringL.PackedWidth()) * static_cast<size_t>(ringL.PackedHeight());
+		const int kHist = 8;
+		std::vector<std::vector<uint8_t>> hist(kHist, std::vector<uint8_t>(packedBytes));
+		std::vector<int> histId(kHist, -1);
+		std::vector<uint8_t> pkt(v.maxPacketSize + 16), add(v.maxAdditionalSize + 16);
+		PlaneDiff diff[4];
+		int libvpxPictures = 0, compared = 0, mfPictures = 0, mfFailed = 0, missing = 0;
+		uint32_t mfInFlight = 0;
+		double readback = 0.0, decode = 0.0;
+
+		auto receiveMf = [&]()
+		{
+			DecodeTicket t;
+			Status r = Status::Ok;
+			while (mb->Receive(t, r))
+			{
+				--mfInFlight;
+				if (r == Status::Ok)
+				{
+					++mfPictures;
+					readback += t.readbackMs;
+					decode += t.decodeMs;
+					const int id = static_cast<int>(t.pts);
+					const int h = id % kHist;
+					if (histId[static_cast<size_t>(h)] != id)
+						++missing;
+					else
+					{
+						++compared;
+						for (int pl = 0; pl < (f.hasAlpha ? 4 : 3); ++pl)
+						{
+							const PlaneRect rc = ringM.PackedPlane(pl);
+							for (int y = 0; y < rc.h; ++y)
+							{
+								const size_t off = static_cast<size_t>(rc.y + y) * static_cast<size_t>(ringM.PackedWidth()) + static_cast<size_t>(rc.x);
+								const uint8_t* a = t.slot->packed + off;
+								const uint8_t* b = hist[static_cast<size_t>(h)].data() + off;
+								if (std::memcmp(a, b, static_cast<size_t>(rc.w)) != 0)
+								{
+									for (int x = 0; x < rc.w; ++x)
+									{
+										const int dd = std::abs(static_cast<int>(a[x]) - static_cast<int>(b[x]));
+										diff[pl].differing += dd != 0 ? 1u : 0u;
+										diff[pl].maxDiff = std::max(diff[pl].maxDiff, dd);
+										diff[pl].sum += dd;
+									}
+								}
+								diff[pl].count += static_cast<uint64_t>(rc.w);
+							}
+						}
+					}
+				}
+				else
+					++mfFailed;
+				ringM.Abandon(t.slotIndex);
+			}
+		};
+
+		const uint32_t n = d->VideoPacketCount();
+		for (uint32_t i = 0; i < n; ++i)
+		{
+			const PacketRef& ref = d->VideoPacket(i);
+			CHECK(Succeeded(d->ReadVideoPacket(i, pkt.data(), static_cast<uint32_t>(pkt.size()))));
+			const bool alpha = v.hasAlpha && ref.additionalSize > 0 && Succeeded(d->ReadVideoAdditional(i, add.data(), static_cast<uint32_t>(add.size())));
+			DecodePacket cp{pkt.data(), ref.size, ref.keyframe};
+			DecodePacket ap{add.data(), alpha ? ref.additionalSize : 0u, ref.keyframe};
+
+			// libvpx: synchronous
+			uint64_t e = 0;
+			const int ls = ringL.AcquireWrite(e);
+			DecodeTicket lt;
+			lt.epoch = e;
+			lt.pts = static_cast<double>(i);
+			lt.slotIndex = ls;
+			lt.slot = &ringL.GetSlot(static_cast<uint32_t>(ls));
+			CHECK(Succeeded(lb->Submit(cp, alpha ? &ap : nullptr, lt)));
+			DecodeTicket done;
+			Status r = Status::Ok;
+			CHECK(lb->Receive(done, r) && done.slotIndex == ls);
+			if (r == Status::Ok)
+			{
+				++libvpxPictures;
+				std::memcpy(hist[i % kHist].data(), done.slot->packed, packedBytes);
+				histId[i % kHist] = static_cast<int>(i);
+			}
+			ringL.Abandon(ls);
+
+			// Media Foundation: asynchronous, at most MaxInFlight() pictures in flight
+			for (int guard = 0; guard < 5000; ++guard)
+			{
+				receiveMf();
+				if (mfInFlight >= mb->MaxInFlight())
+				{
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					continue;
+				}
+				const int ms = ringM.AcquireWrite(e);
+				CHECK(ms >= 0);
+				DecodeTicket mt;
+				mt.epoch = e;
+				mt.pts = static_cast<double>(i);
+				mt.slotIndex = ms;
+				mt.slot = &ringM.GetSlot(static_cast<uint32_t>(ms));
+				const Status st = mb->Submit(cp, alpha ? &ap : nullptr, mt);
+				if (st == Status::Busy)
+				{
+					ringM.Abandon(ms);
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					continue;
+				}
+				CHECKF(st == Status::Ok, "MF submit %u: %s", i, StatusToString(st));
+				if (st == Status::Ok)
+					++mfInFlight;
+				else
+					ringM.Abandon(ms);
+				break;
+			}
+		}
+		mb->Drain();
+		CHECK(WaitFor([&] { receiveMf(); return mfInFlight == 0; }, 10000));
+		CHECKF(mfFailed == 0 && missing == 0, "MF failed %d, unmatched %d", mfFailed, missing);
+		CHECKF(compared == libvpxPictures && mfPictures == libvpxPictures, "compared %d, MF pictures %d, libvpx pictures %d", compared, mfPictures, libvpxPictures);
+		const char* names[4] = {"Y", "U", "V", "A"};
+		bool identical = true;
+		char line[512];
+		int len = 0;
+		line[0] = 0;
+		for (int pl = 0; pl < (f.hasAlpha ? 4 : 3); ++pl)
+		{
+			identical = identical && diff[pl].differing == 0;
+			len += std::snprintf(line + len, sizeof(line) - static_cast<size_t>(len), " %s: %llu/%llu differ, max %d, mean %.6f;", names[pl],
+				(unsigned long long)diff[pl].differing, (unsigned long long)diff[pl].count, diff[pl].maxDiff,
+				diff[pl].count ? diff[pl].sum / static_cast<double>(diff[pl].count) : 0.0);
+		}
+		CHECKF(identical, "packed buffers differ:%s", line);
+		Log("  %-34s %s: %d frames byte compared, MF decode %.3f ms, read-back %.3f ms per frame;%s\n", g_context.c_str(),
+			identical ? "identical" : "DIFFERENT", compared, compared ? decode / compared : 0.0, compared ? readback / compared : 0.0, line);
+	}
+
+	PlayerConfig MakeConfigMode(ManualClock& clk, DecodeMode mode)
+	{
+		PlayerConfig cfg = MakeConfig(clk);
+		cfg.decodeMode = mode;
+		cfg.outputRgba = false;
+		return cfg;
+	}
+
+	bool PackedEqual(const FrameView& a, const FrameView& b)
+	{
+		if (a.packed == nullptr || b.packed == nullptr || a.packedWidth != b.packedWidth || a.packedHeight != b.packedHeight)
+			return false;
+		return std::memcmp(a.packed, b.packed, static_cast<size_t>(a.packedWidth) * static_cast<size_t>(a.packedHeight)) == 0;
+	}
+
+	//! The selection rules and the fallbacks of PlayerCore (VP8, Auto threshold, simulated missing MFT and failing
+	//! SetInputType).
+	void TestDecodeSelection()
+	{
+		g_context = "m9 selection";
+		ManualClock clk;
+		{
+			PlayerCore p(MakeConfigMode(clk, DecodeMode::Cpu));
+			if (LoadAndWait(p, g_mediaDir + "/vp9_alpha.webm", true))
+			{
+				const DecodeBackendInfo bi = p.GetDecodeBackend();
+				CHECK(bi.kind == DecodeBackendKind::Libvpx && !bi.hardware && bi.reason[0] == 0);
+			}
+		}
+		{
+			PlayerCore p(MakeConfigMode(clk, DecodeMode::Gpu));
+			if (LoadAndWait(p, g_mediaDir + "/vp8_vorbis.webm", true))
+			{
+				const DecodeBackendInfo bi = p.GetDecodeBackend();
+				CHECKF(bi.kind == DecodeBackendKind::Libvpx && !bi.hardware && bi.reason[0] != 0, "VP8 with GPU: kind %d reason '%s'",
+					static_cast<int>(bi.kind), bi.reason);
+				Log("  %-34s ok: VP8 + GPU -> libvpx (%s)\n", g_context.c_str(), bi.reason);
+			}
+		}
+		{
+			// Auto below the threshold (360p < 1080): libvpx
+			PlayerCore p(MakeConfigMode(clk, DecodeMode::Auto));
+			if (LoadAndWait(p, g_mediaDir + "/vp9_alpha.webm", true))
+				CHECK(p.GetDecodeBackend().kind == DecodeBackendKind::Libvpx);
+		}
+		const MediaFoundationTestFault faults[2] = {MediaFoundationTestFault::NoDecoderMft, MediaFoundationTestFault::SetInputTypeFails};
+		for (MediaFoundationTestFault fault : faults)
+		{
+			SetMediaFoundationTestFault(fault);
+			PlayerCore p(MakeConfigMode(clk, DecodeMode::Gpu));
+			if (LoadAndWait(p, g_mediaDir + "/vp9_alpha.webm", true))
+			{
+				const DecodeBackendInfo bi = p.GetDecodeBackend();
+				CHECKF(bi.kind == DecodeBackendKind::Libvpx && bi.reason[0] != 0, "fault %d: kind %d reason '%s'", static_cast<int>(fault),
+					static_cast<int>(bi.kind), bi.reason);
+				Sim sim;
+				sim.Init(p, clk);
+				CHECK(p.Update());
+				sim.presented = 1;
+				CHECK(Succeeded(p.Play()));
+				CHECK(sim.RunUntilPresented(30));
+				Log("  %-34s ok: fault %d -> libvpx (%s)\n", g_context.c_str(), static_cast<int>(fault), bi.reason);
+			}
+			SetMediaFoundationTestFault(MediaFoundationTestFault::None);
+		}
+		CHECK(MediaFoundationStartupCount() == 0);
+		if (!MfUsable())
+		{
+			LogSkip("m9 selection (GPU / Auto 1080p)");
+			return;
+		}
+		{
+			PlayerCore p(MakeConfigMode(clk, DecodeMode::Gpu));
+			if (LoadAndWait(p, g_mediaDir + "/vp9_alpha.webm", true))
+			{
+				const DecodeBackendInfo bi = p.GetDecodeBackend();
+				CHECKF(bi.kind == DecodeBackendKind::MediaFoundation && bi.hardware && bi.reason[0] == 0, "GPU: kind %d reason '%s'",
+					static_cast<int>(bi.kind), bi.reason);
+				CHECK(MediaFoundationStartupCount() == 1);
+			}
+		}
+		CHECK(MediaFoundationStartupCount() == 0);
+		{
+			PlayerCore p(MakeConfigMode(clk, DecodeMode::Auto));
+			if (LoadAndWait(p, g_mediaDir + "/vp9_1080p30_opus.webm", true))
+				CHECK(p.GetDecodeBackend().kind == DecodeBackendKind::MediaFoundation);
+		}
+	}
+
+	//! 20 seeks: the first frame shown by the GPU player equals the CPU player's byte for byte.
+	void TestMfSeekCompare(const std::string& path)
+	{
+		const size_t slash = path.find_last_of("/\\");
+		g_context = std::string("mf seek ") + (slash == std::string::npos ? path : path.substr(slash + 1));
+		if (!MfUsable())
+		{
+			LogSkip(g_context.c_str());
+			return;
+		}
+		ManualClock ca, cb;
+		PlayerCore cpu(MakeConfigMode(ca, DecodeMode::Cpu));
+		PlayerCore gpu(MakeConfigMode(cb, DecodeMode::Gpu));
+		if (!LoadAndWait(cpu, path, true) || !LoadAndWait(gpu, path, true))
+			return;
+		CHECK(gpu.GetDecodeBackend().kind == DecodeBackendKind::MediaFoundation);
+		const double duration = cpu.GetInfo().durationSeconds;
+		CHECK(Succeeded(cpu.Play()) && Succeeded(cpu.Pause()));
+		CHECK(Succeeded(gpu.Play()) && Succeeded(gpu.Pause()));
+		uint32_t seed = 12345u;
+		int same = 0;
+		for (int k = 0; k < 20; ++k)
+		{
+			seed = seed * 1664525u + 1013904223u;
+			const double t = (static_cast<double>(seed >> 8) / static_cast<double>(1u << 24)) * std::max(0.1, duration - 0.5);
+			CHECK(Succeeded(cpu.Seek(t)) && Succeeded(gpu.Seek(t)));
+			const bool ra = WaitFor([&] { return cpu.VideoBufferedFrame(); }, 10000);
+			const bool rb = WaitFor([&] { return gpu.VideoBufferedFrame(); }, 10000);
+			CHECKF(ra && rb, "seek %.3f: frame buffered cpu %d gpu %d", t, ra ? 1 : 0, rb ? 1 : 0);
+			cpu.Update();
+			gpu.Update();
+			FrameView fa, fb;
+			CHECK(cpu.GetFrame(fa) && gpu.GetFrame(fb));
+			const bool eq = std::fabs(fa.pts - fb.pts) < 1e-6 && PackedEqual(fa, fb);
+			CHECKF(eq, "seek %.3f: cpu pts %.3f gpu pts %.3f, packed %s", t, fa.pts, fb.pts, PackedEqual(fa, fb) ? "equal" : "different");
+			same += eq ? 1 : 0;
+		}
+		Log("  %-34s %s: %d/20 seeks identical\n", g_context.c_str(), same == 20 ? "ok" : "FAILED", same);
+	}
+
+	//! A run of the existing playback tests with the GPU backend (loop three rounds, M7 hidden / stopped / catch-up,
+	//! seek, steady state allocations).
+	void TestMfReuse()
+	{
+		if (!MfUsable())
+		{
+			LogSkip("m9 loop / hidden / seek on MF");
+			return;
+		}
+		g_decodeMode = DecodeMode::Gpu;
+		TestLoop(*FindClip("vp9_alpha.webm"));
+		TestHiddenCatchUp(*FindClip("vp9_1080p30_opus.webm"), 300);
+		TestHiddenEnd(*FindClip("vp9_alpha.webm"));
+		TestSeek(*FindClip("vp9_alpha.webm"), 3.3);
+		TestSeek(*FindClip("vp9_1080p30_opus.webm"), 5.0);
+		TestPlayback(*FindClip("vp9_1080p30_opus.webm"));
+		TestSteadyStateAllocations(*FindClip("vp9_alpha.webm"));
+		g_decodeMode = DecodeMode::Cpu;
+		// the runs above really used Media Foundation
+		g_context = "m9 reuse";
+		ManualClock clk;
+		PlayerCore p(MakeConfigMode(clk, DecodeMode::Gpu));
+		if (LoadAndWait(p, ClipPath(*FindClip("vp9_alpha.webm")), true))
+			CHECK(p.GetDecodeBackend().kind == DecodeBackendKind::MediaFoundation);
+	}
+
+	//! The device disappears during playback: the player continues on libvpx from where it was.
+	void TestMfDeviceLost()
+	{
+		g_context = "mf device lost";
+		if (!MfUsable())
+		{
+			LogSkip(g_context.c_str());
+			return;
+		}
+		SetMediaFoundationTestFault(MediaFoundationTestFault::DeviceLostAfter, 40);
+		ManualClock clk;
+		const Clip& clip = *FindClip("vp9_alpha.webm");
+		PlayerCore p(MakeConfigMode(clk, DecodeMode::Gpu));
+		if (LoadAndWait(p, ClipPath(clip), true))
+		{
+			CHECK(p.GetDecodeBackend().kind == DecodeBackendKind::MediaFoundation);
+			Sim sim;
+			sim.Init(p, clk);
+			CHECK(p.Update());
+			sim.presented = 1;
+			CHECK(Succeeded(p.Play()));
+			CHECK(sim.RunToEnd(clip.duration + 2.0));
+			CHECK(!sim.timedOut);
+			CHECK(p.GetState() == PlayerState::Ended);
+			const DecodeBackendInfo bi = p.GetDecodeBackend();
+			CHECKF(bi.kind == DecodeBackendKind::Libvpx && std::strstr(bi.reason, "device") != nullptr, "after loss: kind %d reason '%s'",
+				static_cast<int>(bi.kind), bi.reason);
+			CHECKF(sim.presented + 3 >= clip.videoFrames && sim.presented <= clip.videoFrames, "presented %llu of %u",
+				(unsigned long long)sim.presented, clip.videoFrames);
+			Log("  %-34s ok: %llu/%u frames, continued on libvpx (%s)\n", g_context.c_str(), (unsigned long long)sim.presented, clip.videoFrames, bi.reason);
+		}
+		SetMediaFoundationTestFault(MediaFoundationTestFault::None);
+	}
+
+	//! Six 1080p players with Decode = GPU at once: all load and play (the ones that get no hardware decoder fall back),
+	//! destruction is bounded, MFStartup / MFShutdown stay paired.
+	void TestMfSixPlayers(const std::string& path)
+	{
+		g_context = "mf six players";
+		if (!MfUsable())
+		{
+			LogSkip(g_context.c_str());
+			return;
+		}
+		const int kPlayers = 6;
+		ManualClock clk[kPlayers];
+		std::unique_ptr<PlayerCore> p[kPlayers];
+		for (int i = 0; i < kPlayers; ++i)
+		{
+			p[i] = std::make_unique<PlayerCore>(MakeConfigMode(clk[i], DecodeMode::Gpu));
+			std::unique_ptr<IByteSource> src = OpenSource(path, true);
+			CHECK(src != nullptr);
+			if (src)
+				CHECK(Succeeded(p[i]->Load(std::move(src))));
+		}
+		int hw = 0, ready = 0;
+		for (int i = 0; i < kPlayers; ++i)
+		{
+			CHECK(WaitFor([&] { return p[i]->GetLoadState() != LoadState::Loading; }, 20000));
+			if (p[i]->GetLoadState() == LoadState::Ready)
+			{
+				++ready;
+				const DecodeBackendInfo bi = p[i]->GetDecodeBackend();
+				hw += bi.hardware ? 1 : 0;
+				if (!bi.hardware)
+					Log("  %-34s player %d on libvpx: %s\n", g_context.c_str(), i, bi.reason);
+			}
+		}
+		CHECK(ready == kPlayers);
+		std::vector<Sim> sim(kPlayers);
+		for (int i = 0; i < kPlayers; ++i)
+		{
+			sim[i].Init(*p[i], clk[i]);
+			CHECK(p[i]->Update());
+			sim[i].presented = 1;
+			CHECK(Succeeded(p[i]->Play()));
+		}
+		for (int s = 0; s < 120; ++s)
+			for (int i = 0; i < kPlayers; ++i)
+				CHECK(sim[i].Step());
+		for (int i = 0; i < kPlayers; ++i)
+			CHECKF(sim[i].presented >= 55, "player %d presented %llu", i, (unsigned long long)sim[i].presented);
+		const auto t0 = std::chrono::steady_clock::now();
+		for (int i = 0; i < kPlayers; ++i)
+			p[i].reset();
+		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		CHECKF(ms < 3000.0, "destroying six players took %.0f ms", ms);
+		CHECK(MediaFoundationStartupCount() == 0);
+		Log("  %-34s ok: %d/%d ready, %d with hardware decode, destroyed in %.0f ms\n", g_context.c_str(), ready, kPlayers, hw, ms);
+	}
+}
 
 int main(int argc, char** argv)
 {
@@ -4220,6 +4700,24 @@ int main(int argc, char** argv)
 		if (!benchDir.empty())
 			for (const char* f : { "vp9_1080p30.webm", "vp9_1080p30_alpha.webm", "vp9_1080p60.webm", "vp9_1080p60_alpha.webm", "vp9_2160p30.webm", "vp9_2160p30_alpha.webm" })
 				TestReferenceSampler(benchDir + "/" + f, 4);
+	}
+	if (wanted("m9"))
+	{
+		TestDecodeSelection();
+		if (!benchDir.empty())
+			for (const char* f : { "vp9_1080p30.webm", "vp9_1080p30_alpha.webm", "vp9_1080p60.webm", "vp9_1080p60_alpha.webm", "vp9_2160p30.webm", "vp9_2160p30_alpha.webm" })
+				TestMfBytes(benchDir + "/" + f);
+		else
+			Log("  m9 bytes                           SKIPPED: no --bench directory\n");
+		TestMfBytes(g_mediaDir + "/vp9_alpha.webm");
+		TestMfBytes(g_mediaDir + "/vp9_1080p30_opus.webm");
+		TestMfSeekCompare(g_mediaDir + "/vp9_1080p30_opus.webm");
+		TestMfSeekCompare(g_mediaDir + "/vp9_alpha.webm");
+		if (!benchDir.empty())
+			TestMfSeekCompare(benchDir + "/vp9_2160p30_alpha.webm");
+		TestMfReuse();
+		TestMfDeviceLost();
+		TestMfSixPlayers(g_mediaDir + "/vp9_1080p30_opus.webm");
 	}
 	if (wanted("stress"))
 		TestStress(stressIterations);
