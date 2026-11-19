@@ -406,9 +406,9 @@ namespace CEVPlayer
 				return false;
 			}
 			// M10: the same lock as the manager's tick entries (the loading-loop tick never runs at the same time)
-			std::unique_lock<std::recursive_mutex> tickLock;
+			std::unique_ptr<CPlayerManager::CTickLock> tickLock;
 			if (mEnv->pManager != nullptr)
-				tickLock = std::unique_lock<std::recursive_mutex>(mEnv->pManager->TickMutex());
+				tickLock = std::make_unique<CPlayerManager::CTickLock>(mEnv->pManager->TickMutex());
 
 			SValue args[kMaxParams];
 			for (uint32_t i = 0; i < entry.paramCount; ++i)

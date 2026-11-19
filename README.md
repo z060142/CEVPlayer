@@ -52,7 +52,8 @@ Licence: Boost Software License 1.0, see [LICENSE](LICENSE). Third-party librari
   by the renderer's `XUI2D_Patched` export), players that output only to their texture (surface and named-texture
   players) keep playing, with sound, while the engine's loading loop runs; contract `open` / `control` sent during the
   load are applied there. Fullscreen and material outputs pause until the load ends. On an unpatched engine, or with
-  `cev_loadtime 0`, every player pauses during the load and continues afterwards.
+  `cev_loadtime 0`, every player pauses during the load and continues afterwards. The loading loop is paced by the
+  display (the engine forces vsync on during it), so video updates at the display's refresh rate at most.
 * **Texture-source contract for UI consumers**: `CEVPlayer.dll` exports `CryTexSource_v1` (contract version 2,
   specified in [docs/design/M6-ui-source.md](docs/design/M6-ui-source.md) §3; no shared header - a consumer copies the C
   declarations). A UI plug-in finds the export by scanning the loaded modules and then, per surface id:
