@@ -14,6 +14,11 @@
 #include "Render/FullscreenOutput.h"
 #include "Render/RenderBridge.h"
 
+// measurement (S0): process / GPU memory in the stats CSV
+#include <CryCore/Platform/CryWindows.h>
+#include <psapi.h>
+#include <dxgi1_4.h>
+
 namespace CEVPlayer
 {
 	namespace
@@ -32,6 +37,84 @@ namespace CEVPlayer
 		std::vector<FullscreenOutput::SLayer> s_layers;
 		std::vector<std::string> s_statsLines;
 		std::vector<const char*> s_statsLinePtrs;
+
+		// ---- measurement (S0): cev_stats_file
+		FILE* s_statsFile = nullptr;
+		float s_statsFileStart = 0.f;
+
+		double ProcessMemoryMb(bool privateBytes)
+		{
+			PROCESS_MEMORY_COUNTERS_EX pmc = {};
+			pmc.cb = sizeof(pmc);
+			// K32GetProcessMemoryInfo lives in kernel32 (Windows 7+); looked up so no psapi.lib link is needed.
+			using PFN_GetPmi = BOOL(WINAPI*)(HANDLE, PROCESS_MEMORY_COUNTERS*, DWORD);
+			static const PFN_GetPmi s_getPmi = reinterpret_cast<PFN_GetPmi>(::GetProcAddress(::GetModuleHandleA("kernel32.dll"), "K32GetProcessMemoryInfo"));
+			if (s_getPmi == nullptr || !s_getPmi(::GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc)))
+				return -1.0;
+			return static_cast<double>(privateBytes ? pmc.PrivateUsage : pmc.WorkingSetSize) / (1024.0 * 1024.0);
+		}
+
+		//! This process's local video memory use on adapter 0 (IDXGIAdapter3::QueryVideoMemoryInfo), MB; -1 = unavailable.
+		double ProcessGpuMemoryMb()
+		{
+			static IDXGIAdapter3* s_adapter = nullptr;
+			static bool s_tried = false;
+			if (!s_tried)
+			{
+				s_tried = true;
+				if (HMODULE hDxgi = ::LoadLibraryA("dxgi.dll"))
+				{
+					using PFN_Create = HRESULT(WINAPI*)(REFIID, void**);
+					if (PFN_Create pCreate = reinterpret_cast<PFN_Create>(::GetProcAddress(hDxgi, "CreateDXGIFactory1")))
+					{
+						IDXGIFactory1* pFactory = nullptr;
+						if (SUCCEEDED(pCreate(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&pFactory))) && pFactory != nullptr)
+						{
+							IDXGIAdapter1* pAdapter = nullptr;
+							if (SUCCEEDED(pFactory->EnumAdapters1(0, &pAdapter)) && pAdapter != nullptr)
+							{
+								pAdapter->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&s_adapter));
+								pAdapter->Release();
+							}
+							pFactory->Release();
+						}
+					}
+				}
+			}
+			if (s_adapter == nullptr)
+				return -1.0;
+			DXGI_QUERY_VIDEO_MEMORY_INFO info = {};
+			if (FAILED(s_adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+				return -1.0;
+			return static_cast<double>(info.CurrentUsage) / (1024.0 * 1024.0);
+		}
+	}
+
+	void CPlayerManager::SetStatsFile(const char* path)
+	{
+		if (s_statsFile != nullptr)
+		{
+			std::fclose(s_statsFile);
+			s_statsFile = nullptr;
+			LogAlways("cev_stats_file: closed");
+		}
+		if (path == nullptr || path[0] == '\0')
+			return;
+		s_statsFile = std::fopen(path, "w");
+		if (s_statsFile == nullptr)
+		{
+			LogAlways("cev_stats_file: cannot open <%s>", path);
+			return;
+		}
+		s_statsFileStart = NowSeconds();
+		std::fprintf(s_statsFile, "wall_s,player,t,width,height,alpha,decode_avg_ms,decode_p99_ms,copy_avg_ms,copy_p99_ms,color_avg_ms,color_p99_ms,"
+			"convert_avg_ms,convert_p99_ms,upload_avg_ms,upload_p99_ms,uploads_per_s,upload_bytes_per_frame,upload_bytes_per_s,frames_decoded,dropped,ring_avg,"
+			"proc_ws_mb,proc_private_mb,gpu_local_mb,players\n");
+		// baseline row (player 0): memory before / without the measured players
+		std::fprintf(s_statsFile, "0.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,%.1f,%.1f,%.1f,%u\n", ProcessMemoryMb(false), ProcessMemoryMb(true),
+			ProcessGpuMemoryMb(), GetPlayerCount());
+		std::fflush(s_statsFile);
+		LogAlways("cev_stats_file: writing <%s> (one row per player per second while cev_stats is on)", path);
 	}
 
 	//! Listener of the player started by cev_play: reports and removes the player when it is over.
@@ -420,7 +503,7 @@ namespace CEVPlayer
 		m_statsNextTime = now + 1.f;
 
 		s_statsLines.clear();
-		char line[320];
+		char line[480];
 		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
 		{
 			if (!p->IsLoaded())
@@ -431,12 +514,28 @@ namespace CEVPlayer
 			p->StatsMark() = uploads;
 			double avOffsetMs = 0.0;
 			const bool haveAvOffset = p->GetAvOffsetMs(avOffsetMs);
+			float uploadAvg = 0.f, uploadP99 = 0.f;
+			uint32_t uploadSamples = 0;
+			p->TakeUploadTiming(uploadAvg, uploadP99, uploadSamples);
 			std::snprintf(line, sizeof(line),
-				"[CEV stats] #%u t=%.1f/%.1f decodeMs avg=%.2f p99=%.2f convertMs avg=%.2f p99=%.2f uploads=%llu (+%llu/s) dropped=%llu allocs=%llu ring=%.1f clock=%s avOffsetMs=%.1f",
+				"[CEV stats] #%u t=%.1f/%.1f decodeMs avg=%.2f p99=%.2f convertMs avg=%.2f p99=%.2f (copy %.2f/%.2f color %.2f/%.2f) uploadMs avg=%.2f p99=%.2f uploads=%llu (+%llu/s) dropped=%llu allocs=%llu ring=%.1f clock=%s avOffsetMs=%.1f",
 				p->Id(), p->GetTime(), p->GetDuration(), s.decodeMs.avg, s.decodeMs.p99, s.convertMs.avg, s.convertMs.p99,
+				s.copyMs.avg, s.copyMs.p99, s.colorMs.avg, s.colorMs.p99, uploadAvg, uploadP99,
 				static_cast<unsigned long long>(uploads), static_cast<unsigned long long>(perSecond),
 				static_cast<unsigned long long>(s.framesDropped), static_cast<unsigned long long>(s.allocs), s.ringOccupancy.avg,
 				p->ClockSourceName(), haveAvOffset ? avOffsetMs : 0.0);
+			if (s_statsFile != nullptr)
+			{
+				const uint64_t bytes = p->LastUploadBytes();
+				std::fprintf(s_statsFile, "%.2f,%u,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%.2f,%.1f,%.1f,%.1f,%u\n",
+					now - s_statsFileStart, p->Id(), p->GetTime(), p->GetWidth(), p->GetHeight(), p->HasAlpha() ? 1 : 0,
+					s.decodeMs.avg, s.decodeMs.p99, s.copyMs.avg, s.copyMs.p99, s.colorMs.avg, s.colorMs.p99, s.convertMs.avg, s.convertMs.p99,
+					uploadAvg, uploadP99, static_cast<unsigned long long>(perSecond), static_cast<unsigned long long>(bytes),
+					static_cast<unsigned long long>(bytes * perSecond), static_cast<unsigned long long>(s.framesDecoded),
+					static_cast<unsigned long long>(s.framesDropped), s.ringOccupancy.avg,
+					ProcessMemoryMb(false), ProcessMemoryMb(true), ProcessGpuMemoryMb(), GetPlayerCount());
+				std::fflush(s_statsFile);
+			}
 			s_statsLines.push_back(line);
 			CryLogAlways("%s", line);
 		}
@@ -499,6 +598,7 @@ namespace CEVPlayer
 		m_audio.Shutdown();
 		m_pool.reset(); // joins the decode workers (no player holds the pool any more)
 		s_statsLines.clear();
+		SetStatsFile(nullptr);
 	}
 
 	// ------------------------------------------------------------------------------------------------ console

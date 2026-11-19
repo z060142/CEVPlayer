@@ -5,4 +5,8 @@ namespace CEVPlayer
 {
 	void RegisterConsole();
 	void UnregisterConsole();
+	// Development-only measurement probes (S0): per-frame steps called by the plug-in.
+	void DevProbesBeforeRender();
+	void DevProbesAfterRender();
+	void DevProbesShutdown();
 }

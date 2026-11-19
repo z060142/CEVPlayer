@@ -71,6 +71,8 @@ namespace CEVPlayer
 		void ConsoleSeek(double seconds);
 		//! cev_lang: nullptr / empty only reports the current language and the ones the descriptor offers.
 		void ConsoleSetLanguage(const char* name);
+		//! Measurement (S0): cev_stats_file. nullptr / "" closes the file.
+		void SetStatsFile(const char* path);
 
 	private:
 		class CConsoleListener;

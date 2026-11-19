@@ -40,6 +40,12 @@ namespace cev
 
 	void Stats::RecordDecoded(float decodeMs, float convertMs, uint32_t ringOccupancy)
 	{
+		RecordDecoded(decodeMs, 0.0f, convertMs, ringOccupancy);
+	}
+
+	void Stats::RecordDecoded(float decodeMs, float copyMs, float colorMs, uint32_t ringOccupancy)
+	{
+		const float convertMs = copyMs + colorMs;
 		if (!m_enabled.load(std::memory_order_relaxed))
 			return;
 		const AllocCounterFn fn = g_allocCounter.load(std::memory_order_acquire);
@@ -52,6 +58,8 @@ namespace cev
 		Entry& e = m_entries[m_head];
 		e.decodeMs = decodeMs;
 		e.convertMs = convertMs;
+		e.copyMs = copyMs;
+		e.colorMs = colorMs;
 		e.ringOccupancy = static_cast<float>(ringOccupancy);
 		m_head = (m_head + 1) % kWindow;
 		if (m_count < kWindow)
@@ -98,6 +106,10 @@ namespace cev
 		out.decodeMs = SummarizeValues(scratch, count);
 		for (uint32_t i = 0; i < count; ++i) scratch[i] = copy[i].convertMs;
 		out.convertMs = SummarizeValues(scratch, count);
+		for (uint32_t i = 0; i < count; ++i) scratch[i] = copy[i].copyMs;
+		out.copyMs = SummarizeValues(scratch, count);
+		for (uint32_t i = 0; i < count; ++i) scratch[i] = copy[i].colorMs;
+		out.colorMs = SummarizeValues(scratch, count);
 		for (uint32_t i = 0; i < count; ++i) scratch[i] = copy[i].ringOccupancy;
 		out.ringOccupancy = SummarizeValues(scratch, count);
 		out.framesPresented = m_presented.load(std::memory_order_relaxed);

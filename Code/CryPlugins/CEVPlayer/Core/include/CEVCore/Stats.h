@@ -18,6 +18,8 @@ namespace cev
 	{
 		StatSummary decodeMs;       // libvpx decode (+alpha) per frame, worker thread
 		StatSummary convertMs;      // plane copy + YUV->RGBA per frame, worker thread
+		StatSummary copyMs;         // measurement (S0): plane copy part of convertMs (WriteFrame)
+		StatSummary colorMs;        // measurement (S0): YUV->RGBA part of convertMs (ConvertSlot)
 		StatSummary ringOccupancy;  // ready frames in the ring when a frame was committed
 		uint32_t samples = 0;       // valid entries in the window (<= Stats::kWindow)
 		uint64_t framesDecoded = 0;
@@ -44,6 +46,8 @@ namespace cev
 
 		// Worker side: one entry per decoded frame.
 		void RecordDecoded(float decodeMs, float convertMs, uint32_t ringOccupancy);
+		// Same, with the plane copy part of convertMs timed separately (measurement, S0).
+		void RecordDecoded(float decodeMs, float copyMs, float colorMs, uint32_t ringOccupancy);
 		// Consumer side.
 		void NotePresented(uint32_t count = 1);
 		void NoteDropped(uint32_t count);
@@ -57,6 +61,8 @@ namespace cev
 		{
 			float decodeMs = 0.0f;
 			float convertMs = 0.0f;
+			float copyMs = 0.0f;
+			float colorMs = 0.0f;
 			float ringOccupancy = 0.0f;
 		};
 

@@ -128,12 +128,14 @@ namespace CEVPlayer
 		if (m_pApi)
 			m_pApi->Update(); // Skipped events, records destroyed from inside a callback
 		Api::TickApiTest();
+		DevProbesBeforeRender(); // measurement only (S0)
 	}
 
 	void CVideoPlugin::UpdateAfterRender()
 	{
 		if (m_pManager)
 			m_pManager->UpdateAfterRender();
+		DevProbesAfterRender(); // measurement only (S0)
 	}
 
 	void CVideoPlugin::ShutdownBridge()
@@ -146,6 +148,7 @@ namespace CEVPlayer
 		Api::ShutdownApiTest();
 		if (m_pApi)
 			m_pApi->Shutdown();
+		DevProbesShutdown(); // measurement probes (S0): their textures and the cev_bench_play player
 		// Order matters: the legacy layer owns players of the manager, the manager releases the textures (the
 		// renderer is still alive at ESYSTEM_EVENT_FULL_SHUTDOWN / FAST_SHUTDOWN) and the audio device.
 		if (m_pLegacy)
