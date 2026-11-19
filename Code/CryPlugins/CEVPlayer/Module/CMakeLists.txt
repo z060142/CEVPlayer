@@ -34,6 +34,13 @@ add_sources("NoUberFile"
 		"Player/VideoDescriptor.h"
 )
 add_sources("NoUberFile"
+    SOURCE_GROUP "Contract"
+		"Contract/TexSource.cpp"
+		"Contract/ContractTest.cpp"
+		"Contract/TexSource.h"
+		"Contract/ContractTest.h"
+)
+add_sources("NoUberFile"
     SOURCE_GROUP "Audio"
 		"Audio/AudioMixer.cpp"
 		"Audio/AudioMixer.h"

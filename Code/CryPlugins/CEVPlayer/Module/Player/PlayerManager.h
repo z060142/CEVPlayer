@@ -1,5 +1,6 @@
 // Owns all bridge players, ticks them once per frame, dispatches their events at a fixed point and keeps
-// renderer calls away from level loading and shutdown. Main thread only.
+// renderer calls away from level loading and shutdown. Main thread only, except UpdateBeforeRender(dt), which does
+// not assume the main thread (docs/design/M6-ui-source.md section 9): its time comes from the caller.
 #pragma once
 
 #include <cstdint>
@@ -28,13 +29,22 @@ namespace CEVPlayer
 
 		// ---- factory ----
 		IVideoPlayer* CreatePlayer(const char* textureName);
+		//! Surface player (M6): id = [A-Za-z0-9_.:-]{1,63}, unique case-insensitively. nullptr + error when the id is
+		//! invalid or taken, or after shutdown. Its texture is "$cev:<id>".
+		IVideoPlayer* CreatePlayerForSurface(const char* surfaceId);
+		IVideoPlayer* FindPlayerBySurface(const char* surfaceId) const;
+		static bool IsValidSurfaceId(const char* surfaceId);
 		void DestroyPlayer(IVideoPlayer* pPlayer);
 		uint32_t GetPlayerCount() const { return static_cast<uint32_t>(m_players.size()); }
 		bool IsPlayer(const IVideoPlayer* pPlayer) const;
 
 		// ---- frame hooks (plug-in update steps) ----
-		//! UpdateBeforeRender: ticks the players (texture uploads), then dispatches listener events.
-		void UpdateBeforeRender();
+		//! Main thread only (reads the engine timer): drops a level loading flag the engine never cleared. Called by
+		//! the plug-in right before UpdateBeforeRender.
+		void CheckLevelLoadingTimeout();
+		//! UpdateBeforeRender: ticks the players (texture uploads), then dispatches listener events. `dt` = seconds
+		//! since the previous call, given by the caller; no engine timer or frame id is read inside.
+		void UpdateBeforeRender(float dt);
 		//! UpdateAfterRender: draws the fullscreen outputs on top of the frame and the stats overlay.
 		void UpdateAfterRender();
 
@@ -71,6 +81,9 @@ namespace CEVPlayer
 		void ConsoleSeek(double seconds);
 		//! cev_lang: nullptr / empty only reports the current language and the ones the descriptor offers.
 		void ConsoleSetLanguage(const char* name);
+		//! cev_play_surface <id> <path> [loop]: creates the surface player (or reuses it) and plays `path` into its
+		//! texture; path nullptr / empty destroys that surface player.
+		void ConsolePlaySurface(const char* surfaceId, const char* path, bool loop);
 		//! Measurement (S0): cev_stats_file. nullptr / "" closes the file.
 		void SetStatsFile(const char* path);
 
@@ -109,5 +122,7 @@ namespace CEVPlayer
 		bool m_levelListenerRegistered = false;
 
 		float m_statsNextTime = 0.f;
+		double m_clock = 0.0;        // sum of the dt given to UpdateBeforeRender (stats timing)
+		std::vector<IVideoPlayer*> m_consoleSurfaces; // created by cev_play_surface
 	};
 }

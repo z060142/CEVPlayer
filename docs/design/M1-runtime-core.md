@@ -7,7 +7,7 @@
 
 ```
 Code/CryPlugins/CEVPlayer/
-  Interface/CEVPlayer/        公開標頭（其他插件 / CryXTUI 只看這裡）
+  Interface/CEVPlayer/        公開標頭，給直接連結 CEVPlayer 的遊戲程式（其他插件以 docs/design/M6-ui-source.md §3 的契約對接）
     IVideoPlugin.h            舊接口，保留（相容層）
     IVideoPluginListeners.h   舊接口，保留
     IVideoPlayer.h            新：核心 API（播放器控制、查詢、事件、能力與版本）

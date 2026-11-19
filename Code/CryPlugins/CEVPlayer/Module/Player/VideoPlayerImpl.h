@@ -1,5 +1,6 @@
-// The bridge player: one cev::PlayerCore + its RGBA texture + its outputs. Main thread only (the decode
-// workers and the audio thread only touch the PlayerCore, never this class).
+// The bridge player: one cev::PlayerCore + its RGBA texture + its outputs. The IVideoPlayer methods are main thread
+// only (the decode workers and the audio thread only touch the PlayerCore, never this class). Tick() does not assume
+// the main thread (docs/design/M6-ui-source.md section 9): its time comes from the caller.
 #pragma once
 
 #include <cstdint>
@@ -21,7 +22,8 @@ namespace CEVPlayer
 	class CVideoPlayerImpl final : public IVideoPlayer
 	{
 	public:
-		CVideoPlayerImpl(CPlayerManager& manager, uint32_t id, const char* textureName);
+		//! `surfaceId` non-empty: a surface player (texture "$cev:<id>", snapshot for the texture source contract).
+		CVideoPlayerImpl(CPlayerManager& manager, uint32_t id, const char* textureName, const char* surfaceId = nullptr);
 		~CVideoPlayerImpl() override;
 		CVideoPlayerImpl(const CVideoPlayerImpl&) = delete;
 		CVideoPlayerImpl& operator=(const CVideoPlayerImpl&) = delete;
@@ -65,12 +67,17 @@ namespace CEVPlayer
 		const char* GetLanguage() const override { return m_language.c_str(); }
 		void SetVariant(int variant) override;
 		int GetVariant() const override { return m_variantIndex < 0 ? 0 : m_variantIndex; }
+		const char* GetSurfaceId() const override { return m_surfaceId.c_str(); }
+		uint32_t GetGeneration() const override { return m_generation; }
+		EVideoPixelLayout GetPixelLayout() const override { return EVideoPixelLayout::RGBA8; }
+		EVideoDecodeBackend GetDecodeBackend() const override { return EVideoDecodeBackend::Cpu; }
 
 		// ---- manager side (main thread) ----
 		uint32_t Id() const { return m_id; }
-		//! One frame step: load completion, core Update, texture upload, event generation. Only called while
-		//! renderer calls are allowed.
-		void Tick();
+		//! One frame step: load completion, core Update, texture upload, event generation, and at its end the
+		//! contract snapshot of a surface player. Only called while renderer calls are allowed. `dt` = seconds since
+		//! the previous step, given by the caller (the clocks of the cores are their own; dt is not used yet).
+		void Tick(float dt);
 		//! Sends the queued events to the listeners (end of the frame update).
 		void DispatchEvents();
 		//! Level loading started / ended: pauses / resumes the clock without any renderer call.
@@ -173,6 +180,9 @@ namespace CEVPlayer
 		void StartVoice();
 		void StopVoice();
 		void ReapplyLevelLoadPause();
+		void TickBody();
+		//! Surface players: writes the snapshot that CryTexSource query returns (end of Tick; no engine call).
+		void PublishSnapshot();
 
 		CPlayerManager& m_manager;
 		// Order matters: the clock is referenced by the cores, so it is declared first (destroyed last); the
@@ -185,6 +195,12 @@ namespace CEVPlayer
 		std::string m_textureName;
 		bool m_autoName = true;  // generated "$cev_video_<w>x<h>_<k>" (reusable, see CPlayerManager::MakeAutoTextureName)
 		std::string m_path;
+		// surface id (M6): "" = not a surface player
+		std::string m_surfaceId;
+		bool m_surfaceRegistered = false; // registered with the contract table, removed by PrepareDestroy
+		uint32_t m_generation = 0;        // +1 per tick in which the texture was created / released / resized
+		uint64_t m_contentSerial = 0;     // +1 per upload and per generation change, never decreases
+		bool m_textureChanged = false;    // set by EnsureTexture / ReleaseTexture, folded into m_generation by PublishSnapshot
 
 		EPhase m_phase = EPhase::None;
 		cev::MediaInfo m_info;

@@ -28,6 +28,7 @@ namespace CEVPlayer
 		constexpr float kLoadIdleTimeout = 120.f;
 		constexpr float kLoadCompleteTimeout = 15.f; // after OnLoadingComplete only the precache steps are left
 
+		//! Main thread only (engine timer): level loading bookkeeping and the stats file name stamp, never the tick.
 		float NowSeconds()
 		{
 			return gEnv != nullptr && gEnv->pTimer != nullptr ? gEnv->pTimer->GetAsyncCurTime() : 0.f;
@@ -106,7 +107,7 @@ namespace CEVPlayer
 			LogAlways("cev_stats_file: cannot open <%s>", path);
 			return;
 		}
-		s_statsFileStart = NowSeconds();
+		s_statsFileStart = static_cast<float>(m_clock);
 		std::fprintf(s_statsFile, "wall_s,player,t,width,height,alpha,decode_avg_ms,decode_p99_ms,copy_avg_ms,copy_p99_ms,color_avg_ms,color_p99_ms,"
 			"convert_avg_ms,convert_p99_ms,upload_avg_ms,upload_p99_ms,uploads_per_s,upload_bytes_per_frame,upload_bytes_per_s,frames_decoded,dropped,ring_avg,"
 			"proc_ws_mb,proc_private_mb,gpu_local_mb,players\n");
@@ -313,6 +314,51 @@ namespace CEVPlayer
 		return p != nullptr && !p->IsDestroyed();
 	}
 
+	bool CPlayerManager::IsValidSurfaceId(const char* surfaceId)
+	{
+		if (surfaceId == nullptr)
+			return false;
+		size_t n = 0;
+		for (const char* c = surfaceId; *c != '\0'; ++c, ++n)
+		{
+			const char ch = *c;
+			const bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '.' || ch == ':' || ch == '-';
+			if (!ok || n >= 63)
+				return false;
+		}
+		return n >= 1;
+	}
+
+	IVideoPlayer* CPlayerManager::FindPlayerBySurface(const char* surfaceId) const
+	{
+		if (surfaceId == nullptr || surfaceId[0] == '\0')
+			return nullptr;
+		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
+		{
+			if (!p->IsDestroyed() && p->GetSurfaceId()[0] != '\0' && stricmp(p->GetSurfaceId(), surfaceId) == 0)
+				return p.get();
+		}
+		return nullptr;
+	}
+
+	IVideoPlayer* CPlayerManager::CreatePlayerForSurface(const char* surfaceId)
+	{
+		if (m_shutdown)
+			return nullptr;
+		if (!IsValidSurfaceId(surfaceId))
+		{
+			LogError("surface id <%s> is invalid (1 to 63 characters of A-Z a-z 0-9 _ . : -), no player created", surfaceId != nullptr ? surfaceId : "");
+			return nullptr;
+		}
+		if (const IVideoPlayer* const pExisting = FindPlayerBySurface(surfaceId))
+		{
+			LogError("surface id <%s> is already used by player %u, no player created", surfaceId, static_cast<const CVideoPlayerImpl*>(pExisting)->Id());
+			return nullptr;
+		}
+		m_players.push_back(std::make_unique<CVideoPlayerImpl>(*this, m_nextId++, nullptr, surfaceId));
+		return m_players.back().get();
+	}
+
 	IVideoPlayer* CPlayerManager::CreatePlayer(const char* textureName)
 	{
 		if (m_shutdown)
@@ -342,6 +388,7 @@ namespace CEVPlayer
 			return;
 		if (impl == m_pConsolePlayer)
 			m_pConsolePlayer = nullptr;
+		m_consoleSurfaces.erase(std::remove(m_consoleSurfaces.begin(), m_consoleSurfaces.end(), static_cast<IVideoPlayer*>(impl)), m_consoleSurfaces.end());
 
 		impl->PrepareDestroy();
 		if (m_dispatching)
@@ -416,10 +463,8 @@ namespace CEVPlayer
 	}
 
 	// ------------------------------------------------------------------------------------------------ frame
-	void CPlayerManager::UpdateBeforeRender()
+	void CPlayerManager::CheckLevelLoadingTimeout()
 	{
-		// No renderer calls and no frame stepping while a level loads or after shutdown. Clocks of playing
-		// players are paused for the duration (OnSystemEvent), so nothing is lost.
 		if (m_shutdown)
 			return;
 		if (m_levelLoading && NowSeconds() > m_levelDeadline)
@@ -427,6 +472,15 @@ namespace CEVPlayer
 			LogWarning("level loading flag was not cleared by the engine for a long time: assuming the load ended");
 			EndLevelLoading("timeout");
 		}
+	}
+
+	void CPlayerManager::UpdateBeforeRender(float dt)
+	{
+		// No renderer calls and no frame stepping while a level loads or after shutdown. Clocks of playing
+		// players are paused for the duration (OnSystemEvent), so nothing is lost.
+		if (m_shutdown)
+			return;
+		m_clock += static_cast<double>(dt);
 		if (m_players.empty())
 			s_statsLines.clear(); // no stale overlay lines once the last player is gone
 		if (m_levelLoading)
@@ -445,9 +499,10 @@ namespace CEVPlayer
 		}
 
 		for (size_t i = 0; i < m_players.size(); ++i)
-			m_players[i]->Tick();
+			m_players[i]->Tick(dt);
 
-		// The one fixed dispatch point for listener callbacks.
+		// The one fixed dispatch point for listener callbacks. Main thread only (callbacks reach entity / flow /
+		// Schematyc code); the load-time tick (M10) must not dispatch here.
 		m_snapshot.clear();
 		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
 			m_snapshot.push_back(p.get());
@@ -497,7 +552,7 @@ namespace CEVPlayer
 
 	void CPlayerManager::LogStats()
 	{
-		const float now = gEnv != nullptr && gEnv->pTimer != nullptr ? gEnv->pTimer->GetAsyncCurTime() : 0.f;
+		const float now = static_cast<float>(m_clock);
 		if (now < m_statsNextTime)
 			return;
 		m_statsNextTime = now + 1.f;
@@ -581,6 +636,7 @@ namespace CEVPlayer
 		UnregisterLevelListener();
 		m_levelLoading = false;
 		m_pConsolePlayer = nullptr;
+		m_consoleSurfaces.clear();
 		m_dispatching = false;
 
 		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
@@ -687,6 +743,39 @@ namespace CEVPlayer
 		}
 		LogAlways("cev_lang: <%s> (was <%s>)", name, m_pConsolePlayer->GetLanguage());
 		m_pConsolePlayer->SetLanguage(name);
+	}
+
+	void CPlayerManager::ConsolePlaySurface(const char* surfaceId, const char* path, bool loop)
+	{
+		if (m_shutdown || surfaceId == nullptr)
+			return;
+		IVideoPlayer* p = FindPlayerBySurface(surfaceId);
+		if (path == nullptr || path[0] == '\0')
+		{
+			if (p == nullptr)
+			{
+				LogAlways("cev_play_surface: no surface <%s>", surfaceId);
+				return;
+			}
+			LogAlways("cev_play_surface: <%s> destroyed", surfaceId);
+			DestroyPlayer(p);
+			return;
+		}
+		if (p == nullptr)
+		{
+			p = CreatePlayerForSurface(surfaceId);
+			if (p == nullptr)
+				return;
+			m_consoleSurfaces.push_back(p);
+		}
+		p->SetLoop(loop);
+		LogAlways("cev_play_surface: <%s> texture <%s> plays <%s>%s", surfaceId, p->GetTextureName(), path, loop ? " (loop)" : "");
+		if (!p->Load(path))
+		{
+			LogAlways("cev_play_surface: load rejected <%s>", path);
+			return;
+		}
+		p->Play();
 	}
 
 	void CPlayerManager::ConsoleSeek(double seconds)
