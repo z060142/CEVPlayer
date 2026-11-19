@@ -37,6 +37,7 @@ namespace CEVPlayer
 		int m_cevDisableEmbeddedAudio = 0; // cev_disableEmbeddedAudio: never initialise the SDL audio subsystem
 		int m_cevCueForceFallback = 0; // cev_cueForceFallback: 1 = the cue route ignores the engine patch and follows the video clock
 		int m_cevVariant = -1;    // cev_variant: -1 = automatic, 0 = main video, n = n-th <Variant> of the descriptor
+		float m_cevHiddenStopSeconds = 2.f; // cev_hiddenStopSeconds: hidden surface players stop decoding after this long (0 = never)
 	};
 
 	extern SPluginEnv* mEnv;

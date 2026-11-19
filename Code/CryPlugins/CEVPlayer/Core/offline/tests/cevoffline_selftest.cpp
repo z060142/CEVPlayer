@@ -490,6 +490,14 @@ namespace
 			CHECKF(pr.videoFrameCount == c.videoFrames, "%u frames", pr.videoFrameCount);
 			CHECKF(pr.frameRate > 20.0 && pr.frameRate < 61.0, "fps %.3f", pr.frameRate);
 			CHECK(pr.videoFirstPts >= 0.0 && pr.videoFirstPts < 0.1);
+			// M7: longest keyframe distance (make_test_media.sh: -g 50 at 25 fps = 2 s for vp8_vorbis, -g 30 / 60 elsewhere)
+			CHECKF(pr.maxKeyframeIntervalSeconds > 0.0 && pr.maxKeyframeIntervalSeconds <= pr.durationSeconds + 0.05, "max keyframe interval %.3f s", pr.maxKeyframeIntervalSeconds);
+			if (std::strcmp(c.file, "vp8_vorbis.webm") == 0)
+				CHECKF(std::fabs(pr.maxKeyframeIntervalSeconds - 2.0) < 0.05, "vp8_vorbis max keyframe interval %.3f s (expected 2)", pr.maxKeyframeIntervalSeconds);
+		}
+		else
+		{
+			CHECK(pr.maxKeyframeIntervalSeconds == 0.0);
 		}
 		CHECK(pr.durationSeconds > 4.0 && pr.durationSeconds < 11.0);
 		CHECK(pr.fileSize == FileSizeOf(ClipPath(c)));

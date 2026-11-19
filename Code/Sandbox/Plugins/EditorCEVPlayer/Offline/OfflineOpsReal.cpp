@@ -53,6 +53,7 @@ namespace CEVEditor
 				out.width = probe.width;
 				out.height = probe.height;
 				out.fps = probe.frameRate;
+				out.maxKeyframeIntervalSec = probe.maxKeyframeIntervalSeconds;
 				out.durationSec = probe.durationSeconds;
 				out.hasAlpha = probe.hasAlpha;
 				for (const cev::offline::AudioTrackProbe& a : probe.audioTracks)

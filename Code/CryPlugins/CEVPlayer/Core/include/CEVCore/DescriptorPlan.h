@@ -99,7 +99,8 @@ namespace cev
 
 	//! Video file for the descriptor. `forced` >= 0 forces a variant (0 = main video, 1..n = variant), `forced` < 0
 	//! picks automatically when `autoPick` is set: the smallest variant whose height is not below `outputHeight`
-	//! (none big enough: the main video); without `autoPick` the main video.
+	//! (none big enough: the main video); without `autoPick`, or with `outputHeight` <= 0 (unknown), the main video.
+	//! `outputHeight` is the window height (fullscreen) or the aggregated on-screen pixel height of a surface (M7).
 	DescriptorVariantChoice PickDescriptorVariant(const VideoDescriptor& desc, int forced, bool autoPick, int outputHeight,
 		DescriptorFileExistsFn exists, void* user);
 }

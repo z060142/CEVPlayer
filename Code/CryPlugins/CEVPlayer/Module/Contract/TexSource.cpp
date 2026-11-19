@@ -2,9 +2,13 @@
 #include "PluginEnv.h"
 #include "Contract/TexSource.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <vector>
+
+#include "CEVCore/PlayerCore.h"
+#include "Player/PlayerManager.h"
 
 #include <CryCore/Platform/CryWindows.h>
 
@@ -36,11 +40,15 @@ namespace CEVPlayer
 				CryTexSourceInfo info = {};
 				uint32_t updates = 0;     // the source's own updates (PublishSnapshot calls)
 				std::vector<SHint> hints;
+				bool ownedByOpen = false; // made by `open` (M7): `close` destroys it
+				bool closing = false;     // `close` queued: query returns 0, a new `open` starts over
+				std::string openSrc;      // src of the last accepted `open`
 			};
 
 			SRWLOCK s_lock = SRWLOCK_INIT;
 			volatile LONG s_closed = 1;           // until Open(): nothing is ours
 			std::vector<SSurface>* s_pSurfaces = nullptr; // allocated once, never freed (callable until process exit)
+			std::vector<SCommand>* s_pCommands = nullptr; // queue of open / close / control, same lock
 
 			struct SExclusive
 			{
@@ -103,7 +111,7 @@ namespace CEVPlayer
 				{
 					SExclusive lock;
 					const SSurface* const s = FindLocked(name);
-					if (s == nullptr)
+					if (s == nullptr || s->closing)
 						return 0;
 					copy = s->info;
 				}
@@ -158,10 +166,119 @@ namespace CEVPlayer
 				s->hints.push_back(e);
 			}
 
-			// M7 implements open / close / control; until then nothing is taken.
-			int OpenSurface(const char*, const char*, const CryTexSourceOpen*) { return 0; }
-			void CloseSurface(const char*) {}
-			int Control(const char*, uint32_t, double) { return 0; }
+			bool EqualsNoCase(const std::string& a, const char* b) { return CompareNoCase(a.c_str(), b) == 0; }
+
+			//! The module is built with fast floating point (std::isfinite may fold to true): test the exponent bits.
+			bool IsFinite(double v)
+			{
+				uint64_t bits = 0;
+				std::memcpy(&bits, &v, sizeof(bits));
+				return ((bits >> 52) & 0x7FFu) != 0x7FFu;
+			}
+			bool IsFinite(float v) { return IsFinite(static_cast<double>(v)); }
+
+			int OpenSurface(const char* name, const char* src, const CryTexSourceOpen* options)
+			{
+				if (Closed() || name == nullptr || src == nullptr || !CPlayerManager::IsValidSurfaceId(name) || !IsOpenableSource(src))
+					return 0;
+				// Only the fields inside the caller's size are read; the rest keeps the defaults (no flags, volume 1).
+				CryTexSourceOpen o = {};
+				o.volume = 1.f;
+				if (options != nullptr)
+				{
+					const size_t limit = options->size < sizeof(CryTexSourceOpen) ? options->size : sizeof(CryTexSourceOpen);
+					if (limit > sizeof(uint32_t))
+						std::memcpy(reinterpret_cast<char*>(&o) + sizeof(uint32_t), reinterpret_cast<const char*>(options) + sizeof(uint32_t), limit - sizeof(uint32_t));
+				}
+				SExclusive lock;
+				if (s_pSurfaces == nullptr || s_pCommands == nullptr)
+					return 0;
+				SSurface* s = FindLocked(name);
+				if (s != nullptr && !s->closing && !s->ownedByOpen)
+					return 2; // level logic made it: attach by query, do not close
+				if (s != nullptr && !s->closing && EqualsNoCase(s->openSrc, src))
+					return 1; // already open with this src: nothing to do
+				if (s == nullptr)
+				{
+					s_pSurfaces->push_back(SSurface());
+					s = &s_pSurfaces->back();
+					std::memcpy(s->name, name, std::strlen(name) + 1);
+					s->info.size = sizeof(CryTexSourceInfo);
+					s->info.layout = CTS_LAYOUT_RGBA8;
+					s->info.flags = 1u;
+				}
+				s->ownedByOpen = true;
+				s->closing = false;
+				s->openSrc = src;
+				s->info.state = 1; // loading until the player's own snapshot replaces it
+				s->info.errorCode = 0;
+				SCommand c;
+				c.type = SCommand::EType::Open;
+				c.name = name;
+				c.src = src;
+				c.openFlags = o.flags;
+				c.volume = IsFinite(o.volume) ? (o.volume < 0.f ? 0.f : (o.volume > 1.f ? 1.f : o.volume)) : 1.f;
+				s_pCommands->push_back(c);
+				return 1;
+			}
+
+			void CloseSurface(const char* name)
+			{
+				if (Closed())
+					return;
+				SExclusive lock;
+				SSurface* const s = FindLocked(name);
+				if (s == nullptr || s->closing || !s->ownedByOpen || s_pCommands == nullptr)
+					return; // only what `open` made
+				s->closing = true;
+				s->openSrc.clear();
+				SCommand c;
+				c.type = SCommand::EType::Close;
+				c.name = s->name;
+				s_pCommands->push_back(c);
+			}
+
+			int Control(const char* name, uint32_t verb, double value)
+			{
+				if (Closed())
+					return 0;
+				switch (verb)
+				{
+				case CTS_VERB_PLAY:
+				case CTS_VERB_PAUSE:
+					break;
+				case CTS_VERB_SEEK:
+					if (!IsFinite(value) || value < 0.0)
+						return 0;
+					break;
+				case CTS_VERB_RATE:
+					if (!IsFinite(value) || value < cev::PlayerCore::kMinRate || value > cev::PlayerCore::kMaxRate)
+						return 0;
+					break;
+				case CTS_VERB_VOLUME:
+					if (!IsFinite(value) || value < 0.0 || value > 1.0)
+						return 0;
+					break;
+				case CTS_VERB_LOOP:
+				case CTS_VERB_MUTE:
+					if (value != 0.0 && value != 1.0)
+						return 0;
+					break;
+				default:
+					return 0;
+				}
+				SExclusive lock;
+				SSurface* const s = FindLocked(name);
+				if (s == nullptr || s->closing || s_pCommands == nullptr)
+					return 0;
+				SCommand c;
+				c.type = SCommand::EType::Control;
+				c.name = s->name;
+				c.verb = verb;
+				c.value = value;
+				s_pCommands->push_back(c);
+				return 1;
+			}
 
 			const CryTexSourceApi s_api = { 2u, &Query, &Hint, &OpenSurface, &CloseSurface, &Control };
 		}
@@ -171,7 +288,10 @@ namespace CEVPlayer
 			SExclusive lock;
 			if (s_pSurfaces == nullptr)
 				s_pSurfaces = new std::vector<SSurface>();
+			if (s_pCommands == nullptr)
+				s_pCommands = new std::vector<SCommand>();
 			s_pSurfaces->clear();
+			s_pCommands->clear();
 			::InterlockedExchange(&s_closed, 0);
 		}
 
@@ -181,6 +301,50 @@ namespace CEVPlayer
 			::InterlockedExchange(&s_closed, 1);
 			if (s_pSurfaces != nullptr)
 				s_pSurfaces->clear();
+			if (s_pCommands != nullptr)
+				s_pCommands->clear();
+		}
+
+		void TakeCommands(std::vector<SCommand>& out)
+		{
+			out.clear();
+			SExclusive lock;
+			if (s_pCommands != nullptr)
+				out.swap(*s_pCommands);
+		}
+
+		void SetOwnedByOpen(const char* name, bool owned, const char* src)
+		{
+			SExclusive lock;
+			SSurface* const s = FindLocked(name);
+			if (s == nullptr)
+				return;
+			s->ownedByOpen = owned;
+			if (!s->closing)
+				s->openSrc = owned && src != nullptr ? src : "";
+		}
+
+		void PublishOpenError(const char* name, int32_t errorCode)
+		{
+			SExclusive lock;
+			SSurface* const s = FindLocked(name);
+			if (s == nullptr)
+				return;
+			s->info.state = 6;
+			s->info.errorCode = errorCode;
+		}
+
+		bool IsOpenableSource(const char* src)
+		{
+			if (src == nullptr)
+				return false;
+			const size_t n = std::strlen(src);
+			const auto endsWith = [&](const char* ext)
+			{
+				const size_t m = std::strlen(ext);
+				return n > m && CompareNoCase(src + n - m, ext) == 0;
+			};
+			return endsWith(".webm") || endsWith(".cevvideo");
 		}
 
 		void RegisterSurface(const char* name)
@@ -266,9 +430,10 @@ namespace CEVPlayer
 			{
 				const CryTexSourceInfo& i = s.info;
 				const SHintSummary h = SummarizeLocked(s);
-				LogAlways("  <%s> tex=%d %dx%d flags=0x%x serial=%llu gen=%u layout=%u state=%u err=%d t=%.2f/%.2f loops=%u updates=%u | hints: consumers=%u visible=%d px=%dx%d accept=0x%x",
+				LogAlways("  <%s> tex=%d %dx%d flags=0x%x serial=%llu gen=%u layout=%u state=%u err=%d t=%.2f/%.2f loops=%u updates=%u owner=%s%s | hints: consumers=%u visible=%d px=%dx%d accept=0x%x",
 					s.name, i.textureId, i.width, i.height, i.flags, static_cast<unsigned long long>(i.contentSerial), i.generation, i.layout, i.state,
-					i.errorCode, i.timeSeconds, i.durationSeconds, i.loopCount, s.updates, h.consumers, h.visible ? 1 : 0, h.pixelWidth, h.pixelHeight, h.acceptLayouts);
+					i.errorCode, i.timeSeconds, i.durationSeconds, i.loopCount, s.updates, s.ownedByOpen ? "open" : "level", s.closing ? " (closing)" : "",
+					h.consumers, h.visible ? 1 : 0, h.pixelWidth, h.pixelHeight, h.acceptLayouts);
 			}
 		}
 	}

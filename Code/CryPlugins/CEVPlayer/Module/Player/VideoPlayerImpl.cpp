@@ -328,12 +328,26 @@ namespace CEVPlayer
 			LogWarning("player %u: audio file <%s> of language <%s> not found, using the embedded track", m_id, audio.missingExternal.c_str(), plan.language.c_str());
 	}
 
+	int CVideoPlayerImpl::VariantTargetHeight() const
+	{
+		if (m_fullscreen)
+			return gEnv != nullptr && gEnv->pRenderer != nullptr ? gEnv->pRenderer->GetHeight() : 0;
+		if (m_surfaceRegistered)
+		{
+			// M7: the largest on-screen height any live consumer of the surface samples it at
+			Contract::SHintSummary hints;
+			if (Contract::GetHintSummary(m_surfaceId.c_str(), hints))
+				return hints.pixelHeight;
+		}
+		return 0;
+	}
+
 	std::string CVideoPlayerImpl::PickVariantPath()
 	{
 		m_variantIndex = -1;
 		const int forced = m_variantRequest != kVariantFollowCvar ? m_variantRequest : mEnv->m_cevVariant;
-		const bool autoPick = m_fullscreen && gEnv != nullptr && gEnv->pRenderer != nullptr;
-		const int outputHeight = autoPick ? gEnv->pRenderer->GetHeight() : 0;
+		const int outputHeight = VariantTargetHeight();
+		const bool autoPick = outputHeight > 0;
 		const cev::DescriptorVariantChoice choice = cev::PickDescriptorVariant(m_desc, forced, autoPick, outputHeight, &PakFileExists, nullptr);
 		if (choice.forcedOutOfRange)
 			LogWarning("player %u: cev_variant %d does not exist in <%s> (%u variants), using the main video", m_id, forced, m_path.c_str(), static_cast<unsigned>(m_desc.variants.size()));
@@ -342,7 +356,7 @@ namespace CEVPlayer
 		if (choice.variant < 0)
 			return choice.videoPath;
 		m_variantIndex = choice.variant;
-		Log("player %u: variant %d <%s> %dx%d chosen", m_id, m_variantIndex, choice.videoPath.c_str(), choice.width, choice.height);
+		Log("player %u: variant %d <%s> %dx%d chosen (target height %d)", m_id, m_variantIndex, choice.videoPath.c_str(), choice.width, choice.height, outputHeight);
 		return choice.videoPath;
 	}
 
@@ -527,6 +541,14 @@ namespace CEVPlayer
 				else
 					ReapplyLevelLoadPause();
 			}
+			if (m_startedAfterReload)
+			{
+				// Play() from Stopped / Ended switched to another variant: this is the start it asked for
+				m_startedAfterReload = false;
+				m_endedSent = false;
+				m_markerResync = true;
+				Emit(EEvent::Started);
+			}
 			return;
 		}
 
@@ -642,6 +664,27 @@ namespace CEVPlayer
 		const cev::PlayerState before = m_core->GetState();
 		if (before == cev::PlayerState::Playing)
 			return;
+		if ((before == cev::PlayerState::Stopped || before == cev::PlayerState::Ended) && m_descValid && !m_desc.variants.empty())
+		{
+			// M7: a start picks the variant again (the consumers' on-screen size may have changed); a different one
+			// reloads the media at 0 and starts it there. Never while playing, never on a loop wrap.
+			const int forced = m_variantRequest != kVariantFollowCvar ? m_variantRequest : mEnv->m_cevVariant;
+			const int target = VariantTargetHeight();
+			const cev::DescriptorVariantChoice choice = cev::PickDescriptorVariant(m_desc, forced, target > 0, target, &PakFileExists, nullptr);
+			if (choice.variant != m_variantIndex)
+			{
+				Log("player %u: start with variant %d instead of %d (target height %d)", m_id, choice.variant, m_variantIndex, target);
+				ReloadForLanguage();
+				if (m_phase == EPhase::Loading)
+				{
+					m_reloading = true;
+					m_reloadTime = 0.0;
+					m_reloadRestore = ERestore::Playing;
+					m_startedAfterReload = true;
+				}
+				return;
+			}
+		}
 		if (cev::Succeeded(CoresPlay()))
 		{
 			m_endedSent = false;
@@ -737,9 +780,29 @@ namespace CEVPlayer
 
 	void CVideoPlayerImpl::SetVolume(float volume)
 	{
+		if (!(volume == volume))
+			return; // NaN
 		m_volume = std::min(1.f, std::max(0.f, volume));
 		if (m_voice >= 0)
-			m_manager.Audio().SetVoiceVolume(m_voice, m_volume);
+			m_manager.Audio().SetVoiceVolume(m_voice, m_muted ? 0.f : m_volume);
+	}
+
+	void CVideoPlayerImpl::SetMuted(bool muted)
+	{
+		m_muted = muted;
+		if (m_voice >= 0)
+			m_manager.Audio().SetVoiceVolume(m_voice, m_muted ? 0.f : m_volume);
+	}
+
+	const char* CVideoPlayerImpl::VisibilityName() const
+	{
+		switch (m_core->GetVisibility())
+		{
+		case cev::VideoVisibility::Visible:    return "visible";
+		case cev::VideoVisibility::DecodeOnly: return "decode-only";
+		case cev::VideoVisibility::Stopped:    return "stopped";
+		}
+		return "?";
 	}
 
 	EVideoPlayerState CVideoPlayerImpl::GetState() const
@@ -899,7 +962,7 @@ namespace CEVPlayer
 		m_voice = m_manager.Audio().AddVoice(pSource, m_audioClock.get());
 		if (m_voice >= 0)
 		{
-			m_manager.Audio().SetVoiceVolume(m_voice, m_volume);
+			m_manager.Audio().SetVoiceVolume(m_voice, m_muted ? 0.f : m_volume);
 			Log("player %u: audio voice %d (%s), clock = audio", m_id, m_voice, m_audioCore ? "external file" : "embedded track");
 		}
 		else
@@ -1160,10 +1223,10 @@ namespace CEVPlayer
 	// ------------------------------------------------------------------------------------------------ frame step
 	void CVideoPlayerImpl::Tick(float dt)
 	{
-		(void)dt; // the cores run on their own clocks (audio / steady clock); kept for the load-time tick (M10)
+		// The cores run on their own clocks (audio / steady clock); dt only accumulates the hidden time (M7).
 		if (m_destroyed)
 			return;
-		TickBody();
+		TickBody(dt);
 		if (m_surfaceRegistered)
 			PublishSnapshot();
 	}
@@ -1208,7 +1271,37 @@ namespace CEVPlayer
 		Contract::PublishSnapshot(m_surfaceId.c_str(), info);
 	}
 
-	void CVideoPlayerImpl::TickBody()
+	void CVideoPlayerImpl::ApplyVisibility(float dt)
+	{
+		// No engine call: the contract table and members only (the tick may run off the main thread, section 9).
+		m_hintPixelHeight = 0;
+		m_hintConsumers = 0;
+		bool visible = true;
+		if (m_surfaceRegistered)
+		{
+			Contract::SHintSummary hints;
+			if (Contract::GetHintSummary(m_surfaceId.c_str(), hints))
+			{
+				m_hintPixelHeight = hints.pixelHeight;
+				m_hintConsumers = hints.consumers;
+				if (hints.consumers > 0)
+					visible = hints.visible; // nobody hinted: visible
+			}
+		}
+		if (!m_surfaceRegistered || m_fullscreen || !m_bindings.empty() || !m_pauseDecodeWhenHidden)
+			visible = true; // fullscreen / material outputs and players without a surface id are always visible
+		m_core->SetHiddenStopSeconds(static_cast<double>(mEnv->m_cevHiddenStopSeconds));
+		m_core->SetVisible(visible, static_cast<double>(dt));
+		const uint8_t now = static_cast<uint8_t>(m_core->GetVisibility());
+		if (now != m_lastVisibility)
+		{
+			LogDebug("player %u: visibility %s", m_id, VisibilityName());
+			m_lastVisibility = now;
+			m_core->ResetStatsWindow(); // cev_stats then shows the cost of the new state only
+		}
+	}
+
+	void CVideoPlayerImpl::TickBody(float dt)
 	{
 		if (m_releasePending && HasRenderResources())
 			ReleaseTexture(false);
@@ -1260,6 +1353,8 @@ namespace CEVPlayer
 			}
 		}
 
+		if (m_info.hasVideo)
+			ApplyVisibility(dt);
 		const bool fresh = m_core->Update();
 
 		const uint32_t loops = m_core->GetLoopCount();
@@ -1302,7 +1397,8 @@ namespace CEVPlayer
 		}
 		UpdateMarkers(looped);
 
-		if ((fresh || m_needUpload) && m_pTexture != nullptr)
+		// Hidden: nothing is uploaded (a pending refresh waits until the picture is visible again).
+		if ((fresh || m_needUpload) && m_pTexture != nullptr && m_core->GetVisibility() == cev::VideoVisibility::Visible)
 			UploadFrame();
 	}
 
@@ -1379,8 +1475,9 @@ namespace CEVPlayer
 			else
 				std::snprintf(cue, sizeof(cue), "  cue=<%s> triggerPos=n/a", m_cueClock->Trigger().c_str());
 		}
-		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  uploads=%llu  tex=%s(%d)%s  audio=%s  peak=%.3f  clock=%s%s  lang=%s  variant=%s  <%s>",
+		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  %s%s  uploads=%llu  tex=%s(%d)%s  audio=%s  peak=%.3f  clock=%s%s  lang=%s  variant=%s  <%s>",
 			m_id, StateName(GetState()), GetTime(), GetDuration(), GetWidth(), GetHeight(), HasAlpha() ? " alpha" : "",
+			VisibilityName(), m_ownedByOpen ? "  owner=open" : "",
 			static_cast<unsigned long long>(m_uploads), m_textureName.c_str(), m_textureId, m_fullscreen ? (m_fullscreenHidden ? "  fullscreen(hidden)" : "  fullscreen") : "",
 			!m_hasAudio ? "none" : (m_voice >= 0 ? (m_audioCore ? "external" : "embedded") : (m_cueClock ? "cue" : "silent")), peak, ClockSourceName(), cue,
 			m_language.empty() ? "-" : m_language.c_str(), m_variantIndex < 0 ? "main" : std::to_string(m_variantIndex).c_str(), m_path.c_str());

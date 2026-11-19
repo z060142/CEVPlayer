@@ -34,6 +34,7 @@ namespace CEVEditor
 			out.width = v.width;
 			out.height = v.height;
 			out.fps = v.frameRate;
+			out.maxKeyframeIntervalSec = demuxer->MaxKeyframeIntervalSeconds();
 			out.hasAlpha = v.hasAlpha;
 		}
 		out.durationSec = demuxer->DurationSeconds();

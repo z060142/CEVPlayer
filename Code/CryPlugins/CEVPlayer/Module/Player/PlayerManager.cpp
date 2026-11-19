@@ -10,6 +10,7 @@
 #include <CryRenderer/IRenderer.h>
 #include <ILevelSystem.h>
 
+#include "Contract/TexSource.h"
 #include "Player/VideoPlayerImpl.h"
 #include "Render/FullscreenOutput.h"
 #include "Render/RenderBridge.h"
@@ -38,6 +39,8 @@ namespace CEVPlayer
 		std::vector<FullscreenOutput::SLayer> s_layers;
 		std::vector<std::string> s_statsLines;
 		std::vector<const char*> s_statsLinePtrs;
+
+		std::vector<Contract::SCommand> s_contractCommands; // scratch of ProcessContractCommands
 
 		// ---- measurement (S0): cev_stats_file
 		FILE* s_statsFile = nullptr;
@@ -110,9 +113,10 @@ namespace CEVPlayer
 		s_statsFileStart = static_cast<float>(m_clock);
 		std::fprintf(s_statsFile, "wall_s,player,t,width,height,alpha,decode_avg_ms,decode_p99_ms,copy_avg_ms,copy_p99_ms,color_avg_ms,color_p99_ms,"
 			"convert_avg_ms,convert_p99_ms,upload_avg_ms,upload_p99_ms,uploads_per_s,upload_bytes_per_frame,upload_bytes_per_s,frames_decoded,dropped,ring_avg,"
-			"proc_ws_mb,proc_private_mb,gpu_local_mb,players\n");
+			"proc_ws_mb,proc_private_mb,gpu_local_mb,players,"
+			"visibility,decode_only_frames,copy_bytes,color_bytes,catchups,catchup_last_ms,catchup_last_frames,variant,hint_consumers,hint_px_h\n");
 		// baseline row (player 0): memory before / without the measured players
-		std::fprintf(s_statsFile, "0.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,%.1f,%.1f,%.1f,%u\n", ProcessMemoryMb(false), ProcessMemoryMb(true),
+		std::fprintf(s_statsFile, "0.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,%.1f,%.1f,%.1f,%u,-,0,0,0,0,0,0,0,0,0\n", ProcessMemoryMb(false), ProcessMemoryMb(true),
 			ProcessGpuMemoryMb(), GetPlayerCount());
 		std::fflush(s_statsFile);
 		LogAlways("cev_stats_file: writing <%s> (one row per player per second while cev_stats is on)", path);
@@ -485,6 +489,7 @@ namespace CEVPlayer
 			s_statsLines.clear(); // no stale overlay lines once the last player is gone
 		if (m_levelLoading)
 			return;
+		ProcessContractCommands(); // may create the first player
 		if (m_players.empty() && m_zombies.empty())
 			return;
 
@@ -519,6 +524,76 @@ namespace CEVPlayer
 			LogStats();
 		else if (!s_statsLines.empty())
 			s_statsLines.clear();
+	}
+
+	void CPlayerManager::ProcessContractCommands()
+	{
+		// Runs in the manager's own tick: the only place where contract requests reach the players (rule 10). No
+		// listener is called from here (Load / Play only queue events, they are dispatched at the fixed point).
+		Contract::TakeCommands(s_contractCommands);
+		for (const Contract::SCommand& c : s_contractCommands)
+		{
+			CVideoPlayerImpl* p = static_cast<CVideoPlayerImpl*>(FindPlayerBySurface(c.name.c_str()));
+			switch (c.type)
+			{
+			case Contract::SCommand::EType::Open:
+			{
+				if (p != nullptr && !p->OwnedByOpen())
+				{
+					// level logic created the same id between the open and this tick: it keeps it
+					LogWarning("contract: open <%s>: the surface is owned by level logic, request ignored", c.name.c_str());
+					Contract::SetOwnedByOpen(c.name.c_str(), false, nullptr);
+					break;
+				}
+				if (p == nullptr)
+				{
+					p = static_cast<CVideoPlayerImpl*>(CreatePlayerForSurface(c.name.c_str()));
+					if (p == nullptr)
+					{
+						Contract::PublishOpenError(c.name.c_str(), static_cast<int32_t>(cev::Status::InvalidState));
+						break;
+					}
+				}
+				p->SetOwnedByOpen(true);
+				Contract::SetOwnedByOpen(c.name.c_str(), true, c.src.c_str());
+				Log("contract: open <%s> <%s> flags 0x%x volume %.2f", c.name.c_str(), c.src.c_str(), c.openFlags, static_cast<double>(c.volume));
+				p->SetLoop((c.openFlags & 2u) != 0);
+				p->SetMuted((c.openFlags & 4u) != 0);
+				p->SetVolume(c.volume);
+				p->Load(c.src.c_str()); // a failure shows as state 6 (error) in the snapshot
+				if ((c.openFlags & 1u) != 0)
+					p->Play();
+				break;
+			}
+			case Contract::SCommand::EType::Close:
+				if (p != nullptr && p->OwnedByOpen())
+				{
+					Log("contract: close <%s>", c.name.c_str());
+					DestroyPlayer(p);
+				}
+				else if (p == nullptr)
+				{
+					Contract::UnregisterSurface(c.name.c_str()); // opened and closed before any player existed
+				}
+				break;
+			case Contract::SCommand::EType::Control:
+				if (p == nullptr)
+					break;
+				switch (c.verb)
+				{
+				case CTS_VERB_PLAY:   p->Play(); break;
+				case CTS_VERB_PAUSE:  p->Pause(); break;
+				case CTS_VERB_SEEK:   p->Seek(c.value); break; // remembered while loading
+				case CTS_VERB_RATE:   p->SetRate(static_cast<float>(c.value)); break;
+				case CTS_VERB_LOOP:   p->SetLoop(c.value != 0.0); break;
+				case CTS_VERB_VOLUME: p->SetVolume(static_cast<float>(c.value)); break;
+				case CTS_VERB_MUTE:   p->SetMuted(c.value != 0.0); break;
+				default: break;
+				}
+				break;
+			}
+		}
+		s_contractCommands.clear();
 	}
 
 	void CPlayerManager::UpdateAfterRender()
@@ -558,7 +633,7 @@ namespace CEVPlayer
 		m_statsNextTime = now + 1.f;
 
 		s_statsLines.clear();
-		char line[480];
+		char line[640];
 		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
 		{
 			if (!p->IsLoaded())
@@ -573,22 +648,29 @@ namespace CEVPlayer
 			uint32_t uploadSamples = 0;
 			p->TakeUploadTiming(uploadAvg, uploadP99, uploadSamples);
 			std::snprintf(line, sizeof(line),
-				"[CEV stats] #%u t=%.1f/%.1f decodeMs avg=%.2f p99=%.2f convertMs avg=%.2f p99=%.2f (copy %.2f/%.2f color %.2f/%.2f) uploadMs avg=%.2f p99=%.2f uploads=%llu (+%llu/s) dropped=%llu allocs=%llu ring=%.1f clock=%s avOffsetMs=%.1f",
+				"[CEV stats] #%u t=%.1f/%.1f decodeMs avg=%.2f p99=%.2f convertMs avg=%.2f p99=%.2f (copy %.2f/%.2f color %.2f/%.2f) uploadMs avg=%.2f p99=%.2f uploads=%llu (+%llu/s) dropped=%llu allocs=%llu ring=%.1f clock=%s avOffsetMs=%.1f"
+				" | %s decodeOnly=%llu copyB=%llu colorB=%llu catchUp=%llu last %.2fms/%uf variant=%d hints=%u px_h=%d",
 				p->Id(), p->GetTime(), p->GetDuration(), s.decodeMs.avg, s.decodeMs.p99, s.convertMs.avg, s.convertMs.p99,
 				s.copyMs.avg, s.copyMs.p99, s.colorMs.avg, s.colorMs.p99, uploadAvg, uploadP99,
 				static_cast<unsigned long long>(uploads), static_cast<unsigned long long>(perSecond),
 				static_cast<unsigned long long>(s.framesDropped), static_cast<unsigned long long>(s.allocs), s.ringOccupancy.avg,
-				p->ClockSourceName(), haveAvOffset ? avOffsetMs : 0.0);
+				p->ClockSourceName(), haveAvOffset ? avOffsetMs : 0.0,
+				p->VisibilityName(), static_cast<unsigned long long>(s.framesDecodeOnly), static_cast<unsigned long long>(s.copyBytes),
+				static_cast<unsigned long long>(s.colorBytes), static_cast<unsigned long long>(s.catchUps), static_cast<double>(s.lastCatchUpMs),
+				s.lastCatchUpFrames, p->GetVariant(), p->HintConsumers(), p->HintPixelHeight());
 			if (s_statsFile != nullptr)
 			{
 				const uint64_t bytes = p->LastUploadBytes();
-				std::fprintf(s_statsFile, "%.2f,%u,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%.2f,%.1f,%.1f,%.1f,%u\n",
+				std::fprintf(s_statsFile, "%.2f,%u,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%.2f,%.1f,%.1f,%.1f,%u,%s,%llu,%llu,%llu,%llu,%.3f,%u,%d,%u,%d\n",
 					now - s_statsFileStart, p->Id(), p->GetTime(), p->GetWidth(), p->GetHeight(), p->HasAlpha() ? 1 : 0,
 					s.decodeMs.avg, s.decodeMs.p99, s.copyMs.avg, s.copyMs.p99, s.colorMs.avg, s.colorMs.p99, s.convertMs.avg, s.convertMs.p99,
 					uploadAvg, uploadP99, static_cast<unsigned long long>(perSecond), static_cast<unsigned long long>(bytes),
 					static_cast<unsigned long long>(bytes * perSecond), static_cast<unsigned long long>(s.framesDecoded),
 					static_cast<unsigned long long>(s.framesDropped), s.ringOccupancy.avg,
-					ProcessMemoryMb(false), ProcessMemoryMb(true), ProcessGpuMemoryMb(), GetPlayerCount());
+					ProcessMemoryMb(false), ProcessMemoryMb(true), ProcessGpuMemoryMb(), GetPlayerCount(),
+					p->VisibilityName(), static_cast<unsigned long long>(s.framesDecodeOnly), static_cast<unsigned long long>(s.copyBytes),
+					static_cast<unsigned long long>(s.colorBytes), static_cast<unsigned long long>(s.catchUps), static_cast<double>(s.lastCatchUpMs),
+					s.lastCatchUpFrames, p->GetVariant(), p->HintConsumers(), p->HintPixelHeight());
 				std::fflush(s_statsFile);
 			}
 			s_statsLines.push_back(line);

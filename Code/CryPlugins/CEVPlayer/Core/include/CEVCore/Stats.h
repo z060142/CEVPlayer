@@ -27,6 +27,13 @@ namespace cev
 		uint64_t framesDropped = 0;
 		uint64_t uploadBytes = 0;   // sum of NoteUpload() calls
 		uint64_t allocs = 0;        // allocations seen by the alloc hook since the first record
+		uint64_t copyBytes = 0;     // plane bytes written into ring slots (WriteFrame)
+		uint64_t colorBytes = 0;    // RGBA bytes produced by the colour conversion
+		// Visibility (M7). Counted whether or not the stats are enabled.
+		uint64_t framesDecodeOnly = 0;  // packets decoded without output while hidden (DecodeOnly) or catching up
+		uint64_t catchUps = 0;          // completed catch-ups after a Stopped period
+		float lastCatchUpMs = 0.0f;     // wall time from the visible request to the first frame decoded for output
+		uint32_t lastCatchUpFrames = 0; // packets skip-decoded by that catch-up
 	};
 
 	class Stats
@@ -52,9 +59,16 @@ namespace cev
 		void NotePresented(uint32_t count = 1);
 		void NoteDropped(uint32_t count);
 		void NoteUpload(uint64_t bytes);
+		// Worker side (M7): bytes copied / converted for one frame; one skip-decoded packet; a finished catch-up.
+		void NoteCopy(uint64_t copyBytes, uint64_t colorBytes);
+		void NoteDecodeOnly();
+		void NoteCatchUp(float ms, uint32_t frames);
+		uint64_t DecodeOnlyCount() const { return m_decodeOnly.load(std::memory_order_relaxed); }
 
 		StatsSnapshot Snapshot() const;
 		void Reset();
+		//! Clears only the per-frame window (avg / max / p99), not the counters (M7: per visibility state).
+		void ResetWindow();
 
 	private:
 		struct Entry
@@ -77,5 +91,11 @@ namespace cev
 		std::atomic<uint64_t> m_presented{0};
 		std::atomic<uint64_t> m_dropped{0};
 		std::atomic<uint64_t> m_uploadBytes{0};
+		std::atomic<uint64_t> m_copyBytes{0};
+		std::atomic<uint64_t> m_colorBytes{0};
+		std::atomic<uint64_t> m_decodeOnly{0};
+		std::atomic<uint64_t> m_catchUps{0};
+		std::atomic<float> m_lastCatchUpMs{0.0f};
+		std::atomic<uint32_t> m_lastCatchUpFrames{0};
 	};
 }

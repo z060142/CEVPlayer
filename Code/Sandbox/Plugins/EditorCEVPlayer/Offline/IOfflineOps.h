@@ -59,6 +59,7 @@ namespace CEVEditor
 		int height = 0;
 		double fps = 0;
 		double durationSec = 0;
+		double maxKeyframeIntervalSec = 0; //!< longest keyframe distance, 0 = not known (M7)
 		bool hasAlpha = false;
 		std::vector<SAudioTrackInfo> audioTracks;
 	};

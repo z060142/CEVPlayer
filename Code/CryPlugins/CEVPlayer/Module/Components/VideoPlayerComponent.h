@@ -70,6 +70,7 @@ namespace CEVPlayer
 		bool                     m_autoplay = false;
 		bool                     m_skippable = false;
 		Api::EDecodeMode         m_decode = Api::EDecodeMode::Auto;
+		bool                     m_pauseDecodeWhenHidden = true;
 
 	private:
 		bool EnsurePlayer();

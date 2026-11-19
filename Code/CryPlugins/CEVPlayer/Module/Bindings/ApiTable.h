@@ -189,6 +189,7 @@ namespace CEVPlayer
 			eCryVS_VideoAdvanced_SetVariant,
 			eCryVS_VideoAdvanced_SetSkippable,
 			eCryVS_VideoAdvanced_Info,
+			eCryVS_VideoAdvanced_SetPauseDecodeWhenHidden, // M7
 			eCryVS_FunctionCount
 		};
 		extern const CryGUID kCryVSFunctionGuids[eCryVS_FunctionCount];

@@ -85,6 +85,26 @@ namespace cev
 			m_uploadBytes.fetch_add(bytes, std::memory_order_relaxed);
 	}
 
+	void Stats::NoteCopy(uint64_t copyBytes, uint64_t colorBytes)
+	{
+		if (!m_enabled.load(std::memory_order_relaxed))
+			return;
+		m_copyBytes.fetch_add(copyBytes, std::memory_order_relaxed);
+		m_colorBytes.fetch_add(colorBytes, std::memory_order_relaxed);
+	}
+
+	void Stats::NoteDecodeOnly()
+	{
+		m_decodeOnly.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	void Stats::NoteCatchUp(float ms, uint32_t frames)
+	{
+		m_lastCatchUpMs.store(ms, std::memory_order_relaxed);
+		m_lastCatchUpFrames.store(frames, std::memory_order_relaxed);
+		m_catchUps.fetch_add(1, std::memory_order_release);
+	}
+
 	StatsSnapshot Stats::Snapshot() const
 	{
 		StatsSnapshot out;
@@ -115,7 +135,20 @@ namespace cev
 		out.framesPresented = m_presented.load(std::memory_order_relaxed);
 		out.framesDropped = m_dropped.load(std::memory_order_relaxed);
 		out.uploadBytes = m_uploadBytes.load(std::memory_order_relaxed);
+		out.copyBytes = m_copyBytes.load(std::memory_order_relaxed);
+		out.colorBytes = m_colorBytes.load(std::memory_order_relaxed);
+		out.framesDecodeOnly = m_decodeOnly.load(std::memory_order_relaxed);
+		out.catchUps = m_catchUps.load(std::memory_order_acquire);
+		out.lastCatchUpMs = m_lastCatchUpMs.load(std::memory_order_relaxed);
+		out.lastCatchUpFrames = m_lastCatchUpFrames.load(std::memory_order_relaxed);
 		return out;
+	}
+
+	void Stats::ResetWindow()
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_head = 0;
+		m_count = 0;
 	}
 
 	void Stats::Reset()
@@ -128,5 +161,11 @@ namespace cev
 		m_presented.store(0, std::memory_order_relaxed);
 		m_dropped.store(0, std::memory_order_relaxed);
 		m_uploadBytes.store(0, std::memory_order_relaxed);
+		m_copyBytes.store(0, std::memory_order_relaxed);
+		m_colorBytes.store(0, std::memory_order_relaxed);
+		m_decodeOnly.store(0, std::memory_order_relaxed);
+		m_catchUps.store(0, std::memory_order_relaxed);
+		m_lastCatchUpMs.store(0.0f, std::memory_order_relaxed);
+		m_lastCatchUpFrames.store(0, std::memory_order_relaxed);
 	}
 }

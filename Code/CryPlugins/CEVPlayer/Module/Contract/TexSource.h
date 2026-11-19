@@ -94,6 +94,9 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 #endif
 
 #ifdef __cplusplus
+#include <string>
+#include <vector>
+
 // Source side bookkeeping of CEVPlayer (not part of the contract). Everything here is plain memory guarded by one
 // lightweight lock and makes no engine call, so the contract functions may run on any thread and keep working
 // after the plug-in shut down (static storage, closed flag). Names are surface ids, compared case-insensitively.
@@ -126,6 +129,29 @@ namespace CEVPlayer
 		};
 		//! false when the name is not a registered surface.
 		bool GetHintSummary(const char* name, SHintSummary& out);
+
+		//! open / close / control of the contract (rule 10): queued by the contract functions, applied by the player
+		//! manager at the start of its next tick (TakeCommands), in the order they were made.
+		struct SCommand
+		{
+			enum class EType : uint8_t { Open, Close, Control };
+			EType type = EType::Open;
+			std::string name;
+			std::string src;          // Open
+			uint32_t openFlags = 0;   // Open: CryTexSourceOpen::flags (bit0 autoplay, bit1 loop, bit2 muted)
+			float volume = 1.f;       // Open: CryTexSourceOpen::volume (1 when the caller's struct has no volume)
+			uint32_t verb = 0;        // Control: CTS_VERB_*
+			double value = 0.0;       // Control
+		};
+		//! Moves the queued commands into `out` (cleared first).
+		void TakeCommands(std::vector<SCommand>& out);
+		//! The manager tells the table who owns a name: true = the player was made by `open` (its `close` destroys
+		//! it, a repeated `open` with the same `src` is a no-op), false = level logic made it (`open` returns 2).
+		void SetOwnedByOpen(const char* name, bool owned, const char* src);
+		//! A queued `open` could not create its player: the name reports state 6 (error) with `errorCode`.
+		void PublishOpenError(const char* name, int32_t errorCode);
+		//! open: the extension check (.webm / .cevvideo, ASCII case-insensitive).
+		bool IsOpenableSource(const char* src);
 
 		//! cev_surfaces: one log line per surface (snapshot and aggregated hints).
 		void LogSurfaces();

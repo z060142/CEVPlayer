@@ -261,14 +261,14 @@ namespace CEVPlayer
 
 			void Build(SFlowTest& t)
 			{
-				AddNode(t, "VideoUI:PlayToSurface", { "Play", "Stop", "Video", "SurfaceID", "Loop", "Decode" }, { "Ready", "TextureId", "Width", "Height", "Duration", "HasAlpha", "Ended", "Error", "ErrorCode", "ErrorMessage" });
+				AddNode(t, "VideoUI:PlayToSurface", { "Play", "Stop", "Video", "SurfaceID", "Loop", "Decode", "PauseDecodeWhenHidden" }, { "Ready", "TextureId", "Width", "Height", "Duration", "HasAlpha", "Ended", "Error", "ErrorCode", "ErrorMessage" });
 				AddNode(t, "VideoUI:PlayToSurface", { "Play", "Video", "SurfaceID" }, { "Ready", "Error", "ErrorCode", "ErrorMessage" });
 				AddNode(t, "VideoUI:SurfaceInfo", { "Get", "SurfaceID" }, { "Exists", "TextureId", "Width", "Height", "PixelLayout", "Premultiplied", "HasAlpha", "FrameSerial", "State" });
 				AddNode(t, "VideoUI:SurfaceEvents", { "SurfaceID" }, { "Ready", "NewFrame", "FrameSerial", "Resized", "TextureId", "Width", "Height", "Closed" });
 				AddNode(t, "VideoUI:PlayToSurface", { "Play", "Stop", "Video", "SurfaceID" }, { "Ready", "Error" });
 				AddNode(t, "VideoAdvanced:Open", { "Open", "Close", "Video", "Output", "Fit", "Decode" }, { "Handle", "Ready", "Error", "ErrorCode", "ErrorMessage" });
 				AddNode(t, "VideoAdvanced:Transport", { "Handle", "Play", "Pause", "Stop", "Seek", "Seconds" }, { "Done", "Error" });
-				AddNode(t, "VideoAdvanced:Settings", { "Handle", "Loop", "Rate", "Volume", "Language", "Variant", "Skippable" }, { "Done", "Error" });
+				AddNode(t, "VideoAdvanced:Settings", { "Handle", "Loop", "Rate", "Volume", "Language", "Variant", "Skippable", "PauseDecodeWhenHidden" }, { "Done", "Error" });
 				AddNode(t, "VideoAdvanced:Info", { "Get", "Handle" }, { "State", "Time", "Duration", "Width", "Height", "HasAlpha", "Language", "Variant", "DecodeBackend", "FrameSerial", "SurfaceId", "Error" });
 				AddNode(t, "VideoAdvanced:Events", { "Handle" }, { "Ready", "Started", "NewFrame", "NewFrameSerial", "Marker", "Looped", "Ended", "Skipped", "Error" });
 				AddNode(t, "Video:PlayOnScreen", { "Play", "Stop", "Video", "Fit", "Loop", "Skippable", "Decode" }, { "Started", "Ended", "Skipped", "Error", "ErrorCode", "ErrorMessage" });
@@ -457,6 +457,12 @@ namespace CEVPlayer
 				Set(t, s, "Rate", -1.f);
 				Update(t);
 				t.Check(Count(s, "Error") == 1, "Settings Rate=-1 rejected -> Error");
+				Set(t, s, "PauseDecodeWhenHidden", false);
+				Update(t);
+				t.Check(Count(s, "Done") == 9 && !Query("PauseDecodeWhenHidden", t.handle).b, "Settings PauseDecodeWhenHidden=false applied (M7)");
+				Set(t, s, "PauseDecodeWhenHidden", true);
+				Update(t);
+				t.Check(Count(s, "Done") == 10 && Query("PauseDecodeWhenHidden", t.handle).b, "Settings PauseDecodeWhenHidden=true applied");
 
 				// Events and Transport on the handle
 				Set(t, N(eN_AdvEvents), "Handle", t.handle);

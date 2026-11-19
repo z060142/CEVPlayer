@@ -94,6 +94,8 @@ namespace CEVPlayer
 		CVideoPlayerImpl* Find(const IVideoPlayer* pPlayer) const;
 		void ReapZombies(bool force);
 		void ReapPendingDestroy();
+		//! Applies the open / close / control requests the texture source contract queued since the last tick.
+		void ProcessContractCommands();
 		void LogStats();
 		void DestroyConsolePlayer();
 		bool TextureNameInUse(const std::string& name, const CVideoPlayerImpl* pSelf) const;
