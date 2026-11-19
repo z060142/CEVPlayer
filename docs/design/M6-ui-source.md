@@ -187,7 +187,7 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 
 | 里程碑 | 內容 | 驗收 |
 |---|---|---|
-| 階段 0 | 只量不改產品行為：`eTF_R8` 上傳、UI 是否同一幀取到新畫面、MF 硬解在本機是否成立、現行 CPU 轉色採用的色度位置與素材標記（決定 `chromaSiting` 的回報值）、基準表 | 五個答案與基準表寫進 `docs/research/05-ui-source-baseline.md` |
+| 階段 0（**完成** 2026-11-19，結果見 §10） | 只量不改產品行為：`eTF_R8` 上傳、UI 是否同一幀取到新畫面、MF 硬解在本機是否成立、現行 CPU 轉色採用的色度位置與素材標記（決定 `chromaSiting` 的回報值）、基準表 | 五個答案與基準表寫進 `docs/research/05-ui-source-baseline.md` |
 | M6 | Surface ID 登錄表、契約 v1 `query`、舊節點刪除、兩個抽屜、介面版本 5、文件改寫 | UI 與節點各寫同一個 ID 就出畫面（RGBA8）；換檔／換語言後不需重新接線；重複 ID 被拒；沒有消費端插件時全部功能照舊；Core 自測與 `cev_apitest` 過 |
 | M7 | `hint`：可見性（§5.3）、開始時選變體、匯入 `-g`、結尾判定、量測欄位；契約 v2 的 `state`／時間與 `open`／`close`／`control` | 暫停時 `contentSerial` 不動；不可見時複製／轉色／上傳為零、2 秒後解碼為零、重新可見的補解時間有上限；`<video src>` 經由 `open` 播放 |
 | M8 | 打包排列、按需 RGBA、`eTF_R8` 上傳、`acceptLayouts` 協商 | 兩種排列的畫面在消費端逐像素比對差 ≤ 2 級；協商切換時聲音不中斷；基準表更新為實測 |
@@ -214,3 +214,32 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 - 契約函式在載入期間由渲染執行緒呼叫；§3 規則 10（契約函式不呼叫引擎）已滿足。
 - 載入期間的聲音不在該文件的保證內，由 M10 自行驗證。Sandbox 開關卡時沒有載入迴圈（不支援）；非同步／分段載入時主迴圈照跑，走一般的 tick。
 - 對 M6～M9 的要求：播放器的 tick 從現在起就寫成「不假設主執行緒、時間由呼叫者給 dt」，M10 才不必重寫。
+
+## 10. 階段 0 的結果與對本設計的修訂（2026-11-19；細節在 `docs/research/05a-standalone.md`、`05b-engine.md`，原始資料在 `E:/coding3/xt-bench/cev-s0/`）
+
+本機：13600K、RTX 4070 Ti；引擎樹 `CRYENGINE_Source_CEVPlayer_XTFrame`（Profile，CryXTUI v0.17.0）。耗時為 ms、平均／p99。
+
+| 素材（VP9） | 解碼 | 平面複製 | CPU 轉色 | 主執行緒上傳 | 每幀上傳 | 行程 RAM 增量 |
+|---|---|---|---|---|---|---|
+| 1080p30 | 1.59／2.64 | 0.35／0.72 | 4.28／5.61 | 1.63／3.02 | 8.29 MB | 110 MB |
+| 1080p30 alpha | 2.42／3.96 | 0.68／1.27 | 5.37／9.32 | 1.66／4.19 | 8.29 MB | 141 MB |
+| 1080p60 | 1.62／2.74 | 0.38／0.93 | 4.37／8.22 | 1.83／3.63 | 8.29 MB | 139 MB |
+| 2160p30 | 7.24／12.06 | 2.43／4.85 | 17.17／27.11 | 8.09／14.40 | 33.2 MB | 420 MB |
+| 2160p30 alpha | 10.18／17.60 | 3.66／7.84 | 21.61／36.79 | 7.68／16.14 | 33.2 MB | 573 MB |
+
+- **今天 2160p 帶 alpha 無法即時播放**（畫面落後時鐘約 1 秒）；2160p 的兩大成本是 CPU 轉色與主執行緒上的上傳呼叫（8 ms）。打包平面（M8）把這兩項分別變成 0 與約 1／2.7——M8 排在 M9 之前不變。
+- 行程 RAM 的增量遠大於 ring 的推算值（1080p 推算 44～51 MB、實測 110～160 MB）：M8 動工時先拆開量是誰佔的。
+- **`eTF_R8` 動態貼圖可用**（§5.2 的前提成立）：1920×1620、3840×3240、非 2 的冪皆成功，裝置格式 `R8_UNORM`、緊密列；每幀更新 0.4 ms（1080p 打包）與 1.5 ms（2160p 打包）。`UploadToVideoMemory` 的同步路徑忽略 `eTFDst`。**同名貼圖移除後立刻重建會拿回同一個 id**——`generation` 必須由播放器自己遞增，不能以 id 是否改變來判斷。
+- **同一幀**：CryXTUI 的 layer 模式（`xtui_direct 0`）下，`UpdateBeforeRender` 送出的貼圖更新與 UI 繪製在同一個顯示幀生效（36／36 張截圖）。未測：插件更新順序相反、載入期迴圈。
+- **消費端的缺陷（已通知 XTFrame 主線）**：CryXTUI 預設的 Direct 模式（`xtui_direct 1`）與軟體路徑完全不畫 `engine://` 綁定的貼圖。M6 的驗收在它修好之前只能在 `xtui_direct 0` 下做。另：XTUI surface 開著時直接 `quit` 會崩潰（先 `xtui_close` 則否）。
+- **色度位置**：現行 CPU 轉換取最近點（等效置中）；Core 沒有讀容器的 `ChromaSitingHorz/Vert`。契約的 `chromaSiting` 回報**素材本身**的位置——M8 在 Core 讀這兩個欄位；素材沒標時回報 `CTS_SITING_LEFT`（FFmpeg 轉出的素材都標 left，4:2:0 影片的通例）。VP9 alpha 素材的色彩平面未乘 alpha：`flags` bit3＝0。
+- **匯入轉碼確實沒有 `-g`**；測試素材 `vp9_alpha.webm` 全片只有一個關鍵幀（§5.3 第 3 點的對策必要）。
+- **Media Foundation（§6 修訂）**：
+  - 這個 MFT（`VP9VideoExtensionDecoder`，同步、`MF_SA_D3D11_AWARE`）沒有任何屬性表示「硬體」。判定改為：**給它 D3D manager 後 `SetInputType` 成功＝硬體解碼**；失敗就用 libvpx。不給 manager 的路徑是軟體解碼而且比 libvpx 慢（1080p30 7.8 ms／幀），不使用。
+  - **VP8 沒有硬體解碼**（`MF_E_UNSUPPORTED_D3D_TYPE`）：`Decode=GPU` 遇到 VP8 一律退回 CPU。
+  - 硬解輸出與 libvpx 逐像素相同（Y 與 alpha 平面最大差 0；UV 未比）。alpha 第二條流可用第二個 MFT 實例。seek 正常。
+  - 讀回（第一版）的成本：解碼呼叫 0.4～0.6 ms；複製到 staging 後**必須 `Flush`**、排隊 **2 幀**再 Map——1080p 0.4 ms、2160p 2.4 ms（同步讀回是 2.7 與 7.9 ms，p99 25 ms，不用）。輸出貼圖高度會對齊（1080 → 1088），UV 起點是 `RowPitch × 貼圖高`，依 aperture 裁切；第一次輸出前固定有一次 `STREAM_CHANGE`。
+  - 對照：2160p 以 libvpx 解碼約 7 ms（4 執行緒）＋複製 2.4 ms；硬解＋讀回約 3 ms 且幾乎不佔 CPU。`Auto` 的規則（高度 ≥ 1080 用 GPU）與數字相符。
+  - 第二版（零複製）比原先設想的多兩步：輸出貼圖只有 `DECODER` 綁定旗標、不能直接取樣（要再做一次 GPU 複製或接 video processor），而且在 MFT 自己的裝置上（要共享貼圖才能給引擎）。量測後再議的結論不變。
+- 階段 0 留下的量測工具：`cev_stats` 的新欄位（複製、轉色、上傳耗時與位元組）、`cev_stats_file`、開發用指令 `cev_probe_r8`／`cev_probe_sync`／`cev_bench_play`／`cev_bench_stop`、`tools/probes/`（`core_bench`、`mf_decode_probe`、`make_bench_media.sh`）。
+
