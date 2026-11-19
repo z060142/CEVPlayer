@@ -144,6 +144,7 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 
 - 取消：`TextureName`（名詞消失）、`InterfaceVersion` 與 `Caps`（開發者資訊，改由主控台 `cev_info` 顯示）。事件與查詢的幀序號改以字串輸出，不再 2^31 回繞。
 - 描述表仍是單一事實來源：腳本綁定（Schematyc 函式、CryVS）維持一項一個函式——程式裡細粒度是正常的；合併只發生在 FlowGraph 節點這一層（複合節點由手寫的描述組合表內的函式）。Schematyc 元件 `Video Player` 的屬性對應同一組名詞（Output、SurfaceID、Decode、Loop、Autoplay、Skippable）。
+- **CryVS（社群版引擎的視覺腳本）也要有同一組節點**（使用者 2026-11-19：「CryVS 的節點要加」）。現況：`Module/Bindings/CryVSEnv.cpp` 以描述表產生一個元件與其函式／訊號（與 Schematyc 相同），只在社群版引擎樹編譯過、從未實跑（`PLAN.md` M2 備註）。M6 的要求：CryVS 端提供與 FlowGraph 相同的三個抽屜與 10 個節點的對應物（名詞一致：SurfaceID、Decode、Output…），並在社群版引擎（`E:\coding crycry\CryENGINE-5-7-community`，`z060142/CryENGINE-5-7-community`）實際執行驗證。CryVS 的節點模型（是否有不屬於元件的獨立函式節點、類別怎麼分抽屜、複合節點怎麼表達）在動工前先唯讀調查，寫進 M6 的任務單。
 - 「路不鎖死」：任何 UI 系統都可以只靠節點輸出的 `TextureId`／`Width`／`Height`（RGBA8）使用，不必實作契約；完整的好處（§5、§6）只在經由契約時生效。
 
 ## 5. 節流與打包平面（M7、M8）
