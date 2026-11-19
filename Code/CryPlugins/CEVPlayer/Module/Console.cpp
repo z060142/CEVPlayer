@@ -465,10 +465,61 @@ namespace CEVPlayer
 			// M10b sub-modes (argument 6): "open:<surface>:<path>" sends a contract `open` (autoplay, loop) at
 			// LEVEL_LOAD_START_LOADINGSCREEN through the exported CryTexSource_v1 table (scenario C);
 			// "destroy:<surface>" destroys that surface player at LEVEL_LOAD_START like `cev_play_surface <id>` (scenario G).
+			// F2: "control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]..." (at most 4 steps) sends a
+			// contract `control` through the exported table from the probe callback's thread (the render thread) at the given
+			// iteration of every loading loop, like a UI consumer sending commands inside the loop.
 			std::string s_openSurface;
 			std::string s_openSrc;
 			bool s_opened = false;
 			std::string s_destroySurface;
+			constexpr size_t kMaxControlSteps = 4;
+			struct SControlStep
+			{
+				std::string verbName;
+				uint32_t verb = 0;
+				double value = 0.0;
+				uint32 iteration = 0;
+			};
+			std::string s_controlSurface;
+			std::vector<SControlStep> s_controlSteps;
+
+			//! F2: parses "<verb>:<value>:<iteration>[+...]" into steps; false on any format error.
+			bool ParseControlSteps(const std::string& text, std::vector<SControlStep>& out)
+			{
+				static const char* const kVerbs[] = { "play", "pause", "seek", "rate", "loop", "volume", "mute" };
+				out.clear();
+				size_t pos = 0;
+				while (true)
+				{
+					const size_t plus = text.find('+', pos);
+					const std::string seg = text.substr(pos, plus == std::string::npos ? std::string::npos : plus - pos);
+					const size_t c1 = seg.find(':');
+					const size_t c2 = c1 == std::string::npos ? std::string::npos : seg.find(':', c1 + 1);
+					if (c2 == std::string::npos || seg.find(':', c2 + 1) != std::string::npos || out.size() >= kMaxControlSteps)
+						return false;
+					SControlStep step;
+					step.verbName = seg.substr(0, c1);
+					for (uint32_t i = 0; i < sizeof(kVerbs) / sizeof(kVerbs[0]); ++i)
+						if (step.verbName == kVerbs[i])
+							step.verb = CTS_VERB_PLAY + i;
+					if (step.verb == 0)
+						return false;
+					const std::string valueText = seg.substr(c1 + 1, c2 - c1 - 1);
+					const std::string iterText = seg.substr(c2 + 1);
+					char* end = nullptr;
+					step.value = std::strtod(valueText.c_str(), &end);
+					if (valueText.empty() || end == nullptr || *end != '\0')
+						return false;
+					const long iter = std::strtol(iterText.c_str(), &end, 10);
+					if (iterText.empty() || end == nullptr || *end != '\0' || iter < 1)
+						return false;
+					step.iteration = static_cast<uint32>(iter);
+					out.push_back(step);
+					if (plus == std::string::npos)
+						return true;
+					pos = plus + 1;
+				}
+			}
 
 			std::mutex s_mutex; // guards the loop statistics below (render thread writes, main thread reads)
 			int s_loopIndex = 0;
@@ -718,6 +769,17 @@ namespace CEVPlayer
 						TimedRead("P8 first iteration after LOADINGSCREEN", kHeaderBytes);
 					if (s_iterations == kOpenAtIteration)
 						TimedRead("P5 iteration 30", kReadBytes);
+					if (!s_controlSurface.empty())
+					{
+						for (const SControlStep& step : s_controlSteps)
+						{
+							if (step.iteration != s_iterations)
+								continue;
+							const CryTexSourceApi* const api = ContractApi();
+							const int r = api != nullptr ? api->control(s_controlSurface.c_str(), step.verb, step.value) : -1;
+							PLog("cev_probe_loadtime: control %s %g sent at iteration %u, result %d", step.verbName.c_str(), step.value, s_iterations, r);
+						}
+					}
 					if (s_iterations == 60)
 						ReadBack(s_drawMode == 1 ? "render" : (s_drawMode == 2 ? "update" : "nodraw"));
 
@@ -884,6 +946,8 @@ namespace CEVPlayer
 				s_opened = false;
 				s_openSurface.clear();
 				s_destroySurface.clear();
+				s_controlSurface.clear();
+				s_controlSteps.clear();
 				s_on = false;
 				PLog("off: callback removed, texture released");
 			}
@@ -937,6 +1001,19 @@ namespace CEVPlayer
 				}
 				else if (mode.compare(0, 8, "destroy:") == 0)
 					s_destroySurface = mode.substr(8);
+				else if (mode.compare(0, 8, "control:") == 0)
+				{
+					const size_t colon = mode.find(':', 8);
+					std::vector<SControlStep> steps;
+					if (colon == std::string::npos || colon == 8 || !ParseControlSteps(mode.substr(colon + 1), steps))
+					{
+						PLog("usage: cev_probe_loadtime 1 <stall ms> <draw> <P6 surface|-> <read-back dir|-> control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]... "
+							"(at most 4 steps; verb play|pause|seek|rate|loop|volume|mute; iteration >= 1); probe not started");
+						return;
+					}
+					s_controlSurface = mode.substr(8, colon - 8);
+					s_controlSteps = steps;
+				}
 			}
 			s_texBuf.assign(static_cast<size_t>(kTexSize) * kTexSize, 0xFFFF00FFu);
 			s_texId = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(reinterpret_cast<unsigned char*>(s_texBuf.data()), kTexSize, kTexSize, eTF_R8G8B8A8, eTF_R8G8B8A8, 0,
@@ -1235,7 +1312,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");
 		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> draws the surface's texture top left as it is (an R8 packed texture shows the planes in grey); no argument = off");
 #if CEV_HAVE_LOADTIME_CALLBACKS
-		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>] registers an order-100 loading-loop callback that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
+		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>|control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]...] registers an order-100 loading-loop callback that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
 #endif
 		REGISTER_COMMAND("cev_stats_file", DevProbe::CmdStatsFile, VF_NULL, "Measurement: cev_stats_file <path>|off writes the per-second cev_stats rows as CSV (turns cev_stats on)");
 
