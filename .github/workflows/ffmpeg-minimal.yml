@@ -3,8 +3,9 @@
 #
 #   * Manual run (Actions -> ffmpeg-minimal -> Run workflow): builds, tests, uploads the zip as a workflow artifact;
 #     "publish" additionally creates / updates the release ffmpeg-minimal-v<version> and attaches the zip.
-#   * Tag push ffmpeg-minimal-v*: same, always publishes. The tag must equal ffmpeg-minimal-v<FFMPEG_VERSION>-cev<CEV_BUILD_REV>
-#     from tools/ffmpeg/versions.env.
+#   * There is deliberately NO tag trigger: release assets are built locally with tools/ffmpeg/build_minimal.sh and
+#     uploaded by hand; the tag ffmpeg-minimal-v<FFMPEG_VERSION>-cev<CEV_BUILD_REV> only names the release. Pushing it
+#     must not start a hosted build that would overwrite the asset (no hosted CI is run on this repository).
 #
 # After a release exists, pin it in Core/offline/include/CEVOffline/FfmpegInstall.h: kFfmpegMinimalVersion and
 # kFfmpegMinimalSha256 (the job summary prints both). The plugin refuses any download whose SHA-256 differs.
@@ -22,9 +23,6 @@ on:
         description: "Also create / update the release ffmpeg-minimal-v<version> and attach the zip"
         type: boolean
         default: false
-  push:
-    tags:
-      - "ffmpeg-minimal-v*"
 
 concurrency:
   group: ffmpeg-minimal-${{ github.ref }}
@@ -81,7 +79,6 @@ jobs:
             mingw-w64-x86_64-meson
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-zlib
 
       - name: Build
         shell: msys2 {0}
@@ -133,7 +130,7 @@ jobs:
   publish:
     name: Publish the release asset
     needs: build
-    if: ${{ github.event_name == 'push' || inputs.publish }}
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

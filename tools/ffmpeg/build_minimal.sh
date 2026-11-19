@@ -5,7 +5,7 @@
 # Runs in an MSYS2 MINGW64 shell (the GitHub workflow .github/workflows/ffmpeg-minimal.yml does exactly this on
 # windows-latest). Locally: install MSYS2, open the "MSYS2 MINGW64" shell and
 #   pacman -S --needed base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-nasm mingw-w64-x86_64-meson \
-#             mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf mingw-w64-x86_64-zlib zip curl xz tar perl
+#             mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf zip curl xz tar perl
 #   tools/ffmpeg/build_minimal.sh [--work <dir>] [--out <dir>] [--jobs <n>]
 #
 # Scope (docs/design/M5-ffmpeg.md): --disable-everything, then only
@@ -16,13 +16,13 @@
 #   muxers    webm, ogg, wav
 #   filters   scale, format, aresample (+ what ffmpeg.c itself selects: aformat, null, anull, trim, ...)
 # No GPL and no nonfree component (--disable-gpl --disable-nonfree --disable-version3): every library is BSD licensed
-# (zlib, needed by the png decoder, is under the zlib licence and comes statically from the MinGW toolchain),
+# (zlib, needed by the png decoder, is under the zlib licence and is built from its pinned release tarball),
 # FFmpeg itself is LGPL-2.1-or-later. The script refuses to package a binary whose configuration says otherwise.
 #
 # Status: first real run 2026-11-19 on a local Windows 11 machine (not CI): MSYS2 2026-09-27 base installed with scoop
 # (user profile), gcc 16.2.0, nasm 3.02, meson 1.12.1, --jobs 6, work dir on a RAM disk (peak ~300 MB), about 20 min
 # per full run. Fixes from that run: perl added to the package list (libvpx configure needs it), --disable-postproc
-# removed (libpostproc no longer exists in FFmpeg 8.0), --enable-zlib (otherwise png is dropped silently), CR stripped
+# removed (libpostproc no longer exists in FFmpeg 8.0), --enable-zlib with zlib built from its pinned tarball (otherwise png is dropped silently), CR stripped
 # from the exe's output before matching. smoke_test_minimal.sh passed against references ffmpeg 7.1.1 (scoop) and
 # mingw-w64-x86_64-ffmpeg 9.0.2. The GitHub workflow itself has still not been run.
 #   Local note for that machine: its security software blocks MSYS2's own curl, so pacman ran with
@@ -110,7 +110,7 @@ unpack() { # name archive -> $SRC/<name> (single top level folder stripped)
 }
 
 log "fetch sources"
-for dep in FFMPEG LIBVPX OPUS LIBOGG LIBVORBIS DAV1D; do
+for dep in FFMPEG LIBVPX OPUS LIBOGG LIBVORBIS DAV1D ZLIB; do
 	url_var="${dep}_URL"; sha_var="${dep}_SHA256"
 	archive="$(fetch "${dep,,}" "${!url_var}" "${!sha_var}")"
 	unpack "${dep,,}" "${archive}"
@@ -129,6 +129,17 @@ build_autotools() { # name configure-args...
 build_autotools libogg
 build_autotools libvorbis --with-ogg="${PREFIX_M}" --disable-docs --disable-examples --disable-oggtest
 build_autotools opus --disable-doc --disable-extra-programs
+
+# zlib: static libz.a + headers only (win32/Makefile.gcc; its install target would also build the DLL). The prefix
+# comes first in FFmpeg's -I / -L, so this copy is used, not the MinGW toolchain's own zlib.
+log "build zlib"
+(
+	cd "${SRC}/zlib"
+	make -f win32/Makefile.gcc -j"${JOBS}" libz.a
+	mkdir -p "${PREFIX}/include" "${PREFIX}/lib"
+	cp zlib.h zconf.h "${PREFIX}/include/"
+	cp libz.a "${PREFIX}/lib/"
+)
 
 log "build dav1d"
 (
@@ -168,7 +179,7 @@ FFMPEG_CONFIGURE_ARGS=(
 	--enable-ffmpeg
 	# external libraries (all BSD)
 	--enable-libvpx --enable-libopus --enable-libvorbis --enable-libdav1d
-	# zlib (zlib licence) from the MinGW toolchain (mingw-w64-x86_64-zlib, linked statically): the png decoder needs
+	# zlib (zlib licence, built above from the pinned tarball, static): the png decoder needs
 	# it (png_decoder_select=inflate_wrapper -> zlib) and --disable-autodetect would otherwise drop png silently.
 	--enable-zlib
 	# import: containers
@@ -245,7 +256,7 @@ cp "${SRC}/opus/COPYING" "${STAGE}/licenses/opus-COPYING"
 cp "${SRC}/libogg/COPYING" "${STAGE}/licenses/libogg-COPYING"
 cp "${SRC}/libvorbis/COPYING" "${STAGE}/licenses/libvorbis-COPYING"
 cp "${SRC}/dav1d/COPYING" "${STAGE}/licenses/dav1d-COPYING"
-cp "$(cygpath -u "${MINGW_PREFIX:-/mingw64}")/share/licenses/zlib/LICENSE" "${STAGE}/licenses/zlib-LICENSE"
+cp "${SRC}/zlib/LICENSE" "${STAGE}/licenses/zlib-LICENSE"
 cp "${HERE}/build_minimal.sh" "${HERE}/versions.env" "${HERE}/smoke_test_minimal.sh" "${STAGE}/"
 
 {
@@ -255,7 +266,7 @@ cp "${HERE}/build_minimal.sh" "${HERE}/versions.env" "${HERE}/smoke_test_minimal
 	echo "To rebuild: MSYS2 MINGW64 shell, run build_minimal.sh next to versions.env (needs network access)."
 	echo
 	echo "Sources (SHA-256 verified by the build script):"
-	for dep in FFMPEG LIBVPX OPUS LIBOGG LIBVORBIS DAV1D; do
+	for dep in FFMPEG LIBVPX OPUS LIBOGG LIBVORBIS DAV1D ZLIB; do
 		v="${dep}_VERSION"; u="${dep}_URL"; s="${dep}_SHA256"
 		printf '  %-10s %-8s %s\n             sha256 %s\n' "${dep,,}" "${!v}" "${!u}" "${!s}"
 	done
@@ -263,7 +274,6 @@ cp "${HERE}/build_minimal.sh" "${HERE}/versions.env" "${HERE}/smoke_test_minimal
 	echo "Toolchain:"
 	gcc --version | head -n 1 | sed 's/^/  /'
 	nasm --version | head -n 1 | sed 's/^/  /'
-	echo "  zlib (static, MinGW toolchain): $(pacman -Q mingw-w64-x86_64-zlib 2>/dev/null || echo unknown)"
 	meson --version | sed 's/^/  meson /'
 	echo
 	echo "ffmpeg -version:"
