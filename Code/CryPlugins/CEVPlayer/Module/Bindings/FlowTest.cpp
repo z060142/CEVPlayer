@@ -268,8 +268,8 @@ namespace CEVPlayer
 				AddNode(t, "CEVPlayer:UI:PlayToSurface", { "Play", "Stop", "Video", "SurfaceID" }, { "Ready", "Error" });
 				AddNode(t, "CEVPlayer:Advanced:Open", { "Open", "Close", "Video", "Output", "Fit", "Decode" }, { "Handle", "Ready", "Error", "ErrorCode", "ErrorMessage" });
 				AddNode(t, "CEVPlayer:Advanced:Transport", { "Handle", "Play", "Pause", "Stop", "Seek", "Seconds" }, { "Done", "Error" });
-				AddNode(t, "CEVPlayer:Advanced:Settings", { "Handle", "Loop", "Rate", "Volume", "Language", "Variant", "Skippable", "PauseDecodeWhenHidden" }, { "Done", "Error" });
-				AddNode(t, "CEVPlayer:Advanced:Info", { "Get", "Handle" }, { "State", "Time", "Duration", "Width", "Height", "HasAlpha", "Language", "Variant", "DecodeBackend", "FrameSerial", "SurfaceId", "Error" });
+				AddNode(t, "CEVPlayer:Advanced:Settings", { "Handle", "Loop", "Rate", "Volume", "AudioTrack", "Variant", "Skippable", "PauseDecodeWhenHidden" }, { "Done", "Error" });
+				AddNode(t, "CEVPlayer:Advanced:Info", { "Get", "Handle" }, { "State", "Time", "Duration", "Width", "Height", "HasAlpha", "AudioTrack", "Variant", "DecodeBackend", "FrameSerial", "SurfaceId", "Error" });
 				AddNode(t, "CEVPlayer:Advanced:Events", { "Handle" }, { "Ready", "Started", "NewFrame", "NewFrameSerial", "Marker", "Looped", "Ended", "Skipped", "Error" });
 				AddNode(t, "CEVPlayer:PlayOnScreen", { "Play", "Stop", "Video", "Fit", "Loop", "Skippable", "Decode" }, { "Started", "Ended", "Skipped", "Error", "ErrorCode", "ErrorMessage" });
 				AddNode(t, "CEVPlayer:PlayOnMaterial", { "Play", "Stop", "Video", "Material", "Slot" }, { "Started", "Ended", "Error", "ErrorCode", "ErrorMessage" });
@@ -479,9 +479,9 @@ namespace CEVPlayer
 				Update(t);
 				t.Check(Count(s, "Done") == 3 && Query("Volume", t.handle).f == 0.25f && Query("IsLooping", t.handle).b, "Settings Volume=0.25 applied alone");
 				Set(t, s, "Variant", 0);
-				Set(t, s, "Language", string(""));
+				Set(t, s, "AudioTrack", string(""));
 				Update(t);
-				t.Check(Count(s, "Done") == 5 && Count(s, "Error") == 0, "Settings Variant and Language accepted");
+				t.Check(Count(s, "Done") == 5 && Count(s, "Error") == 0, "Settings Variant and AudioTrack accepted");
 				Set(t, s, "Skippable", true);
 				Update(t);
 				t.Check(Count(s, "Done") == 6 && mEnv->pApi->IsSkippable(t.handle), "Settings Skippable=true applied");

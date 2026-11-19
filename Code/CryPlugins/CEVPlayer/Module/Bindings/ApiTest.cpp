@@ -3,10 +3,13 @@
 #include "ApiTest.h"
 
 #include <cstdlib>
+#include <cstring>
+#include <initializer_list>
 #include <string>
 
 #include "Bindings/ApiPlayers.h"
 #include "Bindings/ApiTable.h"
+#include "Player/VideoDescriptor.h"
 #include "Player/VideoPlayerImpl.h"
 #include "CEVCore/Status.h"
 
@@ -57,6 +60,18 @@ namespace CEVPlayer
 				{
 					SValue v;
 					const bool ok = Call(E(name), handle, nullptr, 0, &v);
+					if (pOk != nullptr)
+						*pOk = ok;
+					return v;
+				}
+
+				//! Indexed query (A1: AudioTrackName / AudioTrackLanguage); false when the entry does not exist.
+				SValue QueryAt(const char* name, int index, bool* pOk = nullptr)
+				{
+					SValue v;
+					const SEntry* const pEntry = FindByName(name);
+					const SValue arg[1] = { SValue::FromInt(index) };
+					const bool ok = pEntry != nullptr && Call(*pEntry, handle, arg, 1, &v);
 					if (pOk != nullptr)
 						*pOk = ok;
 					return v;
@@ -147,8 +162,8 @@ namespace CEVPlayer
 			LogAlways("cev_apitest: start (%s)", t.path.c_str());
 
 			// the table itself (M6b): entry counts, retired entries gone, new entries present
-			t.Check(Controls().size() == 19 && Queries().size() == 22 && Events().size() == eEvent_Count,
-				"table has 19 controls, 22 queries, 8 events (" + std::to_string(Controls().size()) + ", " + std::to_string(Queries().size()) + ", " + std::to_string(Events().size()) + ")");
+			t.Check(Controls().size() == 19 && Queries().size() == 25 && Events().size() == eEvent_Count,
+				"table has 19 controls, 25 queries, 8 events (" + std::to_string(Controls().size()) + ", " + std::to_string(Queries().size()) + ", " + std::to_string(Events().size()) + ")");
 			t.Check(FindByName("TextureName") == nullptr && FindByName("InterfaceVersion") == nullptr && FindByName("Caps") == nullptr, "TextureName, InterfaceVersion and Caps are retired");
 			bool allNew = true;
 			for (const char* name : { "CreateForSurface", "SetDecode", "UnbindMaterial", "SurfaceId", "Generation", "PixelLayout", "DecodeBackend", "FrameSerial", "IsLoaded", "IsLooping", "HasAudio", "Rate", "Volume", "Path" })
@@ -157,6 +172,26 @@ namespace CEVPlayer
 			t.Check(FindByName("Create")->paramCount == 0, "Create has no TextureName parameter");
 			t.Check(FindByName("SetPauseDecodeWhenHidden") != nullptr && FindByName("PauseDecodeWhenHidden") != nullptr, "SetPauseDecodeWhenHidden / PauseDecodeWhenHidden exist (M7)");
 			t.Check(Events()[eEvent_NewFrame].params[0].type == EType::String, "NewFrame Serial is a string");
+			// A1: audio tracks are tracks; SetLanguage / Language are retired and their GUIDs never come back
+			t.Check(FindByName("SetLanguage") == nullptr && FindByName("Language") == nullptr, "SetLanguage and Language are retired (A1)");
+			t.Check(FindByName("SetAudioTrack") != nullptr && FindByName("AudioTrack") != nullptr && FindByName("AudioTrackCount") != nullptr
+				&& FindByName("AudioTrackName") != nullptr && FindByName("AudioTrackLanguage") != nullptr, "SetAudioTrack, AudioTrack, AudioTrackCount, AudioTrackName, AudioTrackLanguage exist (A1)");
+			{
+				const SEntry* const pSet = FindByName("SetAudioTrack");
+				const SEntry* const pName = FindByName("AudioTrackName");
+				const SEntry* const pLang = FindByName("AudioTrackLanguage");
+				t.Check(pSet != nullptr && pSet->paramCount == 1 && std::strcmp(pSet->params[0].name, "Track") == 0 && pSet->params[0].type == EType::String, "SetAudioTrack takes one string parameter Track");
+				t.Check(pName != nullptr && pName->paramCount == 1 && std::strcmp(pName->params[0].name, "Index") == 0 && pName->params[0].type == EType::Int && pName->returnType == EType::String
+					&& pLang != nullptr && pLang->paramCount == 1 && pLang->params[0].type == EType::Int && pLang->returnType == EType::String, "AudioTrackName / AudioTrackLanguage take an int Index and return a string");
+				const CryGUID retiredA1[2] = { "EB59C123-4D68-43F3-A979-65C544B6BA1C"_cry_guid, "B7A77A6C-E01F-4051-9B05-CA9596E6E49B"_cry_guid };
+				bool reused = false;
+				for (const SSpan& span : { Controls(), Queries(), Events() })
+					for (const SEntry& e : span)
+						reused = reused || e.guid == retiredA1[0] || e.guid == retiredA1[1];
+				for (uint32_t i = 0; i < eCryVS_FunctionCount; ++i)
+					reused = reused || kCryVSFunctionGuids[i] == retiredA1[0] || kCryVSFunctionGuids[i] == retiredA1[1];
+				t.Check(!reused, "the retired GUIDs of SetLanguage / Language are not used by any entry (A1)");
+			}
 
 			// creation through the table
 			SValue created;
@@ -258,8 +293,29 @@ namespace CEVPlayer
 			}
 			t.Check(t.serialIsString && !t.lastSerial.empty(), "NewFrame Serial payloads are decimal strings (last " + t.lastSerial + ")");
 			LogAlways("cev_apitest: HasAudio=%d", t.Query("HasAudio").b ? 1 : 0);
-			LogAlways("cev_apitest: HasAlpha=%d Language='%s' Variant=%d events: ready=%u started=%u newFrame=%u looped=%u ended=%u error=%u",
-				t.Query("HasAlpha").b ? 1 : 0, t.Query("Language").s.c_str(), t.Query("Variant").i,
+			// A1: the audio tracks of the loaded media (a plain .webm has none; a .cevvideo lists its <AudioTracks>)
+			{
+				bool okCount = false;
+				const int count = t.Query("AudioTrackCount", &okCount).i;
+				const bool descriptor = IsDescriptorPath(t.path.c_str());
+				t.Check(okCount && (descriptor ? count > 0 : count == 0), "AudioTrackCount " + std::to_string(count) + (descriptor ? " > 0 for a descriptor" : " == 0 for a plain video"));
+				bool listed = count == 0 && t.Query("AudioTrack").s.empty();
+				for (int i = 0; i < count; ++i)
+				{
+					bool okName = false;
+					bool okLang = false;
+					const std::string name = t.QueryAt("AudioTrackName", i, &okName).s;
+					const std::string language = t.QueryAt("AudioTrackLanguage", i, &okLang).s;
+					LogAlways("cev_apitest: audio track %d name='%s' language='%s'", i, name.c_str(), language.c_str());
+					t.Check(okName && okLang && !name.empty(), "AudioTrackName(" + std::to_string(i) + ") is not empty");
+					listed = listed || stricmp(name.c_str(), t.Query("AudioTrack").s.c_str()) == 0;
+				}
+				t.Check(listed, "AudioTrack <" + t.Query("AudioTrack").s + "> is one of the listed tracks (or empty without tracks)");
+				bool okOut = false;
+				t.Check(t.QueryAt("AudioTrackName", count, &okOut).s.empty() && okOut && t.QueryAt("AudioTrackLanguage", -1).s.empty(), "AudioTrackName / AudioTrackLanguage out of range return an empty string");
+			}
+			LogAlways("cev_apitest: HasAlpha=%d AudioTrack='%s' Variant=%d events: ready=%u started=%u newFrame=%u looped=%u ended=%u error=%u",
+				t.Query("HasAlpha").b ? 1 : 0, t.Query("AudioTrack").s.c_str(), t.Query("Variant").i,
 				t.events[eEvent_Ready], t.events[eEvent_Started], t.events[eEvent_NewFrame], t.events[eEvent_Looped], t.events[eEvent_Ended], t.events[eEvent_Error]);
 			t.Check(t.events[eEvent_Ready] == 1 && t.events[eEvent_Started] >= 1 && t.events[eEvent_NewFrame] > 10, "Ready, Started and NewFrame events arrived");
 
