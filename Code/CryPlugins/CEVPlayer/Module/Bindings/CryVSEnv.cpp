@@ -171,7 +171,7 @@ namespace CEVPlayer
 
 			const char* const kVideoDesc = "Video file (.webm) or runtime descriptor (.cevvideo), for example Videos/intro.webm";
 			const char* const kHandleDesc = "Player handle (0 = none)";
-			const char* const kDecodeDesc = "Decoder: Auto, GPU or CPU (this build always decodes on the CPU)";
+			const char* const kDecodeDesc = "Decoder: Auto (GPU for VP9 at or above cev_decodeAutoMinHeight, otherwise CPU), GPU or CPU; falls back to CPU when hardware decode is unavailable";
 			const char* const kSurfaceDesc = "Name UIs use to show the video: 1 to 63 of A-Z a-z 0-9 _ . : -, case-insensitive, unique";
 
 			// ----- Video

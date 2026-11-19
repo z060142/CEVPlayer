@@ -465,28 +465,83 @@ namespace CEVPlayer
 				mEnv->pManager->ConsoleStop();
 		}
 
-		void CmdPause(IConsoleCmdArgs*)
+		//! Resolves a console target: a decimal number is a script player handle, anything else a surface id.
+		//! Returns nullptr when no such player exists; isHandle tells which kind the target was read as.
+		IVideoPlayer* FindTargetPlayer(const char* target, bool& isHandle)
 		{
-			if (mEnv->pManager != nullptr)
+			char* end = nullptr;
+			const long handle = std::strtol(target, &end, 10);
+			isHandle = end != target && *end == '\0';
+			return isHandle
+				? (mEnv->pApi != nullptr ? mEnv->pApi->Find(static_cast<int>(handle), false) : nullptr)
+				: mEnv->pManager->FindPlayerBySurface(target);
+		}
+
+		//! Pause / resume of one targeted player; logs the result or "no player".
+		void PauseResumeTarget(const char* cmd, const char* target, bool pause)
+		{
+			bool isHandle = false;
+			IVideoPlayer* const pPlayer = FindTargetPlayer(target, isHandle);
+			if (pPlayer == nullptr)
+			{
+				LogAlways("%s: no player '%s'", cmd, target);
+				return;
+			}
+			if (pause)
+				pPlayer->Pause();
+			else
+				pPlayer->Resume();
+			LogAlways("%s: %s '%s' %s", cmd, isHandle ? "handle" : "surface", target, pause ? "paused" : "resumed");
+		}
+
+		//! cev_pause [<handle|surface>]: without a target the cev_play player.
+		void CmdPause(IConsoleCmdArgs* args)
+		{
+			if (mEnv->pManager == nullptr)
+				return;
+			if (args != nullptr && args->GetArgCount() > 1)
+				PauseResumeTarget("cev_pause", args->GetArg(1), true);
+			else
 				mEnv->pManager->ConsolePause();
 		}
 
-		void CmdResume(IConsoleCmdArgs*)
+		//! cev_resume [<handle|surface>]: without a target the cev_play player.
+		void CmdResume(IConsoleCmdArgs* args)
 		{
-			if (mEnv->pManager != nullptr)
+			if (mEnv->pManager == nullptr)
+				return;
+			if (args != nullptr && args->GetArgCount() > 1)
+				PauseResumeTarget("cev_resume", args->GetArg(1), false);
+			else
 				mEnv->pManager->ConsoleResume();
 		}
 
+		//! cev_seek <seconds> seeks the cev_play player; cev_seek <handle|surface> <seconds> the given player.
 		void CmdSeek(IConsoleCmdArgs* args)
 		{
 			if (args == nullptr || mEnv->pManager == nullptr)
 				return;
 			if (args->GetArgCount() < 2)
 			{
-				LogAlways("usage: cev_seek <seconds>");
+				LogAlways("usage: cev_seek [<handle|surface>] <seconds>");
 				return;
 			}
-			mEnv->pManager->ConsoleSeek(std::atof(args->GetArg(1)));
+			if (args->GetArgCount() < 3)
+			{
+				mEnv->pManager->ConsoleSeek(std::atof(args->GetArg(1)));
+				return;
+			}
+			const char* const target = args->GetArg(1);
+			bool isHandle = false;
+			IVideoPlayer* const pPlayer = FindTargetPlayer(target, isHandle);
+			if (pPlayer == nullptr)
+			{
+				LogAlways("cev_seek: no player '%s'", target);
+				return;
+			}
+			const double seconds = std::atof(args->GetArg(2));
+			pPlayer->Seek(seconds);
+			LogAlways("cev_seek: %s '%s' seeked to %.3f s", isHandle ? "handle" : "surface", target, seconds);
 		}
 
 		//! cev_audiotrack <handle|surface> [name]: a target that is a decimal number is a script player handle,
@@ -501,12 +556,8 @@ namespace CEVPlayer
 				return;
 			}
 			const char* const target = args->GetArg(1);
-			char* end = nullptr;
-			const long handle = std::strtol(target, &end, 10);
-			const bool isHandle = end != target && *end == '\0';
-			IVideoPlayer* const pPlayer = isHandle
-				? (mEnv->pApi != nullptr ? mEnv->pApi->Find(static_cast<int>(handle), false) : nullptr)
-				: mEnv->pManager->FindPlayerBySurface(target);
+			bool isHandle = false;
+			IVideoPlayer* const pPlayer = FindTargetPlayer(target, isHandle);
 			if (pPlayer == nullptr)
 			{
 				LogAlways("cev_audiotrack: no player with %s <%s>", isHandle ? "handle" : "surface id", target);
@@ -610,9 +661,9 @@ namespace CEVPlayer
 
 		REGISTER_COMMAND("cev_play", CmdPlay, VF_NULL, "Play a video fullscreen. cev_play <path> [loop], e.g. cev_play Videos/intro.webm 1 (.webm or .cevvideo)");
 		REGISTER_COMMAND("cev_stop", CmdStop, VF_NULL, "Stop and remove the video started by cev_play");
-		REGISTER_COMMAND("cev_pause", CmdPause, VF_NULL, "Pause the video started by cev_play");
-		REGISTER_COMMAND("cev_resume", CmdResume, VF_NULL, "Resume the video started by cev_play");
-		REGISTER_COMMAND("cev_seek", CmdSeek, VF_NULL, "Seek the video started by cev_play. cev_seek <seconds>");
+		REGISTER_COMMAND("cev_pause", CmdPause, VF_NULL, "Pause a video. cev_pause [<handle|surface>] (handle = script player handle, otherwise a surface id; without a target: the cev_play player)");
+		REGISTER_COMMAND("cev_resume", CmdResume, VF_NULL, "Resume a video. cev_resume [<handle|surface>] (handle = script player handle, otherwise a surface id; without a target: the cev_play player)");
+		REGISTER_COMMAND("cev_seek", CmdSeek, VF_NULL, "Seek a video. cev_seek [<handle|surface>] <seconds> (handle = script player handle, otherwise a surface id; without a target: the cev_play player)");
 		REGISTER_COMMAND("cev_audiotrack", CmdAudioTrack, VF_NULL, "Select the audio track of a player by its .cevvideo track name. cev_audiotrack <handle|surface> [name] (handle = script player handle, otherwise a surface id; without a name: show the current and the listed tracks)");
 		REGISTER_COMMAND("cev_apitest", CmdApiTest, VF_NULL, "Self test of the script API table: creates a player through the table functions, plays [path] (default Videos/vp9_alpha.webm), checks state / time after 2 s, stops and destroys it, logs PASS / FAIL");
 		REGISTER_COMMAND("cev_list", CmdList, VF_NULL, "List all CEVPlayer players with state, time and upload count");

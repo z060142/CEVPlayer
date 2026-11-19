@@ -46,7 +46,7 @@ namespace CEVPlayer
 	{
 		desc.SetGUID(Api::kDecodeModeTypeGuid);
 		desc.SetLabel("VideoDecode");
-		desc.SetDescription("Decoder choice of a video player (this build always decodes on the CPU)");
+		desc.SetDescription("Decoder: Auto (GPU for VP9 at or above cev_decodeAutoMinHeight, otherwise CPU), GPU or CPU; falls back to CPU when hardware decode is unavailable");
 		desc.SetDefaultValue(Api::EDecodeMode::Auto);
 		desc.AddConstant(Api::EDecodeMode::Auto, "Auto", "Auto");
 		desc.AddConstant(Api::EDecodeMode::Gpu, "GPU", "GPU");

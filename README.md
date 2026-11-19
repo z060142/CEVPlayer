@@ -196,7 +196,8 @@ the descriptor's folder.
 | Name | Default | Meaning |
 |---|---|---|
 | `cev_play <path> [loop]` | | play a `.webm` / `.cevvideo` fullscreen (test player) |
-| `cev_stop`, `cev_pause`, `cev_resume`, `cev_seek <s>` | | control the `cev_play` player |
+| `cev_stop` | | stop the `cev_play` player |
+| `cev_pause [<handle\|surface>]`, `cev_resume [<handle\|surface>]`, `cev_seek [<handle\|surface>] <s>` | | control the `cev_play` player, or the given player (script handle or surface id) |
 | `cev_play_surface <id> <path> [loop]` | | play into a surface player; without a path the surface player is destroyed |
 | `cev_audiotrack <handle\|surface> [name]` | | choose the audio track of a player (script handle or surface id); without a name: list the tracks and the one in use |
 | `cev_list` | | all players with state, time and upload count |

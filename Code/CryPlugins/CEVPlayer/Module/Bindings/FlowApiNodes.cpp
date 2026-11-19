@@ -198,7 +198,7 @@ namespace CEVPlayer
 						InputPortConfig<int>("Fit", 2, _HELP("How the picture is placed: Fill stretches it, Fit keeps the aspect and shows the scene in the bars, Letterbox adds black bars."), nullptr, _UICONFIG(kFitEnum)),
 						InputPortConfig<bool>("Loop", false, _HELP("Restart at the beginning when the end is reached.")),
 						InputPortConfig<bool>("Skippable", false, _HELP("A key, mouse or gamepad button press stops the video and triggers Skipped.")),
-						InputPortConfig<int>("Decode", 0, _HELP("Decoder: Auto, GPU or CPU (this build always decodes on the CPU)."), nullptr, _UICONFIG(kDecodeEnum)),
+						InputPortConfig<int>("Decode", 0, _HELP("Decoder: Auto (GPU for VP9 at or above cev_decodeAutoMinHeight, otherwise CPU), GPU or CPU; falls back to CPU when hardware decode is unavailable."), nullptr, _UICONFIG(kDecodeEnum)),
 						{ 0 }
 					};
 					static const SOutputPortConfig out[] =
@@ -291,7 +291,7 @@ namespace CEVPlayer
 						InputPortConfig<int>("SubMaterial", -1, _HELP("Sub-material index; -1 uses the material itself.")),
 						InputPortConfig<bool>("Loop", false, _HELP("Restart at the beginning when the end is reached.")),
 						InputPortConfig<bool>("Autoplay", false, _HELP("Play as soon as the game starts, without a Play trigger.")),
-						InputPortConfig<int>("Decode", 0, _HELP("Decoder: Auto, GPU or CPU (this build always decodes on the CPU)."), nullptr, _UICONFIG(kDecodeEnum)),
+						InputPortConfig<int>("Decode", 0, _HELP("Decoder: Auto (GPU for VP9 at or above cev_decodeAutoMinHeight, otherwise CPU), GPU or CPU; falls back to CPU when hardware decode is unavailable."), nullptr, _UICONFIG(kDecodeEnum)),
 						{ 0 }
 					};
 					static const SOutputPortConfig out[] =
@@ -394,7 +394,7 @@ namespace CEVPlayer
 						InputPortConfig<string>("SurfaceID", string(), _HELP("Name UIs use to show the video: 1 to 63 of A-Z a-z 0-9 _ . : -, case-insensitive, unique.")),
 						InputPortConfig<bool>("Loop", false, _HELP("Restart at the beginning when the end is reached.")),
 						InputPortConfig<bool>("Autoplay", false, _HELP("Play as soon as the game starts, without a Play trigger.")),
-						InputPortConfig<int>("Decode", 0, _HELP("Decoder: Auto, GPU or CPU (this build always decodes on the CPU)."), nullptr, _UICONFIG(kDecodeEnum)),
+						InputPortConfig<int>("Decode", 0, _HELP("Decoder: Auto (GPU for VP9 at or above cev_decodeAutoMinHeight, otherwise CPU), GPU or CPU; falls back to CPU when hardware decode is unavailable."), nullptr, _UICONFIG(kDecodeEnum)),
 						InputPortConfig<bool>("PauseDecodeWhenHidden", true, _HELP("While no UI shows the surface: only decode, and stop decoding after cev_hiddenStopSeconds (time, sound and events go on).")),
 						{ 0 }
 					};
@@ -712,7 +712,7 @@ namespace CEVPlayer
 						InputPortConfig<string>("Material", string(), _HELP("Output Material: material name; empty uses the material of the node's entity.")),
 						InputPortConfig<int>("Slot", 0, _HELP("Output Material: texture slot (0 = diffuse).")),
 						InputPortConfig<int>("SubMaterial", -1, _HELP("Output Material: sub-material index, -1 = the material itself.")),
-						InputPortConfig<int>("Decode", 0, _HELP("Decoder: Auto, GPU or CPU (this build always decodes on the CPU)."), nullptr, _UICONFIG(kDecodeEnum)),
+						InputPortConfig<int>("Decode", 0, _HELP("Decoder: Auto (GPU for VP9 at or above cev_decodeAutoMinHeight, otherwise CPU), GPU or CPU; falls back to CPU when hardware decode is unavailable."), nullptr, _UICONFIG(kDecodeEnum)),
 						{ 0 }
 					};
 					static const SOutputPortConfig out[] =

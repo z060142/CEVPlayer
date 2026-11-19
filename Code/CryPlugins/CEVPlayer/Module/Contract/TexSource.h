@@ -55,8 +55,8 @@ typedef struct CryTexSourceInfo {       /* out */
 
 typedef struct CryTexSourceHint {       /* in */
     /* v1 */
-    uint32_t size;            /* a hint with flags = 0 and pixelWidth = pixelHeight = 0 from a v2
-                                 consumer that also sets `release` means "I stopped using the name" */
+    uint32_t size;            /* a v2 consumer (consumer != 0) that sends flags = bit1 only and
+                                 pixelWidth = pixelHeight = 0 means "I stopped using the name" */
     uint32_t flags;           /* bit0 visible on screen this frame, bit1 (v2) release */
     int32_t  pixelWidth, pixelHeight;   /* largest on-screen size it is sampled at, 0 = unknown */
     /* v2 */

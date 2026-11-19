@@ -8,7 +8,7 @@ namespace CEVPlayer
 	namespace CryVSBind
 	{
 		//! ESYSTEM_EVENT_GAME_POST_INIT: when gEnv->pCryVS exists, registers the types, the global functions of the three
-		//! drawers (Video, VideoUI, VideoAdvanced), the component with its member functions and its signals (each element
+		//! namespaces (CEVPlayer, CEVPlayer::UI, CEVPlayer::Advanced), the component with its member functions and its signals (each element
 		//! only when the registry does not have it yet), connects to the framework's envRefresh signal (which clears the
 		//! whole registry) to register them again, and adds the console command cev_cryvstest. gEnv->pCryVS == nullptr:
 		//! nothing happens.
