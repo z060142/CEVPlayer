@@ -126,11 +126,24 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 
 ### 4.2 節點：砍掉舊的，分兩個抽屜
 - **刪除，不留別名**：`Module/FlowNodes/FlowNodes.cpp` 的舊節點、`TextureVideoPlayerComponent`、`Module/Compat/`、所有 `vp_*` 指令與變數、`OutTextureName`／`OutputTextureName`。使用它們的既有關卡與流程圖會失效（使用者已同意）。
-- **開箱即用**（FlowGraph 類別 `Video`；Schematyc 元件 `Video Player`）：
-  - `Video:Play`——輸入 Video（檔案）、Output（Surface／Screen／Material）、SurfaceID 或材質與槽、Loop、Autoplay、Decode（Auto／GPU／CPU）、Play／Stop／Pause／Resume；輸出 Ready（帶 SurfaceID、TextureId、Width、Height、Duration、HasAlpha、DecodeBackend）、Started、Ended、Looped、Error（帶代碼與文字）。一個節點就能播。
-  - `Video:Stop`、`Video:Pause`（以 SurfaceID 或 Handle 指定）、`Video:Events`（以 SurfaceID 訂閱，不必持有 Handle）。
-- **進階**（類別 `VideoAdvanced`）：現有由描述表產生的 `Control:*` 與 `Query:*`，整理成一個名詞（`SurfaceId`；貼圖以 `TextureId` 查詢），補 `FrameSerial`、`IsLoaded`、`IsLooping`、`HasAudio`、`PixelLayout`、`DecodeBackend`、`Rate`、`Volume`、`Path`、解除材質綁定；幀序號改以兩個 32 位元埠或字串輸出，不再 2^31 回繞。逐一清單在 M6 的任務單定（依 `Module/Bindings/ApiTable.cpp`）。
-- **連通 UI**（類別 `VideoUI`；使用者 2026-11-19：「連通 UI 的節點開一個獨立抽屜」）：與 Surface ID 有關的節點獨立一個抽屜——以 Surface ID 播放到 UI（`VideoUI:PlayToSurface`）、查詢 surface 的資料給任何 UI 系統用（`VideoUI:SurfaceInfo`：TextureId、Width、Height、PixelLayout、FrameSerial、HasAlpha、Premultiplied）、surface 的事件（`VideoUI:SurfaceEvents`：Ready／NewFrame／Resized／Closed）。開箱即用的 `Video:Play` 因此只管 Screen 與 Material 兩種輸出。逐一清單在 M6 的任務單定。
+- **現況**（`Module/Bindings/ApiTable.cpp`）：描述表一項產生一個節點——控制 15（Create、Destroy、Load、Play、Pause、Resume、Stop、Seek、SetLoop、SetRate、SetLanguage、SetVolume、SetOutput、SetVariant、SetSkippable）、查詢 13（State、Time、Duration、Width、Height、TextureId、TextureName、HasAlpha、IsPremultiplied、Language、Variant、InterfaceVersion、Caps）、事件 1 個節點（Ready、Started、NewFrame、Marker、Looped、Ended、Skipped、Error），共 29 個。
+- **整理後 10 個節點、三個抽屜**（使用者 2026-11-19：「連通 UI 的節點開一個獨立抽屜」「其他節點整理一下，看能不能簡化或合併」）：
+
+  | 抽屜 | 節點 | 合併了什麼 |
+  |---|---|---|
+  | 開箱即用 `Video` | `Video:PlayOnScreen`——Video、Fit、Loop、Skippable、Decode；Play／Stop → Started、Ended、Skipped、Error | Create＋Load＋SetOutput(Screen)＋Play＋SetLoop＋SetSkippable＋Destroy |
+  | | `Video:PlayOnMaterial`——Video、Material（空＝實體自己的）、Slot、SubMaterial、Loop、Autoplay、Decode；Play／Stop → Started、Ended、Error | 同上，SetOutput(Material) |
+  | 連通 UI `VideoUI` | `VideoUI:PlayToSurface`——Video、SurfaceID、Loop、Autoplay、Decode；Play／Stop → Ready（帶 TextureId、Width、Height、Duration、HasAlpha）、Ended、Error | Create＋Load＋Play＋Destroy，輸出是具名 surface |
+  | | `VideoUI:SurfaceInfo`——SurfaceID → Exists、TextureId、Width、Height、PixelLayout、Premultiplied、HasAlpha、FrameSerial、State | TextureId、TextureName、IsPremultiplied 三個查詢移到這裡（給不經契約的 UI 系統用） |
+  | | `VideoUI:SurfaceEvents`——SurfaceID → Ready、NewFrame、Resized、Closed | 以 ID 訂閱，不必持有 Handle |
+  | 進階 `VideoAdvanced` | `Open`——Video、Output（Surface／Screen／Material）與其參數、Decode；Open／Close → Handle、Ready、Error | Create、Load、SetOutput、Destroy |
+  | | `Transport`——Handle；Play、Pause、Stop、Seek（＋Seconds） | Play、Pause、Resume、Stop、Seek（Play 兼作繼續） |
+  | | `Settings`——Handle；Loop、Rate、Volume、Language、Variant、Skippable（哪個埠被觸發就套用哪一項） | SetLoop、SetRate、SetVolume、SetLanguage、SetVariant、SetSkippable |
+  | | `Info`——Handle；Get（或每幀）→ State、Time、Duration、Width、Height、HasAlpha、Language、Variant、DecodeBackend、FrameSerial、SurfaceId | State、Time、Duration、Width、Height、HasAlpha、Language、Variant |
+  | | `Events`——Handle → Ready、Started、NewFrame、Marker、Looped、Ended、Skipped、Error | 不變 |
+
+- 取消：`TextureName`（名詞消失）、`InterfaceVersion` 與 `Caps`（開發者資訊，改由主控台 `cev_info` 顯示）。事件與查詢的幀序號改以字串輸出，不再 2^31 回繞。
+- 描述表仍是單一事實來源：腳本綁定（Schematyc 函式、CryVS）維持一項一個函式——程式裡細粒度是正常的；合併只發生在 FlowGraph 節點這一層（複合節點由手寫的描述組合表內的函式）。Schematyc 元件 `Video Player` 的屬性對應同一組名詞（Output、SurfaceID、Decode、Loop、Autoplay、Skippable）。
 - 「路不鎖死」：任何 UI 系統都可以只靠節點輸出的 `TextureId`／`Width`／`Height`（RGBA8）使用，不必實作契約；完整的好處（§5、§6）只在經由契約時生效。
 
 ## 5. 節流與打包平面（M7、M8）
