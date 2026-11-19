@@ -42,7 +42,7 @@ namespace CEVPlayer
 		// ---------------------------------------------------------------------------------------------
 
 		//! Creates an empty player identified by a surface id (characters A-Z a-z 0-9 _ . : -, 1 to 63 of them,
-		//! compared case-insensitively). The id stays the same across Load(), language, variant and size changes;
+		//! compared case-insensitively). The id stays the same across Load(), audio track, variant and size changes;
 		//! other plug-ins find the player by it through the texture source contract (docs/design/M6-ui-source.md
 		//! section 3). Returns nullptr (and logs an error) when the id is invalid or already used, or when the
 		//! plug-in is shutting down. Lifetime as CreatePlayer; destroy it with DestroyPlayer. Main thread only.

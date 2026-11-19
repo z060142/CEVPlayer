@@ -13,7 +13,7 @@ namespace CEVPlayer
 {
 	namespace
 	{
-		constexpr size_t kMaxLanguages = 64;
+		constexpr size_t kMaxAudioTracks = 64;
 		constexpr size_t kMaxVariants = 32;
 		constexpr size_t kMaxMarkers = 4096;
 
@@ -76,9 +76,9 @@ namespace CEVPlayer
 		return relative; // does not exist: the caller reports it under this name
 	}
 
-	int FindLanguage(const SVideoDescriptor& desc, const char* name)
+	int FindAudioTrack(const SVideoDescriptor& desc, const char* name)
 	{
-		return cev::FindDescriptorLanguage(desc, name);
+		return cev::FindDescriptorAudioTrack(desc, name);
 	}
 
 	bool LoadVideoDescriptor(const char* path, SVideoDescriptor& out)
@@ -141,8 +141,8 @@ namespace CEVPlayer
 		out.resumeTrigger = Attr(root, "resumeTrigger");
 		if (out.route == EVideoRoute::Cue && out.trigger.empty())
 		{
-			// not fatal: every <Language> may bring its own trigger
-			LogDebug("descriptor <%s>: route=\"cue\" without a default trigger, languages need their own trigger", path);
+			// not fatal: every <Track> may bring its own trigger
+			LogDebug("descriptor <%s>: route=\"cue\" without a default trigger, audio tracks need their own trigger", path);
 		}
 
 		// ---- sections
@@ -155,45 +155,44 @@ namespace CEVPlayer
 			const char* const tag = section->getTag();
 			const int count = std::max(0, section->getChildCount());
 
-			if (stricmp(tag, "Languages") == 0)
+			if (stricmp(tag, "AudioTracks") == 0)
 			{
-				out.defaultLanguage = Attr(section, "default");
+				out.defaultTrack = Attr(section, "default");
+				out.followGameLanguage = section->haveAttr("followGameLanguage") && ParseBool(section->getAttr("followGameLanguage"));
 				for (int i = 0; i < count; ++i)
 				{
 					XmlNodeRef node = section->getChild(i);
-					if (!node || stricmp(node->getTag(), "Language") != 0)
+					if (!node || stricmp(node->getTag(), "Track") != 0)
 						continue;
-					if (out.languages.size() >= kMaxLanguages)
+					if (out.audioTracks.size() >= kMaxAudioTracks)
 					{
-						LogWarning("descriptor <%s>: more than %u languages, the rest is ignored", path, static_cast<unsigned>(kMaxLanguages));
+						LogWarning("descriptor <%s>: more than %u audio tracks, the rest is ignored", path, static_cast<unsigned>(kMaxAudioTracks));
 						break;
 					}
-					SVideoDescriptor::SLanguage lang;
-					lang.name = Attr(node, "name");
-					if (lang.name.empty())
-					{
-						LogWarning("descriptor <%s>: a <Language> without a name is skipped", path);
-						continue;
-					}
-					if (FindLanguage(out, lang.name.c_str()) >= 0)
-					{
-						LogWarning("descriptor <%s>: language <%s> is listed twice, the first one is used", path, lang.name.c_str());
-						continue;
-					}
-					lang.embedded = node->haveAttr("embedded") && ParseBool(node->getAttr("embedded"));
+					SVideoDescriptor::SAudioTrack track;
+					track.name = Attr(node, "name");
+					track.language = Attr(node, "language");
+					track.embedded = node->haveAttr("embedded") && ParseBool(node->getAttr("embedded"));
 					const char* const file = Attr(node, "file");
 					if (file[0] != '\0')
-						lang.file = ResolveSiblingPath(path, file);
-					lang.trigger = Attr(node, "trigger");
-					lang.pauseTrigger = Attr(node, "pauseTrigger");
-					lang.resumeTrigger = Attr(node, "resumeTrigger");
-					if (!lang.embedded && lang.file.empty() && lang.trigger.empty() && !(out.route == EVideoRoute::Cue && !out.trigger.empty()))
+						track.file = ResolveSiblingPath(path, file);
+					track.trigger = Attr(node, "trigger");
+					track.pauseTrigger = Attr(node, "pauseTrigger");
+					track.resumeTrigger = Attr(node, "resumeTrigger");
+					if (!track.embedded && track.file.empty() && track.trigger.empty() && !(out.route == EVideoRoute::Cue && !out.trigger.empty()))
 					{
-						LogWarning("descriptor <%s>: language <%s> has no embedded / file / trigger, skipped", path, lang.name.c_str());
+						LogWarning("descriptor <%s>: audio track <%s> has no embedded / file / trigger, skipped", path, track.name.c_str());
 						continue;
 					}
-					out.languages.push_back(lang);
+					out.audioTracks.push_back(track);
 				}
+			}
+			else if (stricmp(tag, "Languages") == 0)
+			{
+				// pre-A1 form: not read (never released); the video plays with its embedded audio
+				LogError("descriptor <%s>: <Languages> is not supported any more: use <AudioTracks default=\"...\"> with "
+					"<Track name=\"...\" embedded=\"1\" | file=\"...\" | trigger=\"...\" [language=\"...\"]/> "
+					"(followGameLanguage=\"1\" to choose by the game language); playing the embedded audio", path);
 			}
 			else if (stricmp(tag, "Variants") == 0)
 			{
@@ -258,10 +257,30 @@ namespace CEVPlayer
 		}
 		cev::SortDescriptorMarkers(out);
 
-		if (!out.defaultLanguage.empty() && FindLanguage(out, out.defaultLanguage.c_str()) < 0)
+		std::vector<cev::DescriptorTrackProblem> problems;
+		cev::SanitizeDescriptorAudioTracks(out, problems);
+		for (const cev::DescriptorTrackProblem& problem : problems)
 		{
-			LogWarning("descriptor <%s>: default language <%s> is not listed, ignored", path, out.defaultLanguage.c_str());
-			out.defaultLanguage.clear();
+			switch (problem.kind)
+			{
+			case cev::DescriptorTrackProblem::InvalidName:
+				LogWarning("descriptor <%s>: audio track name <%s> is invalid (1 to %u of A-Z a-z 0-9 _ . -), skipped", path, problem.name.c_str(), static_cast<unsigned>(cev::kMaxAudioTrackNameLength));
+				break;
+			case cev::DescriptorTrackProblem::Duplicate:
+				LogWarning("descriptor <%s>: audio track <%s> is listed twice, the first one is used", path, problem.name.c_str());
+				break;
+			case cev::DescriptorTrackProblem::UnknownDefault:
+				LogWarning("descriptor <%s>: default audio track <%s> is not listed, ignored", path, problem.name.c_str());
+				break;
+			}
+		}
+		if (out.followGameLanguage && !out.audioTracks.empty())
+		{
+			bool tagged = false;
+			for (const SVideoDescriptor::SAudioTrack& t : out.audioTracks)
+				tagged = tagged || !t.language.empty();
+			if (!tagged)
+				LogWarning("descriptor <%s>: followGameLanguage=\"1\" but no audio track has a language=\"...\" tag", path);
 		}
 		return true;
 	}

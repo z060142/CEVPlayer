@@ -397,8 +397,8 @@ namespace CEVPlayer
 			const SPort kSetVolumeIn[] = { { EPort::Int, "Handle", kHandleDesc, 0, nullptr }, { EPort::Float, "Volume", "Player volume 0 to 1", 1, nullptr } };
 			void FnSetVolume(const SValue* in, SValue*) { Run("SetVolume", in[0].i, { in[1] }); }
 
-			const SPort kSetLanguageIn[] = { { EPort::Int, "Handle", kHandleDesc, 0, nullptr }, { EPort::String, "Language", "Audio language of the .cevvideo descriptor (empty = default choice)", 0, "" } };
-			void FnSetLanguage(const SValue* in, SValue*) { Run("SetLanguage", in[0].i, { in[1] }); }
+			const SPort kSetAudioTrackIn[] = { { EPort::Int, "Handle", kHandleDesc, 0, nullptr }, { EPort::String, "Track", "Audio track name of the .cevvideo descriptor (empty = automatic choice)", 0, "" } };
+			void FnSetAudioTrack(const SValue* in, SValue*) { Run("SetAudioTrack", in[0].i, { in[1] }); }
 
 			const SPort kSetVariantIn[] = { { EPort::Int, "Handle", kHandleDesc, 0, nullptr }, { EPort::Int, "Variant", "-2 follows cev_variant, -1 automatic, 0 main video, n the n-th variant", -2, nullptr } };
 			void FnSetVariant(const SValue* in, SValue*) { Run("SetVariant", in[0].i, { in[1] }); }
@@ -417,7 +417,7 @@ namespace CEVPlayer
 				{ EPort::Int, "Width", "Picture width in pixels, 0 until loaded", 0, nullptr },
 				{ EPort::Int, "Height", "Picture height in pixels, 0 until loaded", 0, nullptr },
 				{ EPort::Bool, "HasAlpha", "The video has an alpha channel", 0, nullptr },
-				{ EPort::String, "Language", "Audio language in use, empty without languages", 0, "" },
+				{ EPort::String, "AudioTrack", "Audio track in use, empty without audio tracks", 0, "" },
 				{ EPort::Int, "Variant", "Variant in use: 0 = main video, n = n-th variant", 0, nullptr },
 				{ EPort::Int, "DecodeBackend", "Decoder in use: 0 = CPU, 1 = GPU", 0, nullptr },
 				{ EPort::String, "FrameSerial", "Number of uploaded pictures as decimal text", 0, "" },
@@ -426,7 +426,7 @@ namespace CEVPlayer
 
 			void FnInfo(const SValue* in, SValue* out)
 			{
-				static const char* const queries[] = { "State", "Time", "Duration", "Width", "Height", "HasAlpha", "Language", "Variant", "DecodeBackend", "FrameSerial", "SurfaceId" };
+				static const char* const queries[] = { "State", "Time", "Duration", "Width", "Height", "HasAlpha", "AudioTrack", "Variant", "DecodeBackend", "FrameSerial", "SurfaceId" };
 				const bool alive = HandleAlive(in[0].i);
 				if (!alive && in[0].i != 0)
 					LogWarning("CryVS: CEVPlayer::Advanced::Info: invalid player handle %d", in[0].i);
@@ -453,10 +453,10 @@ namespace CEVPlayer
 				{ Api::eCryVS_VideoAdvanced_SetLoop, "CEVPlayer::Advanced", "SetLoop", "Sets looping.", CEV_PORTS(kSetLoopIn), CEV_NOPORTS, &FnSetLoop },
 				{ Api::eCryVS_VideoAdvanced_SetRate, "CEVPlayer::Advanced", "SetRate", "Sets the playback speed.", CEV_PORTS(kSetRateIn), CEV_NOPORTS, &FnSetRate },
 				{ Api::eCryVS_VideoAdvanced_SetVolume, "CEVPlayer::Advanced", "SetVolume", "Sets the player volume.", CEV_PORTS(kSetVolumeIn), CEV_NOPORTS, &FnSetVolume },
-				{ Api::eCryVS_VideoAdvanced_SetLanguage, "CEVPlayer::Advanced", "SetLanguage", "Selects the audio language of a .cevvideo descriptor.", CEV_PORTS(kSetLanguageIn), CEV_NOPORTS, &FnSetLanguage },
+				{ Api::eCryVS_VideoAdvanced_SetAudioTrack, "CEVPlayer::Advanced", "SetAudioTrack", "Selects the audio track of a .cevvideo descriptor by name.", CEV_PORTS(kSetAudioTrackIn), CEV_NOPORTS, &FnSetAudioTrack },
 				{ Api::eCryVS_VideoAdvanced_SetVariant, "CEVPlayer::Advanced", "SetVariant", "Chooses the variant (resolution) of a .cevvideo descriptor.", CEV_PORTS(kSetVariantIn), CEV_NOPORTS, &FnSetVariant },
 				{ Api::eCryVS_VideoAdvanced_SetSkippable, "CEVPlayer::Advanced", "SetSkippable", "Makes the video skippable: a button press stops it while it plays.", CEV_PORTS(kSetSkippableIn), CEV_NOPORTS, &FnSetSkippable },
-				{ Api::eCryVS_VideoAdvanced_Info, "CEVPlayer::Advanced", "Info", "Reads the state, time, size, language, variant, decoder, frame serial and surface id of a player handle.", CEV_PORTS(kHandleIn), CEV_PORTS(kInfoOut), &FnInfo },
+				{ Api::eCryVS_VideoAdvanced_Info, "CEVPlayer::Advanced", "Info", "Reads the state, time, size, audio track, variant, decoder, frame serial and surface id of a player handle.", CEV_PORTS(kHandleIn), CEV_PORTS(kInfoOut), &FnInfo },
 				{ Api::eCryVS_VideoAdvanced_SetPauseDecodeWhenHidden, "CEVPlayer::Advanced", "SetPauseDecodeWhenHidden", "Surface players: while no UI shows the surface only decode, and stop decoding after cev_hiddenStopSeconds (on by default).", CEV_PORTS(kSetPauseDecodeWhenHiddenIn), CEV_NOPORTS, &FnSetPauseDecodeWhenHidden },
 			};
 			static_assert(CRY_ARRAY_COUNT(kGlobalFunctions) == Api::eCryVS_FunctionCount, "one entry per ECryVSFunction");
@@ -575,7 +575,7 @@ namespace CEVPlayer
 				string material;                   // Material: material name (empty = entity material)
 				int32 slot = 0;
 				EVideoFit fit = EVideoFit::Letterbox;
-				string language;
+				string audioTrack;
 				bool loop = false;
 				bool autoplay = false;
 				bool skippable = false;
@@ -590,7 +590,7 @@ namespace CEVPlayer
 					archive(material, "material", "Material");
 					archive(slot, "slot", "Slot");
 					archive(fit, "fit", "Screen Fit");
-					archive(language, "language", "Language");
+					archive(audioTrack, "audioTrack", "Audio Track");
 					archive(loop, "loop", "Loop");
 					archive(autoplay, "autoplay", "Autoplay");
 					archive(skippable, "skippable", "Skippable");
@@ -762,14 +762,14 @@ namespace CEVPlayer
 					mEnv->pApi->Subscribe(m_handle, this);
 					using namespace Api;
 					const SValue loop[1] = { SValue::FromBool(m_props.loop) };
-					const SValue language[1] = { SValue::FromString(m_props.language.c_str()) };
+					const SValue audioTrack[1] = { SValue::FromString(m_props.audioTrack.c_str()) };
 					const SValue skippable[1] = { SValue::FromBool(m_props.skippable) };
 					const SValue decode[1] = { SValue::FromInt(static_cast<int>(m_props.decode)) };
 					const SValue output[5] = { SValue::FromInt(static_cast<int>(m_props.outputMode)), SValue::FromString(m_props.material.c_str()),
 						SValue::FromInt(m_props.slot), SValue::FromInt(-1), SValue::FromInt(static_cast<int>(m_props.fit)) };
 					Call(*FindByName("SetDecode"), m_handle, decode, 1, nullptr);
 					Call(*FindByName("SetLoop"), m_handle, loop, 1, nullptr);
-					Call(*FindByName("SetLanguage"), m_handle, language, 1, nullptr);
+					Call(*FindByName("SetAudioTrack"), m_handle, audioTrack, 1, nullptr);
 					Call(*FindByName("SetSkippable"), m_handle, skippable, 1, nullptr);
 					Call(*FindByName("SetOutput"), m_handle, output, 5, nullptr, EntityMaterial());
 					return true;
@@ -904,8 +904,9 @@ namespace CEVPlayer
 			uint32 s_lastAdded = 0;   // totals of the last RegisterAll (self test)
 			uint32 s_lastPresent = 0;
 			// One member function per control / query of the table except Create, CreateForSurface and Destroy (M7 added
-			// SetPauseDecodeWhenHidden and PauseDecodeWhenHidden: 36 -> 38).
-			constexpr uint32 kMemberFunctionCount = 38;
+			// SetPauseDecodeWhenHidden and PauseDecodeWhenHidden: 36 -> 38; A1 replaced Language by AudioTrack and added
+			// AudioTrackCount, AudioTrackName and AudioTrackLanguage: 38 -> 41).
+			constexpr uint32 kMemberFunctionCount = 41;
 			constexpr uint32 kElementCount = 3 + Api::eCryVS_FunctionCount + 1 + kMemberFunctionCount + Api::eEvent_Count + 2; // types, globals, component, members, signals
 
 			struct SCounts
@@ -1284,13 +1285,13 @@ namespace CEVPlayer
 					Check(sizes, "CEVPlayer::Advanced::Info has 11 outputs (%u)", static_cast<uint32>(out.size()));
 					if (sizes)
 					{
-						LogAlways("cev_cryvstest: Info State=%d Time=%.3f Duration=%.3f Width=%d Height=%d HasAlpha=%d Language='%s' Variant=%d DecodeBackend=%d FrameSerial=%s SurfaceId=%s",
+						LogAlways("cev_cryvstest: Info State=%d Time=%.3f Duration=%.3f Width=%d Height=%d HasAlpha=%d AudioTrack='%s' Variant=%d DecodeBackend=%d FrameSerial=%s SurfaceId=%s",
 							out[0].AsInt32(), out[1].AsFloat(), out[2].AsFloat(), out[3].AsInt32(), out[4].AsInt32(), out[5].AsBool(), out[6].c_str(), out[7].AsInt32(), out[8].AsInt32(), out[9].c_str(), out[10].c_str());
 						Check(out[0].AsInt32() == static_cast<int>(EVideoPlayerState::Playing) && out[0].AsInt32() == Q("State", h).i, "Info State = Playing = table");
 						Check(out[1].AsFloat() > 0.5f && out[1].AsFloat() <= Q("Time", h).f, "Info Time advanced (%.3f s)", out[1].AsFloat());
 						Check(out[2].AsFloat() == Q("Duration", h).f && out[3].AsInt32() == Q("Width", h).i && out[4].AsInt32() == Q("Height", h).i && out[3].AsInt32() > 0, "Info Duration / Width / Height = table");
-						Check(out[5].AsBool() == Q("HasAlpha", h).b && strcmp(out[6].c_str(), Q("Language", h).s.c_str()) == 0 && out[7].AsInt32() == Q("Variant", h).i && out[8].AsInt32() == Q("DecodeBackend", h).i,
-							"Info HasAlpha / Language / Variant / DecodeBackend = table");
+						Check(out[5].AsBool() == Q("HasAlpha", h).b && strcmp(out[6].c_str(), Q("AudioTrack", h).s.c_str()) == 0 && out[7].AsInt32() == Q("Variant", h).i && out[8].AsInt32() == Q("DecodeBackend", h).i,
+							"Info HasAlpha / AudioTrack / Variant / DecodeBackend = table");
 						Check(atoi(out[9].c_str()) > 0 && stricmp(out[10].c_str(), kOpenSurface) == 0, "Info FrameSerial > 0 and SurfaceId = %s (%s)", kOpenSurface, out[10].c_str());
 					}
 					CallGlobal(Api::eCryVS_VideoAdvanced_Pause, { { 0, CryVS::CVariant(static_cast<int32>(h)) } });

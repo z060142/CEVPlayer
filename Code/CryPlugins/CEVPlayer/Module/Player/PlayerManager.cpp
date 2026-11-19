@@ -859,22 +859,6 @@ namespace CEVPlayer
 			m_pConsolePlayer->Resume();
 	}
 
-	void CPlayerManager::ConsoleSetLanguage(const char* name)
-	{
-		if (m_pConsolePlayer == nullptr)
-		{
-			LogAlways("cev_lang: no cev_play video is running");
-			return;
-		}
-		if (name == nullptr || name[0] == '\0')
-		{
-			LogAlways("cev_lang: current language <%s>", m_pConsolePlayer->GetLanguage());
-			return;
-		}
-		LogAlways("cev_lang: <%s> (was <%s>)", name, m_pConsolePlayer->GetLanguage());
-		m_pConsolePlayer->SetLanguage(name);
-	}
-
 	void CPlayerManager::ConsolePlaySurface(const char* surfaceId, const char* path, bool loop)
 	{
 		if (m_shutdown || surfaceId == nullptr)

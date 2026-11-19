@@ -52,7 +52,7 @@ namespace cev
 		// false: the video track (if any) is ignored entirely: no video decoder, no FrameRing / frame buffers, no
 		// video decode work, GetInfo().hasVideo == false (MediaInfo::videoSkipped tells that a track was ignored),
 		// Update() presents nothing and GetFrame() returns false. The player is audio only: GetTime() / the end of
-		// playback follow the clock and the container duration. Meant for external language audio files. A file
+		// playback follow the clock and the container duration. Meant for external audio track files. A file
 		// without a playable stream after skipping (video only, or decodeAudio == false as well) fails to load
 		// with Unsupported / StatusDetail::NoSupportedTrack.
 		bool decodeVideo = true;
