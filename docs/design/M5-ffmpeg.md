@@ -227,3 +227,7 @@ WinHTTP 以 `--fetch-url` 對本機 `python -m http.server`、真實 https 站�
 - 社群樹只建置，沒有執行（其 Sandbox / GameLauncher 本身有已知問題，見 `docs/research/03-smoke-test.md` §5）。
 - 最小版 FFmpeg 未實測（測試用的是完整版 8.0.1）。
 - `Reimport source`（轉檔過的資產）的按鈕本身沒有單獨跑；`cev_editor_recompress ... refresh` 走同一個 job，只有 `refresh` 之外的路徑被實跑。
+
+## 2026-11-19 修訂（E1；本節優先於上文的對應段落）
+
+- FFmpeg 路徑設定改存在編輯器的偏好設定頁 `CEVPlayer/FFmpeg`；舊的 `%LOCALAPPDATA%\CEVPlayer\editor.json` 只在第一次啟動時讀入一次。`CEV_EDITOR_SETTINGS` 仍可作為讀取的退路（測試用）。Info 欄的 FFmpeg 區塊只顯示狀態與「Open preferences」。

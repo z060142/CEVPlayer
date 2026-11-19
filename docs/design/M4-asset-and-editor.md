@@ -46,3 +46,8 @@ Code/Sandbox/Plugins/EditorCEVPlayer/      編輯器插件
 2. 官方版：EditorCEVPlayer + CEVPlayer + Sandbox 建置 0 錯誤 0 警告；CECE：兩個插件目標 0 錯誤。
 3. Sandbox 冒煙：啟動 → 開工具視窗 → 以 console / 自動化指令匯入一支 WebM（不經 UI 拖曳；提供 `cev_editor_import <src> <dstFolder>` 之類的指令）→ 產生 WAV / 分離音訊 / Ogg / ACE → 關閉，無崩潰、log 無錯誤。
 4. 手動驗收清單（`docs/manual-acceptance-M4.md`）：使用者在 Sandbox 實際操作的步驟與預期畫面。
+
+## 2026-11-19 修訂（E1、E2；本節優先於上文的對應段落）
+
+- 預覽不再是引擎的 `QViewport`：`CVideoPreviewWidget`（一般 `QWidget`）直接畫 `CEVPlayerCore` 解出的畫面，聲音走 `QAudioOutput`；不經引擎渲染器、不需要執行期插件（任務單 `docs/tasks/E2.md`）。描述檔的判斷邏輯在 Core 的 `DescriptorPlan.h`，執行期與預覽共用。
+- 資產是「匯入而來」：`IsImported()`＝true，資產資料夾內的來源複本登記為來源檔，重新匯入走引擎的 `CAsset::Reimport`（`CVideoAssetImporter::ReimportAsset` 沿用存下來的匯入設定）；來源狀態平常只比大小與修改時間。描述檔以 property tree 編輯（語言的 trigger 用引擎的音訊觸發器選擇器），沒有 Apply 鍵；對話框用引擎的 `CSystemFileDialog`／`CQuestionDialog`；使用者觸發的工作有 `CProgressNotification`；「Open folder」鍵已移除（任務單 `docs/tasks/E1.md`）。
