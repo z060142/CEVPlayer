@@ -181,6 +181,7 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
   - 各顯示卡上 VP9／VP8 是否真的硬體解碼：**未驗**（階段 0 以實際素材驗）。
 - 選擇：播放器屬性 `Decode = Auto | GPU | CPU`，全域 `cev_decodeMode`。`GPU` 不可用時退回 CPU 並警告一次。`Auto` 的規則先定為「可用且影片高度 ≥ 1080 時用 GPU」，量測後修訂。
 - alpha：第二條視訊流另開一個 MFT；開不了就只有 alpha 走 libvpx。
+- **執行緒與介面（2026-11-19 裁決，全文在 `docs/tasks/M9.md` 末尾）**：每個使用 MF 後端的播放器一條專用執行緒，COM／MF／D3D11 物件只在它上面建立、使用、釋放；後端介面把「送入封包」與「取出完成的畫面」分開，ring 的 slot 跟著封包的票走（MF 的讀回延遲兩幀），skip 以不帶 slot 的票表示；libvpx 後端在同一個介面下同步完成。
 - **第一版：讀回**。解碼輸出複製到 staging 貼圖、非同步 Map（排隊 1～2 幀，不阻塞）、把 NV12 轉排成 §5.1 的打包排列（Y 直接複製，UV 拆成兩半）進 ring slot，其後與軟體解碼相同。CEVPlayer 仍然不碰渲染器。
 - **第二版（量測後再決定，需要使用者同意的渲染器 patch）**：解碼輸出直接成為引擎裝置上的貼圖（`CTS_LAYOUT_NV12`，兩張貼圖），不經記憶體。契約已保留排列代號與 `textureId2`。
 
