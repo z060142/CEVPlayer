@@ -903,7 +903,10 @@ namespace CEVPlayer
 			bool s_commandRegistered = false;
 			uint32 s_lastAdded = 0;   // totals of the last RegisterAll (self test)
 			uint32 s_lastPresent = 0;
-			constexpr uint32 kElementCount = 3 + Api::eCryVS_FunctionCount + 1 + 36 + Api::eEvent_Count + 2; // types, globals, component, members, signals
+			// One member function per control / query of the table except Create, CreateForSurface and Destroy (M7 added
+			// SetPauseDecodeWhenHidden and PauseDecodeWhenHidden: 36 -> 38).
+			constexpr uint32 kMemberFunctionCount = 38;
+			constexpr uint32 kElementCount = 3 + Api::eCryVS_FunctionCount + 1 + kMemberFunctionCount + Api::eEvent_Count + 2; // types, globals, component, members, signals
 
 			struct SCounts
 			{
@@ -1183,7 +1186,7 @@ namespace CEVPlayer
 							Check(ok, "member function CEVPlayer::VideoPlayer::%s - %u in / %u out, types match", e.name, e.paramCount, outs);
 						}
 					}
-					Check(memberCount == 36, "%u member functions (36 expected)", memberCount);
+					Check(memberCount == kMemberFunctionCount, "%u member functions (%u expected)", memberCount, kMemberFunctionCount);
 
 					// signals of the component
 					uint32 signalCount = 0;
