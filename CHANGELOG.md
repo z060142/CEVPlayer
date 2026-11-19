@@ -5,6 +5,12 @@
 The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3 - 5.6) with a rewrite for CRYENGINE
 5.7.1 and adds a Sandbox plug-in. Details and the decision log: [docs/PLAN.md](docs/PLAN.md) and `docs/design/`.
 
+### Project
+
+* Maintenance passed to [z060142](https://github.com/z060142). The original author, Ilya Chernetsov, is credited in
+  the README ("Credits and maintenance"); his copyright notices stay in the files that carry them. The funding link
+  of the original repository (`.github/FUNDING.yml`) is removed from this one.
+
 ### Runtime
 
 * New decoder core `CEVPlayerCore` (engine independent static library, own self test): libwebm demuxer, libvpx VP8 / VP9

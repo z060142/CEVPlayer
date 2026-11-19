@@ -1,19 +1,31 @@
 # CEVPlayer
 
-WebM video for CRYENGINE 5.7 (VP8 / VP9 with alpha, Vorbis / Opus audio): a runtime plug-in (**CEVPlayer**) and a
-Sandbox plug-in (**EditorCEVPlayer**) with a video asset type, an importer, FFmpeg based transcoding and a video editor
-window.
+CEVPlayer plays video inside CRYENGINE 5.7 games: full screen for intros, cutscenes and menu backgrounds, on
+materials for screens and monitors placed in a level, and into named textures that a UI system can show as part of its
+own layout. Videos can be transparent (VP9 with alpha), so they also work as animated overlays and effects on top of
+the scene or the UI.
 
-The original plug-in is by **Ilya Chernetsov** ([afrostalin/CEVPlayer](https://github.com/afrostalin/CEVPlayer), Libav
-based, CRYENGINE 5.3 - 5.6). This branch (`rebuild`) is a rewrite of the decoding, rendering and audio layers for
-CRYENGINE 5.7.1 and adds the editor tooling; the plug-in keeps its name. The original FlowGraph nodes, the
-TextureVideoPlayer component, the `vp_*` console commands and the `IVideoPlugin::PlayVideoTo*` functions are gone
-without aliases: levels and flow graphs that use them must be rebuilt with the nodes below. What changed against the
-old `master` is listed in [CHANGELOG.md](CHANGELOG.md).
+It is made of two plug-ins:
+
+* **CEVPlayer** (runtime) decodes WebM - VP8 / VP9 video, Vorbis / Opus audio - with libvpx, or on the GPU through
+  Media Foundation when you ask for it. Sound goes through the engine's audio system and stays in sync with the picture.
+  A video can carry several named audio tracks, markers that fire events at given times, and lower-resolution variants
+  that are picked for small screens. A video shown through a UI stops costing CPU and GPU time while that UI reports
+  it hidden, and catches up when it is shown again.
+* **EditorCEVPlayer** (Sandbox) makes video an asset type: import a file through the Asset Browser (other formats are
+  converted to WebM with FFmpeg, which the editor can download), preview it with sound, and edit its
+  tracks, markers and variants in a video editor window.
+
+Game logic drives it with FlowGraph nodes, a Schematyc component, CryVS functions (Community Edition) or the C++
+interface; two nodes - *play on screen* and *play on material* - cover the common cases without any setup.
+
+The CRYENGINE Community Edition (CECE) has CEVPlayer built in; see
+[Build and integration](#build-and-integration) for when you would integrate this repository yourself.
 
 Licence: Boost Software License 1.0, see [LICENSE](LICENSE). Third-party libraries keep their own licences, see
-[THIRD-PARTY.md](THIRD-PARTY.md). Project tracking (Traditional Chinese): [docs/PLAN.md](docs/PLAN.md); what still needs a
-person to look at it: [docs/manual-acceptance.md](docs/manual-acceptance.md).
+[THIRD-PARTY.md](THIRD-PARTY.md). Changes: [CHANGELOG.md](CHANGELOG.md). Project tracking (Traditional Chinese):
+[docs/PLAN.md](docs/PLAN.md); what still needs a person to look at it:
+[docs/manual-acceptance.md](docs/manual-acceptance.md).
 
 ## Features
 
@@ -287,10 +299,23 @@ machine (building the solution targets with plain MSBuild works where ATL/MFC is
 <installed bin>` copies the DLLs into an installed engine (with backups). Details:
 [docs/research/02-baseline-build.md](docs/research/02-baseline-build.md).
 
-### Community fork (CryENGINE-5-7-community)
+### Community Edition (CECE, CryENGINE-5-7-community)
 
-The fork already contains an older CEVPlayer copy and an unguarded `add_subdirectory(CEVPlayer/Module)`; its patch
-series (`patches/community/`) only adds the Sandbox registration. `apply_patches.sh` detects the tree by file hashes.
+CECE ([CryENGINE-5-7-community](https://github.com/z060142/CryENGINE-5-7-community)) has CEVPlayer built in: it is
+part of the engine tree and is built with it, so most CECE users do nothing here. CECE releases take their CEVPlayer
+from this repository and can be behind it. This section is for developers who want a newer
+version of the plug-in than the one in their CECE: the steps below **replace** the built-in copy.
+
+> **Warning for CECE 1.0:** its built-in CEVPlayer is the earlier version. After replacing it, levels, flow graphs and
+> components made with the built-in nodes no longer load them and must be rebuilt with the [node sets](#node-sets) of
+> this version (there are no aliases). In return the editor plug-in and the CryVS functions become available.
+
+CECE releases after 1.0 that already contain this version do not have this break: updating them is only a matter of
+taking newer sources.
+
+The tree already has `Code/CryPlugins/CEVPlayer` and an unguarded `add_subdirectory(CEVPlayer/Module)`; the patch
+series for it (`patches/community/`) only adds the Sandbox registration. `apply_patches.sh` detects the tree by file
+hashes.
 
 **Caveat:** `sync_sources.sh` replaces each destination directory as a whole (`rm -rf`, then copy), including
 `Code/SDKs/CEVPlayer/`, and removes old flat copies under `Code/SDKs/<lib>`. If `Code/SDKs` (or a folder in it) is a
@@ -419,6 +444,10 @@ person; they are collected in [docs/manual-acceptance.md](docs/manual-acceptance
   decode on other hardware. The full list is in [docs/manual-acceptance.md](docs/manual-acceptance.md).
 * Windows only.
 
-## Contact
+## Credits and maintenance
 
-Original plug-in: Ilya Chernetsov, chernecoff@gmail.com, [GitHub issues](https://github.com/afrostalin/CEVPlayer/issues).
+CEVPlayer was created by **Ilya Chernetsov** ([afrostalin/CEVPlayer](https://github.com/afrostalin/CEVPlayer),
+2018 - 2020, CRYENGINE 5.3 - 5.6); his history and copyright notices are kept in this repository. This version is a
+rewrite that continues the project under the same name and licence. It is maintained by
+[z060142](https://github.com/z060142), independently of the original author - please send questions and changes
+[here](https://github.com/z060142/CEVPlayer), not to him.
