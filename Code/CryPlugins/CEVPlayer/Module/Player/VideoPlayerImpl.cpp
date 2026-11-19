@@ -413,6 +413,10 @@ namespace CEVPlayer
 
 		cev::PlayerConfig cfg = MakeConfig(m_manager);
 		cfg.avOffsetSeconds = m_descValid ? m_desc.avOffsetMs / 1000.0 : 0.0; // all routes (PlayerCore clamps it)
+		// M9: decoder backend of the video core (decided at load; the external audio core never decodes video)
+		m_loadedDecodeMode = EffectiveDecodeMode();
+		cfg.decodeMode = static_cast<cev::DecodeMode>(m_loadedDecodeMode);
+		cfg.autoMinHeight = static_cast<uint32_t>(std::max(0, mEnv->m_cevDecodeAutoMinHeight));
 		if (useClock)
 			m_audioClock = std::make_unique<cev::AudioClock>(CAudioMixer::kDeviceRate);
 		cfg.externalClock = m_audioClock.get();
@@ -513,8 +517,15 @@ namespace CEVPlayer
 		{
 			m_hasAudio = m_info.hasAudio && !m_plan.cue;
 		}
-		Log("player %u ready: <%s> %dx%d %.2fs%s%s", m_id, m_plan.videoPath.c_str(), m_info.width, m_info.height, m_info.durationSeconds,
-			m_info.hasAlpha ? " alpha" : "", m_hasAudio ? " audio" : "");
+		char decode[256];
+		DecodeText(decode, sizeof(decode), true);
+		Log("player %u ready: <%s> %dx%d %.2fs%s%s decode=%s", m_id, m_plan.videoPath.c_str(), m_info.width, m_info.height, m_info.durationSeconds,
+			m_info.hasAlpha ? " alpha" : "", m_hasAudio ? " audio" : "", decode);
+		const cev::DecodeBackendInfo backend = m_core->GetDecodeBackend();
+		m_backendHardware = backend.hardware;
+		if (m_info.hasVideo && m_loadedDecodeMode == static_cast<int>(cev::DecodeMode::Gpu) && !backend.hardware)
+			LogWarning("player %u: Decode = GPU but hardware decode is not available for <%s>: %s; the CPU decoder is used", m_id,
+				m_plan.videoPath.c_str(), backend.reason[0] != 0 ? backend.reason : "unknown reason");
 
 		m_core->SetLoop(m_loop);
 		CoresSetRate(static_cast<double>(m_rate));
@@ -687,6 +698,20 @@ namespace CEVPlayer
 				}
 				return;
 			}
+		}
+		if ((before == cev::PlayerState::Stopped || before == cev::PlayerState::Ended) && m_info.hasVideo && EffectiveDecodeMode() != m_loadedDecodeMode)
+		{
+			// M9: the decoder choice changed since the load: a start from Stopped / Ended reloads with it (at 0).
+			Log("player %u: start with decode mode %d instead of %d", m_id, EffectiveDecodeMode(), m_loadedDecodeMode);
+			ReloadForLanguage();
+			if (m_phase == EPhase::Loading)
+			{
+				m_reloading = true;
+				m_reloadTime = 0.0;
+				m_reloadRestore = ERestore::Playing;
+				m_startedAfterReload = true;
+			}
+			return;
 		}
 		if (cev::Succeeded(CoresPlay()))
 		{
@@ -1251,6 +1276,17 @@ namespace CEVPlayer
 			return;
 		++m_tick;
 		TickBody(dt);
+		if (m_backendHardware && m_phase == EPhase::Ready)
+		{
+			const cev::DecodeBackendInfo backend = m_core->GetDecodeBackend();
+			if (!backend.hardware)
+			{
+				// M9: Media Foundation failed during playback (device removed, ...): the core continues on libvpx.
+				m_backendHardware = false;
+				LogWarning("player %u: hardware decode stopped for <%s>: %s; continuing on the CPU decoder", m_id, m_plan.videoPath.c_str(),
+					backend.reason[0] != 0 ? backend.reason : "unknown reason");
+			}
+		}
 		if (m_surfaceRegistered)
 			PublishSnapshot();
 	}
@@ -1309,7 +1345,9 @@ namespace CEVPlayer
 		info.timeSeconds = GetTime();
 		info.durationSeconds = GetDuration();
 		info.loopCount = m_seenLoops;
-		Contract::PublishSnapshot(m_surfaceId.c_str(), info);
+		char decode[64];
+		DecodeText(decode, sizeof(decode), false);
+		Contract::PublishSnapshot(m_surfaceId.c_str(), info, decode);
 	}
 
 	void CVideoPlayerImpl::ApplyVisibility(float dt)
@@ -1572,8 +1610,43 @@ namespace CEVPlayer
 			m_cueClock->OnLevelUnload();
 	}
 
+	int CVideoPlayerImpl::EffectiveDecodeMode() const
+	{
+		const int mode = m_decodeRequest >= 0 ? m_decodeRequest : mEnv->m_cevDecodeMode;
+		return mode >= 0 && mode <= 2 ? mode : 0;
+	}
+
+	cev::DecodeBackendInfo CVideoPlayerImpl::DecodeInfo() const
+	{
+		return m_phase == EPhase::Ready ? m_core->GetDecodeBackend() : cev::DecodeBackendInfo();
+	}
+
+	EVideoDecodeBackend CVideoPlayerImpl::GetDecodeBackend() const
+	{
+		return DecodeInfo().kind == cev::DecodeBackendKind::MediaFoundation ? EVideoDecodeBackend::Gpu : EVideoDecodeBackend::Cpu;
+	}
+
+	void CVideoPlayerImpl::DecodeText(char* buffer, size_t size, bool withReason) const
+	{
+		if (m_phase != EPhase::Ready || !m_info.hasVideo)
+		{
+			cry_strcpy(buffer, size, "-");
+			return;
+		}
+		const cev::DecodeBackendInfo b = m_core->GetDecodeBackend();
+		if (b.kind == cev::DecodeBackendKind::MediaFoundation)
+			cry_sprintf(buffer, size, "%s%s%s%s", m_info.hasAlpha && !b.alphaHardware ? "gpu+cpu-alpha" : "gpu", withReason ? " (" : "",
+				withReason ? b.adapter : "", withReason ? ")" : "");
+		else if (withReason && b.reason[0] != 0)
+			cry_sprintf(buffer, size, "cpu (%s)", b.reason);
+		else
+			cry_strcpy(buffer, size, "cpu");
+	}
+
 	void CVideoPlayerImpl::ListState(char* buffer, size_t size) const
 	{
+		char decode[64];
+		DecodeText(decode, sizeof(decode), false);
 		const float peak = m_voice >= 0 ? m_manager.Audio().TakeVoicePeak(m_voice) : 0.f;
 		char cue[200] = "";
 		if (m_cueClock)
@@ -1585,9 +1658,9 @@ namespace CEVPlayer
 			else
 				std::snprintf(cue, sizeof(cue), "  cue=<%s> triggerPos=n/a", m_cueClock->Trigger().c_str());
 		}
-		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  %s%s  uploads=%llu  tex=%s(%d) %s %dx%d rgba=%d%s  audio=%s  peak=%.3f  clock=%s%s  lang=%s  variant=%s  <%s>",
+		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  %s%s  decode=%s  uploads=%llu  tex=%s(%d) %s %dx%d rgba=%d%s  audio=%s  peak=%.3f  clock=%s%s  lang=%s  variant=%s  <%s>",
 			m_id, StateName(GetState()), GetTime(), GetDuration(), GetWidth(), GetHeight(), HasAlpha() ? " alpha" : "",
-			VisibilityName(), m_ownedByOpen ? "  owner=open" : "",
+			VisibilityName(), m_ownedByOpen ? "  owner=open" : "", decode,
 			static_cast<unsigned long long>(m_uploads), m_textureName.c_str(), m_textureId, LayoutName(), m_textureWidth, m_textureHeight, m_core->GetOutputRgba() ? 1 : 0, m_fullscreen ? (m_fullscreenHidden ? "  fullscreen(hidden)" : "  fullscreen") : "",
 			!m_hasAudio ? "none" : (m_voice >= 0 ? (m_audioCore ? "external" : "embedded") : (m_cueClock ? "cue" : "silent")), peak, ClockSourceName(), cue,
 			m_language.empty() ? "-" : m_language.c_str(), m_variantIndex < 0 ? "main" : std::to_string(m_variantIndex).c_str(), m_path.c_str());

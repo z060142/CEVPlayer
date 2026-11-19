@@ -419,7 +419,7 @@ namespace CEVPlayer
 				{ EPort::Bool, "HasAlpha", "The video has an alpha channel", 0, nullptr },
 				{ EPort::String, "Language", "Audio language in use, empty without languages", 0, "" },
 				{ EPort::Int, "Variant", "Variant in use: 0 = main video, n = n-th variant", 0, nullptr },
-				{ EPort::Int, "DecodeBackend", "Decoder in use: 0 = CPU", 0, nullptr },
+				{ EPort::Int, "DecodeBackend", "Decoder in use: 0 = CPU, 1 = GPU", 0, nullptr },
 				{ EPort::String, "FrameSerial", "Number of uploaded pictures as decimal text", 0, "" },
 				{ EPort::String, "SurfaceId", "Surface id of the player, empty for Screen / Material players", 0, "" },
 			};

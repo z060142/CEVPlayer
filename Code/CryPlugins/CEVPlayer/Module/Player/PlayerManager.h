@@ -120,6 +120,8 @@ namespace CEVPlayer
 		bool m_shutdown = false;
 		bool m_dispatching = false;
 		bool m_statsApplied = false;
+		uint32_t m_mfTimeoutsLogged = 0; // cev::MediaFoundationShutdownTimeouts() already reported
+		void CheckDecoderShutdown();
 
 		IVideoPlayer* m_pConsolePlayer = nullptr;
 		std::unique_ptr<CConsoleListener> m_consoleListener;

@@ -180,7 +180,7 @@ namespace CEVPlayer
 			t.Check(!Call(STest::E("SetOutput"), t.handle, surfaceOut, 5, nullptr), "SetOutput(Surface) on a player without surface id is rejected");
 			t.Check(Call(STest::E("SetOutput"), t.handle, output, 5, nullptr), "SetOutput(Screen)");
 			const SValue gpu[1] = { SValue::FromInt(static_cast<int>(EDecodeMode::Gpu)) };
-			t.Check(Call(STest::E("SetDecode"), t.handle, gpu, 1, nullptr) && mEnv->pApi->GetDecodeMode(t.handle) == 1, "SetDecode(GPU) recorded (a warning is expected)");
+			t.Check(Call(STest::E("SetDecode"), t.handle, gpu, 1, nullptr) && mEnv->pApi->GetDecodeMode(t.handle) == 1, "SetDecode(GPU) recorded");
 			const SValue badDecode[1] = { SValue::FromInt(7) };
 			t.Check(!Call(STest::E("SetDecode"), t.handle, badDecode, 1, nullptr) && mEnv->pApi->GetDecodeMode(t.handle) == 1, "SetDecode(7) rejected");
 			const SValue cpu[1] = { SValue::FromInt(static_cast<int>(EDecodeMode::Cpu)) };
@@ -242,7 +242,7 @@ namespace CEVPlayer
 			// queries added in M6b
 			t.Check(t.Query("SurfaceId").s.empty(), "SurfaceId of a Create player is empty");
 			t.Check(t.Query("Generation").i == 0, "Generation of a player without surface id stays 0 (only surface players count, " + std::to_string(t.Query("Generation").i) + ")");
-			t.Check(t.Query("PixelLayout").i == 0 && t.Query("DecodeBackend").i == 0, "PixelLayout RGBA8, DecodeBackend CPU");
+			t.Check(t.Query("PixelLayout").i == 0 && t.Query("DecodeBackend").i == 0, "PixelLayout RGBA8, DecodeBackend CPU (SetDecode(CPU) before Load)");
 			const std::string serial = t.Query("FrameSerial").s;
 			t.Check(!serial.empty() && serial.find_first_not_of("0123456789") == std::string::npos && std::strtoull(serial.c_str(), nullptr, 10) > 10, "FrameSerial is decimal text > 10 (" + serial + ")");
 			t.Check(t.Query("IsLoaded").b && t.Query("IsLooping").b, "IsLoaded and IsLooping");

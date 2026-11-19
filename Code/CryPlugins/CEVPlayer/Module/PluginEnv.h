@@ -31,6 +31,8 @@ namespace CEVPlayer
 		int m_cevLog = 0;         // cev_log: 1 = verbose
 		int m_cevStats = 0;       // cev_stats: 1 = stats line every second (log + on screen)
 		int m_cevDecodeThreads = 0; // cev_decodeThreads: 0 = auto
+		int m_cevDecodeMode = 0;    // cev_decodeMode: 0 Auto, 1 GPU, 2 CPU (players without an explicit SetDecode)
+		int m_cevDecodeAutoMinHeight = 1080; // cev_decodeAutoMinHeight: Auto uses the GPU from this video height on
 		int m_cevAudioEnable = 1; // cev_audio_enable
 		float m_cevVolume = 1.f;  // cev_volume (master volume 0..1)
 		int m_cevMuteOnFocusLoss = 1; // cev_muteOnFocusLoss

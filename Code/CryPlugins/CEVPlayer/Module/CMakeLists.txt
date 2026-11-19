@@ -115,6 +115,9 @@ if(NOT TARGET CEVPlayerCore)
 	set_target_properties(CEVPlayerCore PROPERTIES FOLDER "Project/Plugins")
 endif()
 target_link_libraries(${THIS_PROJECT} PRIVATE CEVPlayerCore)
+# M9: the Media Foundation decode backend of CEVPlayerCore needs these Windows SDK libraries (CEVPlayerCore links them
+# PUBLIC as well; listed here so the engine-side module states its system dependencies explicitly).
+target_link_libraries(${THIS_PROJECT} PRIVATE mfplat mfuuid d3d11 dxgi)
 
 # SDL2 (audio output): the engine's own SDK/module (2.0.8)
 if(NOT TARGET SDL2)

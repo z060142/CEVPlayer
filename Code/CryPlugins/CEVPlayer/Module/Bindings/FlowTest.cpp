@@ -368,7 +368,7 @@ namespace CEVPlayer
 			Set(t, N(eN_SurfaceA), "Video", string(t.pathA.c_str()));
 			Set(t, N(eN_SurfaceA), "SurfaceID", string("flowtest_a"));
 			Set(t, N(eN_SurfaceA), "Loop", true);
-			Set(t, N(eN_SurfaceA), "Decode", 1); // GPU: recorded, a warning is expected
+			Set(t, N(eN_SurfaceA), "Decode", 1); // GPU (Media Foundation; CPU with a warning where not available)
 			Trigger(t, N(eN_SurfaceA), "Play");
 			// Open (Screen)
 			Set(t, N(eN_Open), "Video", string(t.pathA.c_str()));
@@ -418,7 +418,12 @@ namespace CEVPlayer
 				t.Check(LastFloat(a, "Duration") > 0.f, "Ready Duration " + Last(a, "Duration"));
 				t.Check(LastBool(a, "HasAlpha") == Query("HasAlpha", ha).b, "Ready HasAlpha " + Last(a, "HasAlpha"));
 				t.Check(Count(a, "Error") == 0, "PlayToSurface no Error");
-				t.Check(mEnv->pApi->GetDecodeMode(ha) == static_cast<int>(EDecodeMode::Gpu) && Query("DecodeBackend", ha).i == 0, "Decode GPU recorded, backend CPU");
+				{
+					const int backend = Query("DecodeBackend", ha).i;
+					// 1 where hardware VP9 decode exists; 0 (with a warning in the log) elsewhere
+					t.Check(mEnv->pApi->GetDecodeMode(ha) == static_cast<int>(EDecodeMode::Gpu) && (backend == 0 || backend == 1),
+						"Decode GPU applied, DecodeBackend " + std::to_string(backend) + (backend == 1 ? " (GPU)" : " (CPU: see the warning in the log)"));
+				}
 				t.Check(Query("IsLooping", ha).b, "Loop applied");
 
 				// PlayOnMaterial with an unknown material
