@@ -14,6 +14,7 @@
 #include <CrySystem/ConsoleRegistration.h>
 #include <CryRenderer/IRenderer.h>
 #include <CryRenderer/IRenderAuxGeom.h>
+#include <CryRenderer/ITexture.h>
 
 #include "Bindings/ApiTable.h"
 #include "Bindings/ApiTest.h"
@@ -54,6 +55,12 @@ namespace CEVPlayer
 
 			// cev_bench_play
 			IVideoPlayer* s_benchPlayer = nullptr;
+
+			// cev_bench_hint (M8): one consumer hint sent every frame
+			std::string s_hintSurface;
+			uint32_t s_hintAccept = 0;
+			// cev_show_surface (M8): draw a surface's texture top left (screenshot evidence)
+			std::string s_showSurface;
 
 			bool RendererOk() { return gEnv != nullptr && gEnv->pRenderer != nullptr && !gEnv->IsDedicated(); }
 
@@ -177,6 +184,34 @@ namespace CEVPlayer
 			LogAlways("cev_bench_stop");
 		}
 
+		void CmdBenchHint(IConsoleCmdArgs* args)
+		{
+			if (args == nullptr || args->GetArgCount() < 3)
+			{
+				if (!s_hintSurface.empty())
+				{
+					CryTexSourceHint h = {};
+					h.size = sizeof(h);
+					h.flags = 2u; // release
+					h.consumer = 0xBE7C0001ull;
+					if (const CryTexSourceApi* api = CryTexSource_v1())
+						api->hint(s_hintSurface.c_str(), &h);
+				}
+				s_hintSurface.clear();
+				LogAlways("cev_bench_hint: off (usage: cev_bench_hint <surface> <acceptLayouts>, e.g. 7 = RGBA8 | packed YUV420 | packed YUVA420)");
+				return;
+			}
+			s_hintSurface = args->GetArg(1);
+			s_hintAccept = static_cast<uint32_t>(std::strtoul(args->GetArg(2), nullptr, 0));
+			LogAlways("cev_bench_hint: <%s> visible, acceptLayouts 0x%x, every frame", s_hintSurface.c_str(), s_hintAccept);
+		}
+
+		void CmdShowSurface(IConsoleCmdArgs* args)
+		{
+			s_showSurface = args != nullptr && args->GetArgCount() > 1 ? args->GetArg(1) : "";
+			LogAlways("cev_show_surface: %s", s_showSurface.empty() ? "off" : s_showSurface.c_str());
+		}
+
 		void CmdStatsFile(IConsoleCmdArgs* args)
 		{
 			if (mEnv->pManager == nullptr)
@@ -189,6 +224,18 @@ namespace CEVPlayer
 
 		void BeforeRender()
 		{
+			if (!s_hintSurface.empty())
+			{
+				CryTexSourceHint h = {};
+				h.size = sizeof(h);
+				h.flags = 1u;
+				h.pixelWidth = 1920;
+				h.pixelHeight = 1080;
+				h.consumer = 0xBE7C0001ull;
+				h.acceptLayouts = s_hintAccept;
+				if (const CryTexSourceApi* api = CryTexSource_v1())
+					api->hint(s_hintSurface.c_str(), &h);
+			}
 			if (!RendererOk())
 				return;
 			if (s_r8Id > 0)
@@ -238,6 +285,20 @@ namespace CEVPlayer
 		{
 			if (!RendererOk())
 				return;
+			if (!s_showSurface.empty() && mEnv->pManager != nullptr)
+			{
+				if (IVideoPlayer* const p = mEnv->pManager->FindPlayerBySurface(s_showSurface.c_str()))
+				{
+					if (ITexture* const pTex = p->GetTexture())
+					{
+						const float dw = 480.f;
+						const float dh = std::min(640.f, dw * static_cast<float>(pTex->GetHeight()) / static_cast<float>(std::max(1, pTex->GetWidth())));
+						IRenderAuxImage::Draw2dImage(20.f, 20.f, dw, dh, pTex->GetTextureID(), 0.f, 1.f, 1.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f);
+						IRenderAuxText::Draw2dLabel(20.f, 24.f + dh, 1.3f, ColorF(1.f, 1.f, 0.f, 1.f), false, "cev_show_surface %s: %s %dx%d", s_showSurface.c_str(),
+							p->GetPixelLayout() == EVideoPixelLayout::RGBA8 ? "RGBA8" : "R8 packed", pTex->GetWidth(), pTex->GetHeight());
+					}
+				}
+			}
 			if (s_r8Id > 0)
 			{
 				const float dw = 480.f;
@@ -537,6 +598,8 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_bench_play", DevProbe::CmdBenchPlay, VF_NULL, "Measurement: cev_bench_play <path> <texture name> [loop 0|1] plays into a named texture (not fullscreen); no arguments = stop");
 		REGISTER_COMMAND("cev_bench_stop", DevProbe::CmdBenchStop, VF_NULL, "Measurement: stop the cev_bench_play player");
 		REGISTER_COMMAND("cev_hidden_bench", CmdHiddenBench, VF_NULL, "Measurement: cev_hidden_bench <path> [cycles] [hidden s] [visible s] plays into surface CevBench and toggles a consumer hint hidden / visible, logs the catch-up of every cycle");
+		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");
+		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> draws the surface's texture top left as it is (an R8 packed texture shows the planes in grey); no argument = off");
 		REGISTER_COMMAND("cev_stats_file", DevProbe::CmdStatsFile, VF_NULL, "Measurement: cev_stats_file <path>|off writes the per-second cev_stats rows as CSV (turns cev_stats on)");
 
 		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log and draw a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");
@@ -549,6 +612,7 @@ namespace CEVPlayer
 		REGISTER_CVAR2("cev_variant", &mEnv->m_cevVariant, -1, VF_NULL, "Variant of a .cevvideo descriptor for players loaded afterwards: -1 = automatic (smallest not below the screen height when fullscreen, else the main video), 0 = main video, n = n-th <Variant>");
 		REGISTER_CVAR2("cev_cueForceFallback", &mEnv->m_cevCueForceFallback, 0, VF_NULL, "1 = the cue route (audio from a CryAudio trigger) ignores the optional engine patch and follows the video clock (test of the fallback)");
 		ConsoleRegistrationHelper::Register("cev_volume", &mEnv->m_cevVolume, 1.f, VF_NULL, "Master volume of all videos (0.0 - 1.0), multiplied with the player volume");
+		REGISTER_CVAR2("cev_allowPlanar", &mEnv->m_cevAllowPlanar, 1, VF_NULL, "1 = surface players switch to a packed planar texture (R8: Y, U, V [, A]) while every consumer of the texture source contract accepts it; 0 = always RGBA8");
 		ConsoleRegistrationHelper::Register("cev_hiddenStopSeconds", &mEnv->m_cevHiddenStopSeconds, 2.f, VF_NULL, "Surface players that no consumer sees only decode (no copy / conversion / upload); after this many seconds hidden in a row they stop decoding the video. 0 = never stop");
 	}
 
@@ -559,11 +623,11 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_lang", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 
-		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds" };
+		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds", "cev_allowPlanar" };
 		for (const char* name : variables)
 			pConsole->UnregisterVariable(name, true);
 	}

@@ -1,6 +1,7 @@
 #include "CEVCore/FrameRing.h"
 
 #include <cstring>
+#include <new>
 
 namespace cev
 {
@@ -25,20 +26,26 @@ namespace cev
 			static_cast<int64_t>(format.width) * format.height > kMaxPixels) // 8192 x 4608
 			return Status::Unsupported;
 
-		// Total memory is computed (in 64 bit) and checked against the budget before anything is allocated.
-		const int yStride = AlignUp(format.width, 16);
-		const int cStride = AlignUp(format.ChromaWidth(), 16);
+		// Total memory is computed (in 64 bit) and checked against the budget before anything is allocated. The RGBA
+		// buffers always count (they may be allocated later on demand).
+		const bool packed = format.Packable();
+		const int cw = format.ChromaWidth();
+		const int ch = format.ChromaHeight();
+		const int yStride = packed ? format.width : AlignUp(format.width, 16);
+		const int cStride = packed ? format.width : AlignUp(cw, 16);
 		const size_t ySize = static_cast<size_t>(yStride) * format.height;
-		const size_t cSize = static_cast<size_t>(cStride) * format.ChromaHeight();
+		const size_t cSize = packed ? static_cast<size_t>(format.width) * ch : static_cast<size_t>(cStride) * ch; // packed: U and V side by side
 		const size_t aSize = format.hasAlpha ? ySize : 0;
-		const size_t total = ySize + 2 * cSize + aSize;
-		const uint64_t rgbaBytes = format.withRgba ? static_cast<uint64_t>(format.width) * format.height * 4 : 0;
+		const size_t total = packed ? ySize + cSize + aSize : ySize + 2 * cSize + aSize;
+		const uint64_t rgbaBytes = static_cast<uint64_t>(format.width) * format.height * 4;
 		if ((static_cast<uint64_t>(total) + rgbaBytes) * slotCount > kMaxRingBytes)
 			return Status::OutOfMemory;
 
 		try
 		{
 			m_format = format;
+			m_packed = packed;
+			m_rgbaCount = 0;
 			m_slots = std::make_unique<SlotStorage[]>(slotCount);
 			m_readyQueue = std::make_unique<int[]>(slotCount);
 
@@ -46,27 +53,40 @@ namespace cev
 			{
 				SlotStorage& s = m_slots[i];
 				s.yuv = std::make_unique<uint8_t[]>(total);
+				uint8_t* const base = s.yuv.get();
 				// Neutral grey / opaque so a never written slot is harmless.
-				std::memset(s.yuv.get(), 16, ySize);
-				std::memset(s.yuv.get() + ySize, 128, 2 * cSize);
-				s.data.plane[0] = s.yuv.get();
+				std::memset(base, 16, ySize);
+				s.data.plane[0] = base;
 				s.data.stride[0] = yStride;
-				s.data.plane[1] = s.yuv.get() + ySize;
-				s.data.stride[1] = cStride;
-				s.data.plane[2] = s.yuv.get() + ySize + cSize;
-				s.data.stride[2] = cStride;
+				if (packed)
+				{
+					std::memset(base + ySize, 128, cSize);
+					s.data.packed = base;
+					s.data.plane[1] = base + ySize;
+					s.data.plane[2] = base + ySize + cw;
+					s.data.stride[1] = format.width;
+					s.data.stride[2] = format.width;
+				}
+				else
+				{
+					std::memset(base + ySize, 128, 2 * cSize);
+					s.data.plane[1] = base + ySize;
+					s.data.stride[1] = cStride;
+					s.data.plane[2] = base + ySize + cSize;
+					s.data.stride[2] = cStride;
+				}
 				if (format.hasAlpha)
 				{
-					s.data.plane[3] = s.yuv.get() + ySize + 2 * cSize;
+					s.data.plane[3] = base + total - aSize;
 					s.data.stride[3] = yStride;
 					std::memset(s.data.plane[3], 255, aSize);
 				}
 				if (format.withRgba)
 				{
-					const size_t rgbaSize = static_cast<size_t>(format.width) * format.height * 4;
-					s.rgbaMem = std::make_unique<uint8_t[]>(rgbaSize); // zero initialised
+					s.rgbaMem = std::make_unique<uint8_t[]>(static_cast<size_t>(rgbaBytes)); // zero initialised
 					s.data.rgba = s.rgbaMem.get();
 					s.data.rgbaStride = format.width * 4;
+					++m_rgbaCount;
 				}
 				s.state = State::Free;
 			}
@@ -84,6 +104,82 @@ namespace cev
 		}
 	}
 
+	PlaneRect FrameRing::PackedPlane(int plane) const
+	{
+		PlaneRect r;
+		if (!m_packed)
+			return r;
+		const int w = m_format.width, h = m_format.height, cw = m_format.ChromaWidth(), ch = m_format.ChromaHeight();
+		switch (plane)
+		{
+		case 0: r = {0, 0, w, h}; break;
+		case 1: r = {0, h, cw, ch}; break;
+		case 2: r = {cw, h, cw, ch}; break;
+		case 3: if (m_format.hasAlpha) r = {0, h + ch, w, h}; break;
+		default: break;
+		}
+		return r;
+	}
+
+	bool FrameRing::EnsureRgba(uint32_t slot)
+	{
+		if (slot >= m_slotCount)
+			return false;
+		SlotStorage& s = m_slots[slot];
+		s.data.rgbaValid = false;
+		if (s.rgbaMem)
+			return true;
+		std::unique_ptr<uint8_t[]> mem(new (std::nothrow) uint8_t[static_cast<size_t>(m_format.width) * m_format.height * 4]);
+		if (!mem)
+			return false;
+		std::lock_guard<std::mutex> lock(m_mutex); // pointer swap visible to ReleaseFreeRgba / RgbaBufferCount
+		s.rgbaMem = std::move(mem);
+		s.data.rgba = s.rgbaMem.get();
+		s.data.rgbaStride = m_format.width * 4;
+		++m_rgbaCount;
+		return true;
+	}
+
+	void FrameRing::ReleaseRgba(uint32_t slot)
+	{
+		if (slot >= m_slotCount)
+			return;
+		std::unique_ptr<uint8_t[]> old;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			SlotStorage& s = m_slots[slot];
+			s.data.rgbaValid = false;
+			if (!s.rgbaMem)
+				return;
+			old = std::move(s.rgbaMem);
+			s.data.rgba = nullptr;
+			s.data.rgbaStride = 0;
+			--m_rgbaCount;
+		}
+	}
+
+	void FrameRing::ReleaseFreeRgba()
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		for (uint32_t i = 0; i < m_slotCount; ++i)
+		{
+			SlotStorage& s = m_slots[i];
+			if (s.state != State::Free || !s.rgbaMem)
+				continue;
+			s.rgbaMem.reset();
+			s.data.rgba = nullptr;
+			s.data.rgbaStride = 0;
+			s.data.rgbaValid = false;
+			--m_rgbaCount;
+		}
+	}
+
+	uint32_t FrameRing::RgbaBufferCount() const
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		return m_rgbaCount;
+	}
+
 	void FrameRing::Shutdown()
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
@@ -93,6 +189,8 @@ namespace cev
 		m_readyHead = 0;
 		m_readyCount = 0;
 		m_current = -1;
+		m_rgbaCount = 0;
+		m_packed = false;
 		++m_epoch;
 	}
 

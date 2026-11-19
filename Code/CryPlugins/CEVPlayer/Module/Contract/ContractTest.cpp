@@ -574,7 +574,7 @@ namespace CEVPlayer
 					CryTexSourceInfo info = {};
 					if (!WaitGeneration(t, kM8, now, 3.0, info, "cev_allowPlanar 0"))
 						return false;
-					CheckSwitch(t, s_m8.p, info, now, "cev_allowPlanar 0", true);
+					CheckSwitch(t, s_m8.p, info, now, "cev_allowPlanar 0", false);
 					CheckRgba(t, s_m8.p, info, "cev_allowPlanar 0");
 					mEnv->m_cevAllowPlanar = 1;
 					return true;
@@ -597,7 +597,7 @@ namespace CEVPlayer
 					CryTexSourceInfo info = {};
 					if (!WaitGeneration(t, kM8, now, 3.0, info, "material output"))
 						return false;
-					CheckSwitch(t, s_m8.p, info, now, "material output", true);
+					CheckSwitch(t, s_m8.p, info, now, "material output", false);
 					CheckRgba(t, s_m8.p, info, "material output");
 					s_m8.p->UnbindMaterial(s_m8.pMaterial);
 					return true;
@@ -615,7 +615,7 @@ namespace CEVPlayer
 					CryTexSourceInfo info = {};
 					if (!WaitGeneration(t, kM8, now, 3.0, info, "fullscreen"))
 						return false;
-					CheckSwitch(t, s_m8.p, info, now, "fullscreen", true);
+					CheckSwitch(t, s_m8.p, info, now, "fullscreen", false);
 					CheckRgba(t, s_m8.p, info, "fullscreen");
 					s_m8.p->SetFullscreen(false, EVideoFit::Letterbox);
 					Unsustain(kM8, kM8ConsumerA, true);

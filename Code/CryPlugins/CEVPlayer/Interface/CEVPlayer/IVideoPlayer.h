@@ -18,7 +18,8 @@
 // (the end of the plug-in's UpdateBeforeRender step), never from inside a call you make. It is legal to call
 // player methods, RemoveListener or DestroyPlayer from inside a callback.
 //
-// Pixel format: the texture is RGBA8 with premultiplied alpha (IsPremultiplied() is always true).
+// Pixel format: the texture is RGBA8 with premultiplied alpha, except for surface players whose consumers negotiated a
+// packed planar layout through the texture source contract (GetPixelLayout(), IsPremultiplied() false then).
 //
 // Lifetime: IVideoPlayer* belongs to the plug-in. It is valid from CreatePlayer until DestroyPlayer or until the
 // plug-in shuts down (system events ESYSTEM_EVENT_FULL_SHUTDOWN / FAST_SHUTDOWN, or the module is unloaded). At
@@ -55,7 +56,9 @@ namespace CEVPlayer
 	//! IVideoPlayer::GetPixelLayout(). Values match the CTS_LAYOUT_* values of the texture source contract.
 	enum class EVideoPixelLayout : uint32_t
 	{
-		RGBA8 = 0, //!< one RGBA8 texture, premultiplied (the only layout so far)
+		RGBA8 = 0,         //!< one RGBA8 texture, premultiplied
+		PackedYuv420 = 1,  //!< one R8 texture: Y on top, U and V side by side below (surface players, negotiated)
+		PackedYuva420 = 2, //!< the same plus the alpha plane below (colour planes not multiplied by alpha)
 	};
 
 	//! IVideoPlayer::GetDecodeBackend().
@@ -170,7 +173,7 @@ namespace CEVPlayer
 		virtual int    GetWidth() const = 0;      //!< 0 until loaded
 		virtual int    GetHeight() const = 0;
 		virtual bool   HasAlpha() const = 0;
-		virtual bool   IsPremultiplied() const = 0; //!< always true
+		virtual bool   IsPremultiplied() const = 0; //!< true for the RGBA8 layout
 		virtual bool   HasAudio() const = 0;
 		virtual uint64_t GetFrameSerial() const = 0; //!< counts uploaded pictures, usable as a "changed" test
 
@@ -225,7 +228,7 @@ namespace CEVPlayer
 		//! Counts changes of the texture (texture id, size or layout). It is advanced by the player itself, also
 		//! when the renderer hands out the same id again; usable as a "fetch the texture again" test.
 		virtual uint32_t GetGeneration() const = 0;
-		virtual EVideoPixelLayout GetPixelLayout() const = 0;     //!< always RGBA8 so far
+		virtual EVideoPixelLayout GetPixelLayout() const = 0;     //!< layout of the texture right now (RGBA8 unless negotiated)
 		virtual EVideoDecodeBackend GetDecodeBackend() const = 0; //!< always Cpu so far
 	};
 }

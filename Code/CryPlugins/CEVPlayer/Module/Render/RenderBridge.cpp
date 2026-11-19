@@ -93,8 +93,9 @@ namespace CEVPlayer
 			return Available() ? gEnv->pRenderer->GetMaxTextureSize() : 0;
 		}
 
-		ITexture* CreateTexture(const char* name, int width, int height, const char** pFailure)
+		ITexture* CreateTexture(const char* name, int width, int height, EFormat format, const char** pFailure)
 		{
+			const ETEX_Format texFormat = format == EFormat::R8 ? eTF_R8 : eTF_R8G8B8A8;
 			*pFailure = "renderer not available";
 			if (!Available() || name == nullptr || name[0] == '\0' || width <= 0 || height <= 0)
 				return nullptr;
@@ -106,19 +107,19 @@ namespace CEVPlayer
 				return nullptr;
 			}
 
-			// A same-named texture is reused by the renderer. Only plain RGBA8 2D textures are acceptable (the
-			// engine recreates the device texture at our size); never take over a render target / other type.
+			// A same-named texture is reused by the renderer. Only plain RGBA8 / R8 2D textures are acceptable (the
+			// engine recreates the device texture at our size and format); never take over a render target / other type.
 			if (ITexture* const pExisting = gEnv->pRenderer->EF_GetTextureByName(name))
 			{
 				if (pExisting->GetTextureType() != eTT_2D || (pExisting->GetFlags() & (FT_USAGE_RENDERTARGET | FT_USAGE_DEPTHSTENCIL | FT_USAGE_UNORDERED_ACCESS)) != 0
-					|| (pExisting->IsTextureLoaded() && pExisting->GetTextureDstFormat() != eTF_R8G8B8A8))
+					|| (pExisting->IsTextureLoaded() && pExisting->GetTextureDstFormat() != eTF_R8G8B8A8 && pExisting->GetTextureDstFormat() != eTF_R8))
 				{
-					*pFailure = "a texture with this name exists and is not a plain RGBA8 2D texture";
+					*pFailure = "a texture with this name exists and is not a plain RGBA8 / R8 2D texture";
 					return nullptr;
 				}
 			}
 
-			const int id = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(nullptr, width, height, eTF_R8G8B8A8, eTF_R8G8B8A8, 0, false, FILTER_BILINEAR, 0, name, FT_NOMIPS));
+			const int id = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(nullptr, width, height, texFormat, texFormat, 0, false, FILTER_BILINEAR, 0, name, FT_NOMIPS));
 			ITexture* const pTexture = id > 0 ? gEnv->pRenderer->EF_GetTextureByID(id) : nullptr;
 			if (pTexture == nullptr)
 			{
@@ -128,26 +129,27 @@ namespace CEVPlayer
 			// The creation reference is ours. Verify what we got: the renderer substitutes its "no texture" when the
 			// device texture could not be created.
 			if (pTexture->GetTextureID() != id || pTexture->GetWidth() != width || pTexture->GetHeight() != height || pTexture->GetNumMips() != 1
-				|| pTexture->GetTextureType() != eTT_2D || pTexture->GetTextureDstFormat() != eTF_R8G8B8A8)
+				|| pTexture->GetTextureType() != eTT_2D || pTexture->GetTextureDstFormat() != texFormat)
 			{
 				*pFailure = "the created texture does not match the requested size / format";
 				pTexture->Release();
 				return nullptr;
 			}
-			LogDebug("texture <%s> id <%d> %dx%d created", name, id, width, height);
+			LogDebug("texture <%s> id <%d> %dx%d %s created", name, id, width, height, format == EFormat::R8 ? "R8" : "RGBA8");
 			*pFailure = "";
 			return pTexture;
 		}
 
-		bool UpdateTexture(ITexture* pTexture, const uint8_t* rgba, int width, int height)
+		bool UpdateTexture(ITexture* pTexture, const uint8_t* data, int width, int height, EFormat format)
 		{
-			if (!Available() || pTexture == nullptr || rgba == nullptr)
+			if (!Available() || pTexture == nullptr || data == nullptr)
 				return false;
+			const ETEX_Format texFormat = format == EFormat::R8 ? eTF_R8 : eTF_R8G8B8A8;
 			const int id = pTexture->GetTextureID();
 			if (id <= 0 || pTexture->GetWidth() != width || pTexture->GetHeight() != height || pTexture->GetNumMips() != 1
-				|| pTexture->GetTextureDstFormat() != eTF_R8G8B8A8 || gEnv->pRenderer->EF_GetTextureByID(id) != pTexture)
+				|| pTexture->GetTextureDstFormat() != texFormat || gEnv->pRenderer->EF_GetTextureByID(id) != pTexture)
 				return false;
-			gEnv->pRenderer->UpdateTextureInVideoMemory(static_cast<uint32>(id), const_cast<unsigned char*>(rgba), 0, 0, width, height, eTF_R8G8B8A8);
+			gEnv->pRenderer->UpdateTextureInVideoMemory(static_cast<uint32>(id), const_cast<unsigned char*>(data), 0, 0, width, height, texFormat);
 			return true;
 		}
 

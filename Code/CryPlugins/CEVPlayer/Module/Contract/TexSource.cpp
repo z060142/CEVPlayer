@@ -434,6 +434,10 @@ namespace CEVPlayer
 					s.name, i.textureId, i.width, i.height, i.flags, static_cast<unsigned long long>(i.contentSerial), i.generation, i.layout, i.state,
 					i.errorCode, i.timeSeconds, i.durationSeconds, i.loopCount, s.updates, s.ownedByOpen ? "open" : "level", s.closing ? " (closing)" : "",
 					h.consumers, h.visible ? 1 : 0, h.pixelWidth, h.pixelHeight, h.acceptLayouts);
+				if (i.layout != CTS_LAYOUT_RGBA8)
+					LogAlways("     planes Y(%d,%d %dx%d) U(%d,%d %dx%d) V(%d,%d %dx%d) A(%d,%d %dx%d) matrix=%u range=%u siting=%u",
+						i.planeY.x, i.planeY.y, i.planeY.w, i.planeY.h, i.planeU.x, i.planeU.y, i.planeU.w, i.planeU.h,
+						i.planeV.x, i.planeV.y, i.planeV.w, i.planeV.h, i.planeA.x, i.planeA.y, i.planeA.w, i.planeA.h, i.colorMatrix, i.colorRange, i.chromaSiting);
 			}
 		}
 	}

@@ -3938,6 +3938,7 @@ namespace
 		const MediaInfo& info = p.GetInfo();
 		CHECK(info.packedLayout);
 		CHECK(!p.GetOutputRgba());
+		CHECK(Succeeded(p.SetLoop(true))); // the test runs longer than the clip
 		CHECK(p.RgbaBufferCount() == 0);
 		RgbaWatch watch;
 		watch.info = &info;
@@ -4040,7 +4041,7 @@ namespace
 		CHECK(p.Update());
 		sim.presented = 1;
 		CHECK(Succeeded(p.Play()));
-		const uint64_t stride = std::max<uint64_t>(1, info.videoPacketCount / static_cast<uint32_t>(samples));
+		const uint64_t stride = std::max<uint64_t>(1, info.videoPacketCount / static_cast<uint32_t>(samples + 1));
 		std::vector<uint8_t> nearest(static_cast<size_t>(info.width) * info.height * 4), bilinear(nearest.size());
 		int compared = 0, exact = 0, maxDiff = 0;
 		double sumDiff = 0.0;

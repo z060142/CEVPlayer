@@ -227,6 +227,9 @@ namespace CEVPlayer
 		StopVoice(); // before any core goes away: the audio callback must not touch them
 		m_audioCore.reset();
 		m_core->Unload();
+		++m_loads;
+		m_layout = EVideoPixelLayout::RGBA8; // a new core converts to RGBA; the negotiation starts over
+		m_layoutTick = 0;
 		m_phase = EPhase::None;
 		m_info = cev::MediaInfo();
 		m_hasAudio = false;
@@ -985,11 +988,14 @@ namespace CEVPlayer
 	{
 		if (m_phase != EPhase::Ready || !m_info.hasVideo || m_info.width <= 0 || m_info.height <= 0)
 			return false;
-		if (m_pTexture != nullptr && (m_textureWidth != m_info.width || m_textureHeight != m_info.height))
+		const bool packed = m_layout != EVideoPixelLayout::RGBA8;
+		const int texWidth = m_info.width;
+		const int texHeight = packed ? m_info.height + (m_info.height + 1) / 2 + (m_layout == EVideoPixelLayout::PackedYuva420 ? m_info.height : 0) : m_info.height;
+		if (m_pTexture != nullptr && (m_textureWidth != texWidth || m_textureHeight != texHeight || m_textureR8 != packed))
 		{
 			if (!m_manager.RenderCallsAllowed())
 				return false;
-			ReleaseTexture(true); // size changed: new texture, bindings move over
+			ReleaseTexture(true); // size / format changed: new texture, bindings move over
 		}
 		if (m_pTexture != nullptr)
 			return true;
@@ -1000,21 +1006,24 @@ namespace CEVPlayer
 		if (m_autoName)
 			m_textureName = m_manager.MakeAutoTextureName(m_info.width, m_info.height, this);
 		const char* failure = "";
-		ITexture* const pTexture = RenderBridge::CreateTexture(m_textureName.c_str(), m_info.width, m_info.height, &failure);
+		ITexture* const pTexture = RenderBridge::CreateTexture(m_textureName.c_str(), texWidth, texHeight, packed ? RenderBridge::EFormat::R8 : RenderBridge::EFormat::Rgba8, &failure);
 		if (pTexture == nullptr)
 		{
-			LogError("player %u: cannot create texture <%s> %dx%d: %s", m_id, m_textureName.c_str(), m_info.width, m_info.height, failure);
+			LogError("player %u: cannot create texture <%s> %dx%d %s: %s", m_id, m_textureName.c_str(), texWidth, texHeight, packed ? "R8" : "RGBA8", failure);
 			FailPlayer(cev::Status::Unsupported, failure);
 			return false;
 		}
 		m_pTexture = pTexture;
 		m_textureId = pTexture->GetTextureID();
 		m_textureChanged = true;
-		LogDebug("player %u: texture <%s> id %d %dx%d", m_id, m_textureName.c_str(), m_textureId, m_info.width, m_info.height);
-		m_textureWidth = m_info.width;
-		m_textureHeight = m_info.height;
+		LogDebug("player %u: texture <%s> id %d %dx%d %s", m_id, m_textureName.c_str(), m_textureId, texWidth, texHeight, LayoutName());
+		m_textureWidth = texWidth;
+		m_textureHeight = texHeight;
+		m_textureR8 = packed;
+		m_textureTick = m_tick;
 		m_needUpload = true;
-		ApplyBindings();
+		if (!packed)
+			ApplyBindings(); // a material never samples a planar texture
 		return true;
 	}
 
@@ -1080,11 +1089,15 @@ namespace CEVPlayer
 	void CVideoPlayerImpl::UploadFrame()
 	{
 		cev::FrameView view;
-		if (!m_core->GetFrame(view) || view.rgba == nullptr)
+		if (!m_core->GetFrame(view))
 			return;
-		if (view.width != m_textureWidth || view.height != m_textureHeight)
+		const bool packed = m_textureR8;
+		const uint8_t* const data = packed ? view.packed : view.rgba;
+		if (data == nullptr)
+			return; // RGBA8 texture, frame without RGBA (cannot happen after a switch: the core converts on present)
+		if (packed ? (view.packedWidth != m_textureWidth || view.packedHeight != m_textureHeight) : (view.width != m_textureWidth || view.height != m_textureHeight))
 			return;
-		if (view.rgbaStride != view.width * 4)
+		if (!packed && view.rgbaStride != view.width * 4)
 		{
 			// UpdateTextureInVideoMemory takes tightly packed rows only.
 			if (!m_strideWarned)
@@ -1095,18 +1108,28 @@ namespace CEVPlayer
 			return;
 		}
 		const std::chrono::steady_clock::time_point uploadStart = std::chrono::steady_clock::now();
-		const bool uploaded = RenderBridge::UpdateTexture(m_pTexture, view.rgba, view.width, view.height);
+		const bool uploaded = RenderBridge::UpdateTexture(m_pTexture, data, m_textureWidth, m_textureHeight, packed ? RenderBridge::EFormat::R8 : RenderBridge::EFormat::Rgba8);
 		if (uploaded)
 		{
 			// measurement (S0): main thread cost of the update call
 			const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - uploadStart).count();
 			m_uploadMs[m_uploadMsCount % kUploadTimingWindow] = ms;
 			++m_uploadMsCount;
-			m_lastUploadBytes = static_cast<uint64_t>(view.width) * static_cast<uint64_t>(view.height) * 4u;
+			const uint64_t bytes = static_cast<uint64_t>(m_textureWidth) * static_cast<uint64_t>(m_textureHeight) * (packed ? 1u : 4u);
+			m_lastUploadBytes = bytes;
+			if (m_checksumUploads)
+			{
+				uint64_t h = 0xCBF29CE484222325ull;
+				for (uint64_t i = 0; i < bytes; ++i)
+					h = (h ^ data[i]) * 0x100000001B3ull;
+				m_lastUploadChecksum = h;
+			}
+			if (m_firstUploadTick < m_textureTick || m_firstUploadTick == 0)
+				m_firstUploadTick = m_tick;
 			++m_uploads;
 			++m_contentSerial;
 			m_frameSerial = view.serial;
-			m_core->NoteUpload(static_cast<uint64_t>(view.width) * static_cast<uint64_t>(view.height) * 4u);
+			m_core->NoteUpload(bytes);
 			m_needUpload = false;
 			Emit(EEvent::NewFrame, 0, view.serial);
 		}
@@ -1137,8 +1160,8 @@ namespace CEVPlayer
 		binding.subMaterial = subMaterial;
 		binding.textureSlot = textureSlot;
 		m_bindings.push_back(binding);
-		if (m_pTexture != nullptr && m_manager.RenderCallsAllowed())
-			ApplyBindings();
+		if (m_pTexture != nullptr && !m_textureR8 && m_manager.RenderCallsAllowed())
+			ApplyBindings(); // planar texture: applied after the switch to RGBA8 (next tick)
 		return true;
 	}
 
@@ -1226,6 +1249,7 @@ namespace CEVPlayer
 		// The cores run on their own clocks (audio / steady clock); dt only accumulates the hidden time (M7).
 		if (m_destroyed)
 			return;
+		++m_tick;
 		TickBody(dt);
 		if (m_surfaceRegistered)
 			PublishSnapshot();
@@ -1246,10 +1270,27 @@ namespace CEVPlayer
 		info.width = GetWidth();
 		info.height = GetHeight();
 		const EVideoPlayerState state = GetState();
-		info.flags = 1u /* premultiplied */ | (HasAlpha() ? 2u : 0u) | (state == EVideoPlayerState::Playing ? 4u : 0u);
+		const bool packed = m_pTexture != nullptr && m_textureR8;
+		// bit0 premultiplied only for RGBA8; bit3 = 0: the VP9 alpha planes are straight (not multiplied by alpha)
+		info.flags = (packed ? 0u : 1u) | (HasAlpha() ? 2u : 0u) | (state == EVideoPlayerState::Playing ? 4u : 0u);
 		info.contentSerial = m_contentSerial;
 		info.generation = m_generation;
-		info.layout = CTS_LAYOUT_RGBA8;
+		info.layout = packed ? static_cast<uint32_t>(m_layout) : CTS_LAYOUT_RGBA8;
+		if (m_phase == EPhase::Ready)
+		{
+			info.colorMatrix = m_info.colorStandard == cev::ColorStandard::BT709 ? 1u : 0u;
+			info.colorRange = m_info.colorRange == cev::ColorRange::Full ? 1u : 0u;
+			info.chromaSiting = static_cast<uint32_t>(m_info.chromaSiting); // same values as CTS_SITING_*
+		}
+		if (packed)
+		{
+			const int w = m_info.width, h = m_info.height, cw = w / 2, ch = (h + 1) / 2;
+			info.planeY = { 0, 0, w, h };
+			info.planeU = { 0, h, cw, ch };
+			info.planeV = { cw, h, cw, ch };
+			if (m_layout == EVideoPixelLayout::PackedYuva420)
+				info.planeA = { 0, h + ch, w, h };
+		}
 		switch (m_phase)
 		{
 		case EPhase::None:    info.state = 0; break;
@@ -1349,7 +1390,8 @@ namespace CEVPlayer
 			else if (!m_bindings.empty())
 			{
 				ProcessBindingRemovals();
-				ApplyBindings();
+				if (!m_textureR8)
+					ApplyBindings();
 			}
 		}
 
@@ -1397,9 +1439,77 @@ namespace CEVPlayer
 		}
 		UpdateMarkers(looped);
 
+		// M8: layout negotiation (may replace the texture and upload the current frame right away)
+		if (m_info.hasVideo && m_pTexture != nullptr)
+			UpdateLayout();
+
 		// Hidden: nothing is uploaded (a pending refresh waits until the picture is visible again).
 		if ((fresh || m_needUpload) && m_pTexture != nullptr && m_core->GetVisibility() == cev::VideoVisibility::Visible)
 			UploadFrame();
+	}
+
+	const char* CVideoPlayerImpl::LayoutName() const
+	{
+		switch (m_layout)
+		{
+		case EVideoPixelLayout::RGBA8:         return "rgba8";
+		case EVideoPixelLayout::PackedYuv420:  return "yuv420";
+		case EVideoPixelLayout::PackedYuva420: return "yuva420";
+		}
+		return "?";
+	}
+
+	EVideoPixelLayout CVideoPlayerImpl::DesiredLayout(bool& consumerDriven) const
+	{
+		consumerDriven = false;
+		// Forced RGBA8: no surface, a fullscreen or material output, planar off, a stream that cannot be packed.
+		if (!m_surfaceRegistered || m_fullscreen || !m_bindings.empty() || mEnv->m_cevAllowPlanar == 0 || !m_info.packedLayout)
+			return EVideoPixelLayout::RGBA8;
+		consumerDriven = true;
+		Contract::SHintSummary hints;
+		if (!Contract::GetHintSummary(m_surfaceId.c_str(), hints) || hints.consumers == 0)
+			return EVideoPixelLayout::RGBA8; // nobody negotiates: RGBA8 as before
+		const EVideoPixelLayout planar = m_info.hasAlpha ? EVideoPixelLayout::PackedYuva420 : EVideoPixelLayout::PackedYuv420;
+		return (hints.acceptLayouts & (1u << static_cast<uint32_t>(planar))) != 0 ? planar : EVideoPixelLayout::RGBA8;
+	}
+
+	void CVideoPlayerImpl::UpdateLayout()
+	{
+		bool consumerDriven = false;
+		const EVideoPixelLayout desired = DesiredLayout(consumerDriven);
+		if (desired == m_layout)
+			return;
+		// Hold: a consumer-driven change waits until the previous switch is kLayoutHoldTicks old (no flapping).
+		constexpr uint64_t kLayoutHoldTicks = 30;
+		if (consumerDriven && m_layoutTick != 0 && m_tick - m_layoutTick < kLayoutHoldTicks)
+			return;
+		if (!m_manager.RenderCallsAllowed() || !RenderBridge::Available())
+			return;
+		const bool toPacked = desired != EVideoPixelLayout::RGBA8;
+		if (!toPacked)
+			m_core->SetOutputRgba(true); // converts the frame on screen now
+		cev::FrameView view;
+		if (!m_core->GetFrame(view) || (toPacked ? view.packed == nullptr : view.rgba == nullptr))
+			return; // no frame data yet: the old texture stays until there is some
+		const EVideoPixelLayout previous = m_layout;
+		m_layout = desired;
+		ReleaseTexture(true);
+		if (!EnsureTexture())
+		{
+			if (m_phase == EPhase::Ready)
+			{
+				// could not make the new texture (renderer state): back to the previous layout next tick
+				m_layout = previous;
+				if (previous == EVideoPixelLayout::RGBA8)
+					m_core->SetOutputRgba(true);
+			}
+			return;
+		}
+		UploadFrame(); // the new texture has content in the tick it was made (also while hidden)
+		if (toPacked)
+			m_core->SetOutputRgba(false); // no colour conversion and no RGBA buffers from now on
+		m_layoutTick = m_tick;
+		Log("player %u: layout %s (texture %dx%d, generation follows)", m_id, LayoutName(), m_textureWidth, m_textureHeight);
 	}
 
 	// ------------------------------------------------------------------------------------------------ level loading
@@ -1475,10 +1585,10 @@ namespace CEVPlayer
 			else
 				std::snprintf(cue, sizeof(cue), "  cue=<%s> triggerPos=n/a", m_cueClock->Trigger().c_str());
 		}
-		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  %s%s  uploads=%llu  tex=%s(%d)%s  audio=%s  peak=%.3f  clock=%s%s  lang=%s  variant=%s  <%s>",
+		std::snprintf(buffer, size, "player %u  %s  t=%.2f/%.2f  %dx%d%s  %s%s  uploads=%llu  tex=%s(%d) %s %dx%d rgba=%d%s  audio=%s  peak=%.3f  clock=%s%s  lang=%s  variant=%s  <%s>",
 			m_id, StateName(GetState()), GetTime(), GetDuration(), GetWidth(), GetHeight(), HasAlpha() ? " alpha" : "",
 			VisibilityName(), m_ownedByOpen ? "  owner=open" : "",
-			static_cast<unsigned long long>(m_uploads), m_textureName.c_str(), m_textureId, m_fullscreen ? (m_fullscreenHidden ? "  fullscreen(hidden)" : "  fullscreen") : "",
+			static_cast<unsigned long long>(m_uploads), m_textureName.c_str(), m_textureId, LayoutName(), m_textureWidth, m_textureHeight, m_core->GetOutputRgba() ? 1 : 0, m_fullscreen ? (m_fullscreenHidden ? "  fullscreen(hidden)" : "  fullscreen") : "",
 			!m_hasAudio ? "none" : (m_voice >= 0 ? (m_audioCore ? "external" : "embedded") : (m_cueClock ? "cue" : "silent")), peak, ClockSourceName(), cue,
 			m_language.empty() ? "-" : m_language.c_str(), m_variantIndex < 0 ? "main" : std::to_string(m_variantIndex).c_str(), m_path.c_str());
 	}

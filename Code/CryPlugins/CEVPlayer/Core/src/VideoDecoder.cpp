@@ -164,6 +164,30 @@ namespace cev
 		return Status::Ok;
 	}
 
+	Status VideoDecoder::GetFrameView(YuvaImage& out) const
+	{
+		const vpx_image_t* img = m_impl->image;
+		if (img == nullptr)
+			return Status::InvalidState;
+		out = YuvaImage();
+		for (int i = 0; i < 3; ++i)
+		{
+			out.plane[i] = img->planes[i];
+			out.stride[i] = img->stride[i];
+		}
+		const vpx_image_t* a = m_impl->alphaImage;
+		if (a != nullptr && a->planes[0] != nullptr && (a->fmt & VPX_IMG_FMT_HIGHBITDEPTH) == 0 && a->bit_depth == 8 && a->d_w == img->d_w && a->d_h == img->d_h)
+		{
+			out.plane[3] = a->planes[0];
+			out.stride[3] = a->stride[0];
+		}
+		out.width = static_cast<int>(img->d_w);
+		out.height = static_cast<int>(img->d_h);
+		out.chromaShiftX = static_cast<int>(img->x_chroma_shift);
+		out.chromaShiftY = static_cast<int>(img->y_chroma_shift);
+		return Status::Ok;
+	}
+
 	Status VideoDecoder::WriteFrame(const FrameFormat& format, FrameRing::Slot& slot) const
 	{
 		const vpx_image_t* img = m_impl->image;

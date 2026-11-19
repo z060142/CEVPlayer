@@ -140,5 +140,6 @@ namespace cev
 		int m_current = -1;
 		uint64_t m_epoch = 1;
 		bool m_packed = false;
+		uint32_t m_rgbaCount = 0; // slots owning an RGBA buffer (under m_mutex)
 	};
 }

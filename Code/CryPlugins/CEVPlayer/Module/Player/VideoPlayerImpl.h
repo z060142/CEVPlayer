@@ -48,7 +48,7 @@ namespace CEVPlayer
 		int GetWidth() const override { return m_phase == EPhase::Ready ? m_info.width : 0; }
 		int GetHeight() const override { return m_phase == EPhase::Ready ? m_info.height : 0; }
 		bool HasAlpha() const override { return m_phase == EPhase::Ready && m_info.hasAlpha; }
-		bool IsPremultiplied() const override { return true; }
+		bool IsPremultiplied() const override { return m_layout == EVideoPixelLayout::RGBA8; }
 		bool HasAudio() const override { return m_phase == EPhase::Ready && m_hasAudio; }
 		uint64_t GetFrameSerial() const override { return m_frameSerial; }
 		const char* GetTextureName() const override { return m_textureName.c_str(); }
@@ -69,7 +69,7 @@ namespace CEVPlayer
 		int GetVariant() const override { return m_variantIndex < 0 ? 0 : m_variantIndex; }
 		const char* GetSurfaceId() const override { return m_surfaceId.c_str(); }
 		uint32_t GetGeneration() const override { return m_generation; }
-		EVideoPixelLayout GetPixelLayout() const override { return EVideoPixelLayout::RGBA8; }
+		EVideoPixelLayout GetPixelLayout() const override { return m_layout; }
 		EVideoDecodeBackend GetDecodeBackend() const override { return EVideoDecodeBackend::Cpu; }
 
 		// ---- manager side (main thread) ----
@@ -86,6 +86,17 @@ namespace CEVPlayer
 		//! Stops decoding / audio and drops listeners and outputs that need no renderer. After this only
 		//! ReleaseRenderResources() and the destructor are valid.
 		void PrepareDestroy();
+		// ---- M8 diagnostics (contract selftest) ----
+		uint64_t LoadCount() const { return m_loads; }          //!< LoadInternal calls (a layout switch never reloads)
+		uint64_t TickCount() const { return m_tick; }           //!< Tick() calls
+		uint64_t TextureTick() const { return m_textureTick; }  //!< tick in which the current texture was made
+		uint64_t FirstUploadTick() const { return m_firstUploadTick; } //!< tick of the first upload into it
+		//! Hash (FNV-1a 64) of every uploaded buffer while enabled (costs a pass over the bytes: tests only).
+		void SetUploadChecksum(bool enable) { m_checksumUploads = enable; }
+		uint64_t LastUploadChecksum() const { return m_lastUploadChecksum; }
+		uint64_t LastUploadSerial() const { return m_frameSerial; }
+		//! "rgba8", "yuv420" or "yuva420".
+		const char* LayoutName() const;
 		//! True while a texture or material binding still has to be released (needs renderer calls).
 		bool HasRenderResources() const { return m_pTexture != nullptr || !m_bindings.empty(); }
 		//! Unbinds materials and removes the texture. Only called while renderer calls are allowed (or at shutdown).
@@ -195,6 +206,12 @@ namespace CEVPlayer
 		void ProcessBindingRemovals();
 		void ReleaseTexture(bool keepBindings);
 		void UploadFrame();
+		//! M8: the layout the texture should have now (section 3 rule 5, task M8 item 3) and whether only consumer
+		//! preferences ask for it (those changes wait for the hold; forced RGBA8 does not).
+		EVideoPixelLayout DesiredLayout(bool& consumerDriven) const;
+		//! Switches the texture to DesiredLayout() when it differs: new texture + upload of the current frame in this
+		//! tick, generation +1; the core's RGBA output follows. Keeps the old texture while no frame data exists.
+		void UpdateLayout();
 		void StartVoice();
 		void StopVoice();
 		void ReapplyLevelLoadPause();
@@ -224,6 +241,16 @@ namespace CEVPlayer
 		uint32_t m_generation = 0;        // +1 per tick in which the texture was created / released / resized
 		uint64_t m_contentSerial = 0;     // +1 per upload and per generation change, never decreases
 		bool m_textureChanged = false;    // set by EnsureTexture / ReleaseTexture, folded into m_generation by PublishSnapshot
+		// M8 layout
+		EVideoPixelLayout m_layout = EVideoPixelLayout::RGBA8; // layout of the texture (and of the next one EnsureTexture makes)
+		bool m_textureR8 = false;         // the current texture is R8
+		uint64_t m_tick = 0;
+		uint64_t m_layoutTick = 0;        // tick of the last layout switch (0 = none yet)
+		uint64_t m_textureTick = 0;
+		uint64_t m_firstUploadTick = 0;
+		uint64_t m_loads = 0;
+		bool m_checksumUploads = false;
+		uint64_t m_lastUploadChecksum = 0;
 
 		EPhase m_phase = EPhase::None;
 		cev::MediaInfo m_info;
