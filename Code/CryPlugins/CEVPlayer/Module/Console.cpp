@@ -3,6 +3,10 @@
 #include "Console.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdarg>
+#include <mutex>
+#include <thread>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -12,6 +16,8 @@
 #include <vector>
 
 #include <CrySystem/ConsoleRegistration.h>
+#include <CrySystem/File/ICryPak.h>
+#include <CryCore/Platform/CryWindows.h> // GetModuleHandleA / GetProcAddress / GetLocalTime (M10a probe)
 #include <CryRenderer/IRenderer.h>
 #include <CryRenderer/IRenderAuxGeom.h>
 #include <CryRenderer/ITexture.h>
@@ -24,6 +30,7 @@
 #include "Bindings/ApiPlayers.h"
 #include "Player/PlayerManager.h"
 #include "Player/VideoPlayerImpl.h"
+#include "Render/RenderBridge.h"
 
 namespace CEVPlayer
 {
@@ -429,12 +436,549 @@ namespace CEVPlayer
 		}
 	}
 
+#if CEV_HAVE_LOADTIME_CALLBACKS
+	// ------------------------------------------------------------------------------------------------
+	// M10a: probe of the renderer's loading loop (engine patch 17, IRenderer::AddLoadtimeCallback). Measurement only:
+	// it never goes through a player except reading the P6 surface player's clock. All logging is LogAlways with the
+	// prefix "cev_probe_loadtime".
+	namespace LoadtimeProbe
+	{
+		namespace
+		{
+			using Clock = std::chrono::steady_clock;
+			constexpr int kTexSize = 256;
+			constexpr int kOpenAtIteration = 30;           // P5
+			constexpr size_t kReadBytes = 64 * 1024;       // P5
+			constexpr size_t kHeaderBytes = 4096;          // P8
+			constexpr float kNewLoopGap = 0.25f;           // seconds without a call: the next call starts a new loop
+
+			bool s_on = false;
+			int s_texId = 0;
+			std::vector<uint32> s_texBuf;
+			int s_stallMs = 0;
+			int s_drawMode = 1;             // 0 none, 1 LoadtimeRender, 2 LoadtimeUpdate
+			std::string s_openPath = "Videos/vp9_odd_321x181.webm";
+			std::string s_p6Surface;
+			std::string s_readbackDir;      // P4: where the read-back frames go (empty: no file, only the counts)
+			CVideoPlayerImpl* s_p6Player = nullptr;
+			uint64_t s_p6LastSerial = 0;
+			// M10b sub-modes (argument 6): "open:<surface>:<path>" sends a contract `open` (autoplay, loop) at
+			// LEVEL_LOAD_START_LOADINGSCREEN through the exported CryTexSource_v1 table (scenario C);
+			// "destroy:<surface>" destroys that surface player at LEVEL_LOAD_START like `cev_play_surface <id>` (scenario G).
+			std::string s_openSurface;
+			std::string s_openSrc;
+			bool s_opened = false;
+			std::string s_destroySurface;
+
+			std::mutex s_mutex; // guards the loop statistics below (render thread writes, main thread reads)
+			int s_loopIndex = 0;
+			uint32 s_iterations = 0;
+			uint32 s_renderCalls = 0;
+			uint32 s_updateFails = 0;
+			uint32 s_drawCalls = 0;
+			std::vector<float> s_dts;
+			Clock::time_point s_lastCall;
+			bool s_haveLastCall = false;
+			bool s_loopOnMainThread = false;
+			int s_lastTexState = -1;        // P3: 1 valid, 0 invalid, -1 unknown
+			std::atomic<bool> s_p8Pending{ false };
+			std::atomic<int> s_watch{ 0 };  // watchdog generation: non-zero while a file operation runs
+
+			int64 WallMs()
+			{
+				SYSTEMTIME st;
+				::GetLocalTime(&st);
+				return ((st.wHour * 60 + st.wMinute) * 60 + st.wSecond) * 1000LL + st.wMilliseconds;
+			}
+
+			void PLog(const char* fmt, ...)
+			{
+				char buf[1024];
+				va_list args;
+				va_start(args, fmt);
+				vsnprintf(buf, sizeof(buf), fmt, args);
+				va_end(args);
+				const int64 ms = WallMs();
+				LogAlways("cev_probe_loadtime [%02d:%02d:%02d.%03d %s] %s", static_cast<int>(ms / 3600000), static_cast<int>(ms / 60000 % 60),
+					static_cast<int>(ms / 1000 % 60), static_cast<int>(ms % 1000), CryGetCurrentThreadId() == gEnv->mMainThreadId ? "main" : "other", buf);
+			}
+
+			//! M10b: the contract table of this module, found the way a consumer finds it.
+			const CryTexSourceApi* ContractApi()
+			{
+				HMODULE self = nullptr;
+				::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(&ContractApi), &self);
+				using PFN_Source = const CryTexSourceApi* (*)(void);
+				const PFN_Source fn = self != nullptr ? reinterpret_cast<PFN_Source>(::GetProcAddress(self, "CryTexSource_v1")) : nullptr;
+				return fn != nullptr ? fn() : nullptr;
+			}
+
+			//! M10b: the contract snapshot of a surface (query through the exported table).
+			void LogSnapshot(const char* where, const std::string& name)
+			{
+				const CryTexSourceApi* const api = name.empty() ? nullptr : ContractApi();
+				if (api == nullptr)
+					return;
+				CryTexSourceInfo info = {};
+				info.size = sizeof(info);
+				const int r = api->query(name.c_str(), &info);
+				PLog("snapshot %s <%s>: query %d state=%u serial=%llu t=%.3f/%.3f loops=%u tex=%d gen=%u", where, name.c_str(), r, info.state,
+					static_cast<unsigned long long>(info.contentSerial), info.timeSeconds, info.durationSeconds, info.loopCount, info.textureId, info.generation);
+			}
+
+			// P3: describes our texture id now; returns 1 valid, 0 not.
+			int TexState(char* out, size_t outSize)
+			{
+				ITexture* const pTex = s_texId > 0 ? gEnv->pRenderer->EF_GetTextureByID(s_texId) : nullptr;
+				if (pTex == nullptr)
+				{
+					cry_sprintf(out, outSize, "id %d: no texture object", s_texId);
+					return 0;
+				}
+				const bool ok = pTex->IsTextureLoaded() && pTex->GetWidth() == kTexSize && pTex->GetHeight() == kTexSize && pTex->GetDeviceDataSize() > 0;
+				cry_sprintf(out, outSize, "id %d: name <%s> %dx%d loaded %d deviceBytes %u", s_texId, pTex->GetName(), pTex->GetWidth(), pTex->GetHeight(),
+					pTex->IsTextureLoaded() ? 1 : 0, pTex->GetDeviceDataSize());
+				return ok ? 1 : 0;
+			}
+
+			void FillTexture(uint32 iteration)
+			{
+				// magenta with a moving white bar (screenshots look for the magenta)
+				const int bar = static_cast<int>((iteration * 4u) % kTexSize);
+				for (int y = 0; y < kTexSize; ++y)
+					for (int x = 0; x < kTexSize; ++x)
+						s_texBuf[static_cast<size_t>(y) * kTexSize + x] = (x >= bar && x < bar + 16) ? 0xFFFFFFFFu : 0xFFFF00FFu;
+			}
+
+			void DrawTexture()
+			{
+				IRenderAuxImage::Draw2dImage(20.f, 20.f, 300.f, 300.f, s_texId, 0.f, 1.f, 1.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f);
+				++s_drawCalls;
+			}
+
+			// P4: reads the presented back buffer on the render thread (ReadFrameBuffer executes directly there), counts the
+			// magenta pixels of the probe texture and writes the frame as a binary PPM.
+			void ReadBack(const char* what)
+			{
+				const int w = gEnv->pRenderer->GetWidth();
+				const int h = gEnv->pRenderer->GetHeight();
+				if (w <= 0 || h <= 0)
+					return;
+				std::vector<uint32> px(static_cast<size_t>(w) * h, 0);
+				const Clock::time_point t0 = Clock::now();
+				const bool ok = gEnv->pRenderer->ReadFrameBuffer(px.data(), w, h, true, EReadTextureFormat::RGB8);
+				const float ms = std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
+				uint32 magenta = 0, lit = 0;
+				for (uint32 c : px)
+				{
+					const uint32 r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
+					magenta += (r > 200 && g < 70 && b > 200) ? 1u : 0u;
+					lit += (r + g + b > 30) ? 1u : 0u;
+				}
+				std::string file;
+				if (ok && !s_readbackDir.empty())
+				{
+					file = s_readbackDir + "/" + what + "_loop" + std::to_string(s_loopIndex) + ".ppm";
+					std::ofstream out(file, std::ios::binary);
+					out << "P6\n" << w << " " << h << "\n255\n";
+					for (uint32 c : px)
+					{
+						const char rgb[3] = { static_cast<char>(c & 0xFF), static_cast<char>((c >> 8) & 0xFF), static_cast<char>((c >> 16) & 0xFF) };
+						out.write(rgb, 3);
+					}
+				}
+				PLog("P4 %s loop %d iteration %u: ReadFrameBuffer(presented, %dx%d) %s in %.2f ms, magenta pixels %u (texture drawn at 300x300 virtual units), lit pixels %u, file <%s>",
+					what, s_loopIndex, s_iterations, w, h, ok ? "ok" : "FAILED", ms, magenta, lit, file.c_str());
+			}
+
+			// P5 / P8: CryPak open + read on the calling thread, watched by a 2 s watchdog thread.
+			void TimedRead(const char* what, size_t bytes)
+			{
+				const int gen = s_watch.fetch_add(1) + 1;
+				std::thread([gen, what]()
+				{
+					std::this_thread::sleep_for(std::chrono::seconds(2));
+					if (s_watch.load() == gen)
+						PLog("%s: STUCK, the open / read has not returned after 2 s (giving up waiting)", what);
+				}).detach();
+				const Clock::time_point t0 = Clock::now();
+				FILE* const f = gEnv->pCryPak->FOpen(s_openPath.c_str(), "rb");
+				const float openMs = std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
+				size_t got = 0;
+				if (f != nullptr)
+				{
+					std::vector<uint8> buf(bytes);
+					got = gEnv->pCryPak->FReadRaw(buf.data(), 1, bytes, f);
+					gEnv->pCryPak->FClose(f);
+				}
+				const float totalMs = std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
+				s_watch.fetch_add(1000); // invalidates the watchdog
+				PLog("%s: FOpen(%s) %s, read %u of %u bytes, open %.3f ms, total %.3f ms", what, s_openPath.c_str(), f != nullptr ? "ok" : "FAILED",
+					static_cast<unsigned>(got), static_cast<unsigned>(bytes), openMs, totalMs);
+			}
+
+			void SummariseLoopLocked(const char* why)
+			{
+				if (s_iterations == 0)
+					return;
+				std::vector<float> d = s_dts;
+				std::sort(d.begin(), d.end());
+				const float mn = d.empty() ? 0.f : d.front();
+				const float md = d.empty() ? 0.f : d[d.size() / 2];
+				const float mx = d.empty() ? 0.f : d.back();
+				uint32 over100 = 0;
+				for (float v : d)
+					over100 += v > 0.1f ? 1u : 0u;
+				PLog("P2 loop %d summary (%s): iterations %u, LoadtimeRender calls %u, dt ms min %.2f median %.2f max %.2f, dt>100ms %u, update failures %u, draw calls %u, loop thread %s",
+					s_loopIndex, why, s_iterations, s_renderCalls, mn * 1000.f, md * 1000.f, mx * 1000.f, over100, s_updateFails, s_drawCalls,
+					s_loopOnMainThread ? "MAIN" : "not main");
+				s_iterations = 0;
+				s_renderCalls = 0;
+				s_updateFails = 0;
+				s_drawCalls = 0;
+				s_dts.clear();
+			}
+
+			void LogP6(const char* where)
+			{
+				if (s_p6Player == nullptr)
+					return;
+				const uint64_t serial = s_p6Player->GetFrameSerial();
+				PLog("P6 %s: t=%.3f state=%d serial=%llu (+%llu) audioFramesConsumed=%llu audioFramesCounted=%llu clock=%s", where, s_p6Player->GetTime(), static_cast<int>(s_p6Player->GetState()),
+					static_cast<unsigned long long>(serial), static_cast<unsigned long long>(serial - s_p6LastSerial),
+					static_cast<unsigned long long>(s_p6Player->ProbeAudioFramesConsumed()),
+					static_cast<unsigned long long>(s_p6Player->ProbeAudioFramesCounted()), s_p6Player->ClockSourceName());
+				s_p6LastSerial = serial;
+			}
+
+			// M10b: listener events of the P6 player (scenario B: Ended once, dispatched on the main thread after the load)
+			struct SEventLog final : public IVideoPlayerListener
+			{
+				void OnEnded(IVideoPlayer& p) override { PLog("event Ended (player time %.3f)", p.GetTime()); }
+				void OnLooped(IVideoPlayer& p) override { PLog("event Looped (player time %.3f)", p.GetTime()); }
+				void OnError(IVideoPlayer&, int code, const char* message) override { PLog("event Error %d (%s)", code, message != nullptr ? message : ""); }
+			};
+			SEventLog s_eventLog;
+			IVideoPlayer* s_eventPlayer = nullptr;
+
+			// P7: a second callback added and removed from the main thread while the loop runs.
+			struct SDummy final : public ILoadtimeCallback
+			{
+				std::atomic<uint32> calls{ 0 };
+				std::atomic<bool> removed{ false };
+				std::atomic<uint32> callsAfterRemove{ 0 };
+				void LoadtimeUpdate(float) override
+				{
+					++calls;
+					if (removed.load())
+						++callsAfterRemove;
+				}
+				bool LoadtimeRender() override { return true; }
+			};
+			SDummy s_dummy;
+			bool s_p7Done = false;
+
+			struct SCallback final : public ILoadtimeCallback
+			{
+				void LoadtimeUpdate(float dt) override
+				{
+					std::lock_guard<std::mutex> lock(s_mutex);
+					const Clock::time_point now = Clock::now();
+					if (!s_haveLastCall || std::chrono::duration<float>(now - s_lastCall).count() > kNewLoopGap)
+					{
+						SummariseLoopLocked("gap");
+						++s_loopIndex;
+						s_loopOnMainThread = CryGetCurrentThreadId() == gEnv->mMainThreadId;
+						PLog("loop %d: first LoadtimeUpdate, dt %.2f ms", s_loopIndex, dt * 1000.f);
+					}
+					s_lastCall = now;
+					s_haveLastCall = true;
+					++s_iterations;
+					s_dts.push_back(dt);
+
+					char desc[256];
+					const int state = TexState(desc, sizeof(desc));
+					if (state != s_lastTexState)
+					{
+						PLog("P3 loop %d iteration %u: texture state %d -> %d (%s)", s_loopIndex, s_iterations, s_lastTexState, state, desc);
+						s_lastTexState = state;
+					}
+					if (state == 1)
+					{
+						FillTexture(s_iterations);
+						gEnv->pRenderer->UpdateTextureInVideoMemory(static_cast<uint32>(s_texId), reinterpret_cast<unsigned char*>(s_texBuf.data()), 0, 0, kTexSize, kTexSize, eTF_R8G8B8A8);
+					}
+					else
+						++s_updateFails;
+
+					if (s_drawMode == 2 && state == 1)
+						DrawTexture();
+
+					if (s_p8Pending.exchange(false))
+						TimedRead("P8 first iteration after LOADINGSCREEN", kHeaderBytes);
+					if (s_iterations == kOpenAtIteration)
+						TimedRead("P5 iteration 30", kReadBytes);
+					if (s_iterations == 60)
+						ReadBack(s_drawMode == 1 ? "render" : (s_drawMode == 2 ? "update" : "nodraw"));
+
+					if (s_p6Player != nullptr && (s_iterations % 10) == 1)
+					{
+						char where[64];
+						cry_sprintf(where, "loop %d iteration %u", s_loopIndex, s_iterations);
+						LogP6(where);
+					}
+					if ((s_iterations % 10) == 1)
+					{
+						char where[64];
+						cry_sprintf(where, "loop %d iteration %u", s_loopIndex, s_iterations);
+						LogSnapshot(where, s_p6Surface);
+						LogSnapshot(where, s_openSurface);
+					}
+				}
+
+				bool LoadtimeRender() override
+				{
+					std::lock_guard<std::mutex> lock(s_mutex);
+					++s_renderCalls;
+					if (s_drawMode == 1 && s_lastTexState == 1)
+						DrawTexture();
+					return true;
+				}
+			};
+			SCallback s_callback;
+
+			struct SListener final : public ISystemEventListener
+			{
+				void OnSystemEvent(ESystemEvent event, UINT_PTR, UINT_PTR) override
+				{
+					const char* name = nullptr;
+					switch (event)
+					{
+					case ESYSTEM_EVENT_LEVEL_LOAD_PREPARE: name = "LEVEL_LOAD_PREPARE"; break;
+					case ESYSTEM_EVENT_LEVEL_LOAD_START_PRELOADINGSCREEN: name = "LEVEL_LOAD_START_PRELOADINGSCREEN"; break;
+					case ESYSTEM_EVENT_LEVEL_LOAD_START_LOADINGSCREEN: name = "LEVEL_LOAD_START_LOADINGSCREEN"; break;
+					case ESYSTEM_EVENT_LEVEL_LOAD_LOADINGSCREEN_ACTIVE: name = "LEVEL_LOAD_LOADINGSCREEN_ACTIVE"; break;
+					case ESYSTEM_EVENT_LEVEL_LOAD_START: name = "LEVEL_LOAD_START"; break;
+					case ESYSTEM_EVENT_LEVEL_LOAD_ENTITIES: name = "LEVEL_LOAD_ENTITIES"; break;
+					case ESYSTEM_EVENT_LEVEL_LOAD_END: name = "LEVEL_LOAD_END"; break;
+					case ESYSTEM_EVENT_LEVEL_LOAD_ERROR: name = "LEVEL_LOAD_ERROR"; break;
+					case ESYSTEM_EVENT_LEVEL_PRECACHE_START: name = "LEVEL_PRECACHE_START"; break;
+					case ESYSTEM_EVENT_LEVEL_PRECACHE_FIRST_FRAME: name = "LEVEL_PRECACHE_FIRST_FRAME"; break;
+					case ESYSTEM_EVENT_LEVEL_PRECACHE_END: name = "LEVEL_PRECACHE_END"; break;
+					case ESYSTEM_EVENT_LEVEL_GAMEPLAY_START: name = "LEVEL_GAMEPLAY_START"; break;
+					case ESYSTEM_EVENT_LEVEL_UNLOAD_START: name = "LEVEL_UNLOAD_START"; break;
+					case ESYSTEM_EVENT_LEVEL_UNLOAD: name = "LEVEL_UNLOAD"; break;
+					case ESYSTEM_EVENT_LEVEL_POST_UNLOAD: name = "LEVEL_POST_UNLOAD"; break;
+					default: return;
+					}
+					float sinceCall = -1.f;
+					{
+						std::lock_guard<std::mutex> lock(s_mutex);
+						if (s_haveLastCall)
+							sinceCall = std::chrono::duration<float>(Clock::now() - s_lastCall).count();
+					}
+					char desc[256];
+					TexState(desc, sizeof(desc));
+					PLog("event %s: last callback %.1f ms ago, texture %s", name, sinceCall * 1000.f, desc);
+
+					if (event == ESYSTEM_EVENT_LEVEL_LOAD_START_LOADINGSCREEN)
+					{
+						s_p8Pending = true;
+						if (!s_openSurface.empty())
+						{
+							if (const CryTexSourceApi* const api = ContractApi())
+							{
+								CryTexSourceOpen options = {};
+								options.size = sizeof(options);
+								options.flags = 1u | 2u; // autoplay, loop
+								options.volume = 1.f;
+								const int r = api->open(s_openSurface.c_str(), s_openSrc.c_str(), &options);
+								s_opened = s_opened || r == 1;
+								PLog("C: contract open(<%s>, <%s>, autoplay loop) at LOADINGSCREEN returned %d, HasPendingCommands %d", s_openSurface.c_str(), s_openSrc.c_str(), r,
+									Contract::HasPendingCommands() ? 1 : 0);
+							}
+							LogSnapshot("at LOADINGSCREEN", s_openSurface);
+						}
+						if (!s_p6Surface.empty() && mEnv->pManager != nullptr)
+						{
+							s_p6Player = static_cast<CVideoPlayerImpl*>(mEnv->pManager->FindPlayerBySurface(s_p6Surface.c_str()));
+							if (s_p6Player != nullptr)
+							{
+								s_p6LastSerial = s_p6Player->GetFrameSerial();
+								if (s_eventPlayer != s_p6Player)
+								{
+									s_p6Player->AddListener(&s_eventLog);
+									s_eventPlayer = s_p6Player;
+								}
+							}
+							LogP6("at LOADINGSCREEN");
+						}
+					}
+					if (event == ESYSTEM_EVENT_LEVEL_LOAD_START)
+					{
+						if (!s_destroySurface.empty() && mEnv->pManager != nullptr)
+						{
+							PLog("G: destroying surface <%s> on the main thread at LEVEL_LOAD_START (cev_play_surface <id>)", s_destroySurface.c_str());
+							if (s_p6Player != nullptr && stricmp(s_p6Surface.c_str(), s_destroySurface.c_str()) == 0)
+								s_p6Player = nullptr;
+							mEnv->pManager->ConsolePlaySurface(s_destroySurface.c_str(), nullptr, false);
+							PLog("G: destroyed; players %u, loading-loop callback registered %d", mEnv->pManager->GetPlayerCount(), mEnv->pManager->LoadtimeRegistered() ? 1 : 0);
+						}
+						if (!s_p7Done)
+						{
+							s_p7Done = true;
+							const Clock::time_point t0 = Clock::now();
+							gEnv->pRenderer->AddLoadtimeCallback(&s_dummy, 150);
+							const float addMs = std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
+							CrySleep(200);
+							const uint32 before = s_dummy.calls.load();
+							const Clock::time_point t1 = Clock::now();
+							gEnv->pRenderer->RemoveLoadtimeCallback(&s_dummy);
+							const float removeMs = std::chrono::duration<float, std::milli>(Clock::now() - t1).count();
+							s_dummy.removed = true;
+							PLog("P7: AddLoadtimeCallback(dummy, 150) returned in %.3f ms; dummy called %u times in 200 ms; RemoveLoadtimeCallback returned in %.3f ms (calls at remove %u)",
+								addMs, before, removeMs, s_dummy.calls.load());
+						}
+						if (s_stallMs > 0)
+						{
+							PLog("stall: main thread sleeps %d ms (simulated long load)", s_stallMs);
+							CrySleep(static_cast<unsigned>(s_stallMs));
+							PLog("stall: done");
+						}
+					}
+					if (event == ESYSTEM_EVENT_LEVEL_LOAD_END || event == ESYSTEM_EVENT_LEVEL_GAMEPLAY_START || event == ESYSTEM_EVENT_LEVEL_POST_UNLOAD)
+					{
+						if (s_p7Done)
+							PLog("P7 check: dummy calls %u, calls after remove %u", s_dummy.calls.load(), s_dummy.callsAfterRemove.load());
+						LogP6(name);
+						LogSnapshot(name, s_p6Surface);
+						LogSnapshot(name, s_openSurface);
+					}
+				}
+			};
+			SListener s_listener;
+
+			void Off()
+			{
+				if (!s_on)
+					return;
+				gEnv->pRenderer->RemoveLoadtimeCallback(&s_callback);
+				gEnv->pSystem->GetISystemEventDispatcher()->RemoveListener(&s_listener);
+				{
+					std::lock_guard<std::mutex> lock(s_mutex);
+					SummariseLoopLocked("off");
+				}
+				if (s_texId > 0)
+					gEnv->pRenderer->RemoveTexture(static_cast<unsigned int>(s_texId));
+				s_texId = 0;
+				s_p6Player = nullptr;
+				if (s_eventPlayer != nullptr && mEnv->pManager != nullptr && mEnv->pManager->IsPlayer(s_eventPlayer))
+					s_eventPlayer->RemoveListener(&s_eventLog);
+				s_eventPlayer = nullptr;
+				if (s_opened && !s_openSurface.empty())
+				{
+					if (const CryTexSourceApi* const api = ContractApi())
+						api->close(s_openSurface.c_str());
+					PLog("C: contract close(<%s>)", s_openSurface.c_str());
+				}
+				s_opened = false;
+				s_openSurface.clear();
+				s_destroySurface.clear();
+				s_on = false;
+				PLog("off: callback removed, texture released");
+			}
+		}
+
+		void Cmd(IConsoleCmdArgs* args)
+		{
+			if (gEnv == nullptr || gEnv->pRenderer == nullptr || gEnv->IsDedicated())
+				return;
+			// P4 positive control in normal frames (main thread): "draw" submits the probe texture into the current frame,
+			// "readback" reads the presented frame the same way the loop does.
+			if (args != nullptr && args->GetArgCount() >= 2 && s_on && s_texId > 0)
+			{
+				if (std::strcmp(args->GetArg(1), "draw") == 0)
+				{
+					DrawTexture();
+					return;
+				}
+				if (std::strcmp(args->GetArg(1), "readback") == 0)
+				{
+					ReadBack("control");
+					return;
+				}
+			}
+			const bool available = RenderBridge::LoadtimeAvailable();
+			PLog("P1: load-time callbacks (XUI2D_Patched bit 7) %s", available ? "SET" : "not set");
+			if (args == nullptr || args->GetArgCount() < 2 || std::atoi(args->GetArg(1)) == 0)
+			{
+				Off();
+				return;
+			}
+			if (!available)
+			{
+				PLog("unavailable: the renderer does not report load-time callbacks");
+				return;
+			}
+			if (s_on)
+				Off();
+			s_stallMs = args->GetArgCount() > 2 ? std::atoi(args->GetArg(2)) : 0;
+			s_drawMode = args->GetArgCount() > 3 ? std::atoi(args->GetArg(3)) : 1;
+			s_p6Surface = args->GetArgCount() > 4 && std::strcmp(args->GetArg(4), "-") != 0 ? args->GetArg(4) : "";
+			s_readbackDir = args->GetArgCount() > 5 && std::strcmp(args->GetArg(5), "-") != 0 ? args->GetArg(5) : "";
+			if (args->GetArgCount() > 6)
+			{
+				const std::string mode = args->GetArg(6);
+				if (mode.compare(0, 5, "open:") == 0 && mode.find(':', 5) != std::string::npos)
+				{
+					const size_t colon = mode.find(':', 5);
+					s_openSurface = mode.substr(5, colon - 5);
+					s_openSrc = mode.substr(colon + 1);
+				}
+				else if (mode.compare(0, 8, "destroy:") == 0)
+					s_destroySurface = mode.substr(8);
+			}
+			s_texBuf.assign(static_cast<size_t>(kTexSize) * kTexSize, 0xFFFF00FFu);
+			s_texId = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(reinterpret_cast<unsigned char*>(s_texBuf.data()), kTexSize, kTexSize, eTF_R8G8B8A8, eTF_R8G8B8A8, 0,
+				false, FILTER_BILINEAR, 0, "$CevProbeLoadtime", FT_NOMIPS));
+			{
+				std::lock_guard<std::mutex> lock(s_mutex);
+				s_loopIndex = 0;
+				s_iterations = 0;
+				s_dts.clear();
+				s_haveLastCall = false;
+				s_lastTexState = -1;
+			}
+			s_p7Done = false;
+			gEnv->pSystem->GetISystemEventDispatcher()->RegisterListener(&s_listener, "CEVPlayerLoadtimeProbe");
+			gEnv->pRenderer->AddLoadtimeCallback(&s_callback, 100);
+			s_on = true;
+			char desc[256];
+			TexState(desc, sizeof(desc));
+			PLog("on: callback registered (order 100), stall %d ms, draw mode %d, P6 surface <%s>, open <%s> <%s>, destroy <%s>, texture %s", s_stallMs, s_drawMode, s_p6Surface.c_str(),
+				s_openSurface.c_str(), s_openSrc.c_str(), s_destroySurface.c_str(), desc);
+		}
+
+		void Shutdown()
+		{
+			if (gEnv != nullptr && gEnv->pRenderer != nullptr)
+				Off();
+		}
+	}
+#endif
+
 	void TickRunScript() { RunScript::Tick(); }
 	void ShutdownRunScript() { RunScript::Shutdown(); }
 
 	void DevProbesBeforeRender() { DevProbe::BeforeRender(); }
 	void DevProbesAfterRender() { DevProbe::AfterRender(); }
-	void DevProbesShutdown() { DevProbe::Shutdown(); }
+	void DevProbesShutdown()
+	{
+		DevProbe::Shutdown();
+#if CEV_HAVE_LOADTIME_CALLBACKS
+		LoadtimeProbe::Shutdown(); // removes the probe's loading-loop callback (main thread) before the renderer goes
+#endif
+	}
 
 	namespace
 	{
@@ -598,9 +1142,17 @@ namespace CEVPlayer
 			mEnv->pManager->ConsolePlaySurface(args->GetArg(1), args->GetArgCount() > 2 ? args->GetArg(2) : nullptr, loop);
 		}
 
+		//! M10: one line on the loading-loop state (cev_info, cev_surfaces).
+		void LogLoadtimeState(const char* cmd)
+		{
+			LogAlways("%s: loadtime: available=%d registered=%d cev_loadtime=%d", cmd, RenderBridge::LoadtimeAvailable() ? 1 : 0,
+				mEnv->pManager != nullptr && mEnv->pManager->LoadtimeRegistered() ? 1 : 0, mEnv->m_cevLoadtime);
+		}
+
 		void CmdSurfaces(IConsoleCmdArgs*)
 		{
 			Contract::LogSurfaces();
+			LogLoadtimeState("cev_surfaces");
 		}
 
 		void CmdContractSelfTest(IConsoleCmdArgs* args)
@@ -633,6 +1185,7 @@ namespace CEVPlayer
 				kVideoPlayerInterfaceVersion, kPluginCaps, Contract::ApiVersion(), Contract::SurfaceCount(), mEnv->pManager != nullptr ? mEnv->pManager->GetPlayerCount() : 0u);
 			LogAlways("cev_info: API table %u controls, %u queries, %u events; %u FlowGraph node classes",
 				static_cast<unsigned>(Api::Controls().size()), static_cast<unsigned>(Api::Queries().size()), static_cast<unsigned>(Api::Events().size()), Api::FlowNodeCount());
+			LogLoadtimeState("cev_info");
 		}
 
 		void CmdFlowTest(IConsoleCmdArgs* args)
@@ -681,6 +1234,9 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_hidden_bench", CmdHiddenBench, VF_NULL, "Measurement: cev_hidden_bench <path> [cycles] [hidden s] [visible s] plays into surface CevBench and toggles a consumer hint hidden / visible, logs the catch-up of every cycle");
 		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");
 		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> draws the surface's texture top left as it is (an R8 packed texture shows the planes in grey); no argument = off");
+#if CEV_HAVE_LOADTIME_CALLBACKS
+		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>] registers an order-100 loading-loop callback that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
+#endif
 		REGISTER_COMMAND("cev_stats_file", DevProbe::CmdStatsFile, VF_NULL, "Measurement: cev_stats_file <path>|off writes the per-second cev_stats rows as CSV (turns cev_stats on)");
 
 		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log and draw a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");
@@ -697,6 +1253,7 @@ namespace CEVPlayer
 		ConsoleRegistrationHelper::Register("cev_volume", &mEnv->m_cevVolume, 1.f, VF_NULL, "Master volume of all videos (0.0 - 1.0), multiplied with the player volume");
 		REGISTER_CVAR2("cev_allowPlanar", &mEnv->m_cevAllowPlanar, 1, VF_NULL, "1 = surface players switch to a packed planar texture (R8: Y, U, V [, A]) while every consumer of the texture source contract accepts it; 0 = always RGBA8");
 		ConsoleRegistrationHelper::Register("cev_hiddenStopSeconds", &mEnv->m_cevHiddenStopSeconds, 2.f, VF_NULL, "Surface players that no consumer sees only decode (no copy / conversion / upload); after this many seconds hidden in a row they stop decoding the video. 0 = never stop");
+		REGISTER_CVAR2("cev_loadtime", &mEnv->m_cevLoadtime, 1, VF_NULL, "Keep texture-only players running during level loading screens (needs a renderer with load-time callbacks). 0 = pause everything while a level loads");
 	}
 
 	void UnregisterConsole()
@@ -709,8 +1266,11 @@ namespace CEVPlayer
 		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
+#if CEV_HAVE_LOADTIME_CALLBACKS
+		pConsole->RemoveCommand("cev_probe_loadtime");
+#endif
 
-		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_decodeMode", "cev_decodeAutoMinHeight", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds", "cev_allowPlanar" };
+		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_decodeMode", "cev_decodeAutoMinHeight", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds", "cev_allowPlanar", "cev_loadtime" };
 		for (const char* name : variables)
 			pConsole->UnregisterVariable(name, true);
 	}

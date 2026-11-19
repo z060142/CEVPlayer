@@ -5,6 +5,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <atomic>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -47,6 +49,35 @@ namespace CEVPlayer
 		void UpdateBeforeRender(float dt);
 		//! UpdateAfterRender: draws the fullscreen outputs on top of the frame and the stats overlay.
 		void UpdateAfterRender();
+		//! M10: the tick of the renderer's loading loop (render thread, LoadtimeUpdate of the order-100 callback). Applies
+		//! the queued contract commands and ticks the players that run during loads (RunsDuringLoad). No listener
+		//! dispatch: events stay queued until the first UpdateBeforeRender after the load. No engine timer is read.
+		void LoadtimeTick(float dt);
+		//! M10: adds / removes the loading-loop callback depending on intent (live players or queued contract commands).
+		//! Main thread only; a call from another thread returns at once. The decision is made under the tick lock, the
+		//! engine call (Add / Remove) without any lock: it must never run while this thread holds the tick lock (the
+		//! renderer's dispatch holds its registry lock while our callback waits for the tick lock). `forceRemove`:
+		//! shutdown.
+		void UpdateLoadtimeRegistration(bool forceRemove = false);
+		//! M10: players that output only to their texture keep running during level loads (cev_loadtime, callback
+		//! registered).
+		bool LoadModeActive() const;
+		bool LoadtimeRegistered() const { return m_loadtimeRegistered; }
+		//! M10: the lock every tick entry holds (main thread entries and the loading-loop tick never run at once). Take
+		//! it through CTickLock so the registration step can tell that this thread holds it.
+		std::recursive_mutex& TickMutex() { return m_tickMutex; }
+		class CTickLock
+		{
+		public:
+			explicit CTickLock(std::recursive_mutex& m);
+			~CTickLock();
+			CTickLock(const CTickLock&) = delete;
+			CTickLock& operator=(const CTickLock&) = delete;
+			//! Depth of CTickLock held by the calling thread.
+			static int HeldByThisThread();
+		private:
+			std::recursive_mutex& m_mutex;
+		};
 
 		// ---- engine events ----
 		void OnSystemEvent(ESystemEvent event, UINT_PTR wparam = 0);
@@ -91,6 +122,7 @@ namespace CEVPlayer
 	private:
 		class CConsoleListener;
 		class CLevelListener;
+		class CLoadtimeCallback;
 
 		CVideoPlayerImpl* Find(const IVideoPlayer* pPlayer) const;
 		void ReapZombies(bool force);
@@ -129,5 +161,11 @@ namespace CEVPlayer
 		float m_statsNextTime = 0.f;
 		double m_clock = 0.0;        // sum of the dt given to UpdateBeforeRender (stats timing)
 		std::vector<IVideoPlayer*> m_consoleSurfaces; // created by cev_play_surface
+
+		// M10: level loading loop
+		std::recursive_mutex m_tickMutex;
+		std::unique_ptr<CLoadtimeCallback> m_loadtimeCallback; // only with CEV_HAVE_LOADTIME_CALLBACKS
+		std::atomic<bool> m_loadtimeRegistered{ false }; // written by the main thread, read by LoadModeActive() on any thread
+		bool m_inLoadTick = false;   // set while LoadtimeTick runs (renderer calls are allowed then)
 	};
 }

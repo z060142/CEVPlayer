@@ -84,9 +84,13 @@ namespace CEVPlayer
 		void Tick(float dt);
 		//! Sends the queued events to the listeners (end of the frame update).
 		void DispatchEvents();
-		//! Level loading started / ended: pauses / resumes the clock without any renderer call.
-		void OnLevelLoadBegin();
+		//! Level loading started / ended: pauses / resumes the clock without any renderer call. keepRunning (M10): the
+		//! player runs in the loading loop, its clock is not paused.
+		void OnLevelLoadBegin(bool keepRunning);
 		void OnLevelLoadEnd();
+		//! M10: the player outputs only to its texture (not fullscreen, no material binding), so it can run in the
+		//! renderer's loading loop.
+		bool RunsDuringLoad() const { return !m_fullscreen && m_bindings.empty(); }
 		//! Stops decoding / audio and drops listeners and outputs that need no renderer. After this only
 		//! ReleaseRenderResources() and the destructor are valid.
 		void PrepareDestroy();
@@ -143,6 +147,10 @@ namespace CEVPlayer
 		//! "audio" while an audio voice drives the clock (AudioClock), "cue" while the playback position of the cue
 		//! trigger does, otherwise "internal" (wall clock / video clock).
 		const char* ClockSourceName() const { return m_voice >= 0 ? "audio" : (m_cueClock ? m_cueClock->SourceName() : "internal"); }
+		//! Measurement (M10a): audio frames the output device consumed through this player's AudioClock (0 without one).
+		uint64_t ProbeAudioFramesConsumed() const { return m_audioClock ? m_audioClock->FramesConsumed() : 0; }
+		//! Measurement (M10a): of those, the frames that counted as media time (decoded audio, not silence).
+		uint64_t ProbeAudioFramesCounted() const { return m_audioClock ? m_audioClock->FramesCounted() : 0; }
 		//! Level unload: a cue trigger is stopped (the engine drops the level's audio data).
 		void OnLevelUnload();
 		//! Lateness of the picture on screen against the clock (clock time - presented frame timestamp, ms).

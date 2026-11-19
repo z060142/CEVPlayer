@@ -41,6 +41,11 @@ The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3
 * Packed planar layouts `PACKED_YUV420` / `PACKED_YUVA420` (one `R8` texture) negotiated through `acceptLayouts`, RGBA
   conversion only when a consumer needs RGBA8, layout switches without reloading the video; `cev_allowPlanar`.
 * Self test `cev_contract_selftest`.
+* Level loading screens (M10): with a renderer that offers load-time callbacks (engine patch 17, `XUI2D_Patched` bit 7),
+  texture-only players run in the engine's loading loop (order-100 callback, its dt capped at 0.25 s) and contract
+  commands are applied there; fullscreen and material outputs pause; events are delivered after the load.
+  `cev_loadtime` (0 = old behaviour); `cev_info` / `cev_surfaces` report the state. A seek while paused now replaces the
+  picture once (`contentSerial` +1).
 
 ### Nodes and scripting
 

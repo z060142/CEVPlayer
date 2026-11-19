@@ -18,6 +18,10 @@ namespace CEVPlayer
 		//! Probes the renderer module for the optional "CEVPlayer_Patched" export once and logs the result once
 		//! ("stage 1" without it). Cheap after the first call.
 		void ProbeOnce();
+		//! M10: the renderer offers loading-loop callbacks (IRenderer::AddLoadtimeCallback, engine patch 17). Always
+		//! false without CEV_HAVE_LOADTIME_CALLBACKS; otherwise read once from the renderer module's export
+		//! `extern "C" int XUI2D_Patched()` (bit 7 = 128) and cached.
+		bool LoadtimeAvailable();
 		//! 1 = stock renderer (CPU conversion, aux fullscreen), 2 = patched renderer found. M1: always 1.
 		int Stage();
 

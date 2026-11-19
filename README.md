@@ -48,6 +48,12 @@ Licence: Boost Software License 1.0, see [LICENSE](LICENSE). Third-party librari
   * **Surface**: a named surface for UIs. The **surface id** is chosen by the author (1 to 63 of
     `A-Z a-z 0-9 _ . : -`, case insensitive, unique; creating a second player with the same id fails). It stays the
     same when the file, audio track, variant or size changes. The engine texture is named `$cev:<id>`.
+* **Level loading screens**: on a renderer with load-time callbacks (engine patch 17 of the CE_XTUI patch set, reported
+  by the renderer's `XUI2D_Patched` export), players that output only to their texture (surface and named-texture
+  players) keep playing, with sound, while the engine's loading loop runs; contract `open` / `control` sent during the
+  load are applied there. Fullscreen and material outputs pause until the load ends. On an unpatched engine, or with
+  `cev_loadtime 0`, every player pauses during the load and continues afterwards. The loading loop is paced by the
+  display (the engine forces vsync on during it), so video updates at the display's refresh rate at most.
 * **Texture-source contract for UI consumers**: `CEVPlayer.dll` exports `CryTexSource_v1` (contract version 2,
   specified in [docs/design/M6-ui-source.md](docs/design/M6-ui-source.md) §3; no shared header - a consumer copies the C
   declarations). A UI plug-in finds the export by scanning the loaded modules and then, per surface id:
@@ -213,6 +219,7 @@ the descriptor's folder.
 | `cev_variant` | -1 | variant for players loaded afterwards: -1 automatic, 0 main video, n = n-th `<Variant>` |
 | `cev_allowPlanar` | 1 | 0 = surfaces always stay RGBA8 even when every consumer accepts a packed planar layout |
 | `cev_hiddenStopSeconds` | 2.0 | surfaces no consumer sees stop decoding after this many seconds; 0 = never |
+| `cev_loadtime` | 1 | texture-only players keep running during level loading screens (needs a renderer with load-time callbacks); 0 = pause everything while a level loads |
 | `cev_cueForceFallback` | 0 | 1 = the cue route ignores the optional engine patch and follows the video clock |
 | `cev_stats` | 0 | 1 = log and draw a statistics line per player every second (timings, uploads, layout, decoder) |
 | `cev_log` | 0 | 1 = verbose log |
@@ -412,8 +419,9 @@ person; they are collected in [docs/manual-acceptance.md](docs/manual-acceptance
 ## Limitations and known issues
 
 * **Input is WebM only** at run time; other containers go through the editor's FFmpeg import.
-* **Nothing advances during level-loading screens** yet. Playback while the engine's loading loop runs needs an engine
-  mechanism that is being prepared elsewhere (milestone M10 in [docs/PLAN.md](docs/PLAN.md)).
+* **Level-loading screens**: only players that output to their texture alone keep playing during a load, and only on a
+  renderer with load-time callbacks (engine patch 17). Fullscreen and material outputs pause; on an unpatched engine
+  every player pauses during the load and continues afterwards. Listener events of the load are delivered after it.
 * **Sandbox edit mode**: the engine does not tick plug-ins there, so in-level videos (screen, material, surface) do not
   advance outside game mode. The editor's own preview is not affected.
 * **Hardware decode** exists only for VP9 and needs the "VP9 Video Extensions" package; it saves CPU time but costs more

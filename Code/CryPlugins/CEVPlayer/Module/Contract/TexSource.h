@@ -146,6 +146,8 @@ namespace CEVPlayer
 		};
 		//! Moves the queued commands into `out` (cleared first).
 		void TakeCommands(std::vector<SCommand>& out);
+		//! M10: true while commands are queued (read only: this table's own queue, no engine call).
+		bool HasPendingCommands();
 		//! The manager tells the table who owns a name: true = the player was made by `open` (its `close` destroys
 		//! it, a repeated `open` with the same `src` is a no-op), false = level logic made it (`open` returns 2).
 		void SetOwnedByOpen(const char* name, bool owned, const char* src);

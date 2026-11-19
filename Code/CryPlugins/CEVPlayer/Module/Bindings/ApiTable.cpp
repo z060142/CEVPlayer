@@ -14,6 +14,7 @@
 #include <CryRenderer/IRenderer.h>
 
 #include "ApiPlayers.h"
+#include "Player/PlayerManager.h"
 #include "Player/VideoPlayerImpl.h"
 
 namespace CEVPlayer
@@ -404,6 +405,10 @@ namespace CEVPlayer
 				LogWarning("api: %s called while the plug-in is not available (shut down), ignored", entry.name);
 				return false;
 			}
+			// M10: the same lock as the manager's tick entries (the loading-loop tick never runs at the same time)
+			std::unique_ptr<CPlayerManager::CTickLock> tickLock;
+			if (mEnv->pManager != nullptr)
+				tickLock = std::make_unique<CPlayerManager::CTickLock>(mEnv->pManager->TickMutex());
 
 			SValue args[kMaxParams];
 			for (uint32_t i = 0; i < entry.paramCount; ++i)
