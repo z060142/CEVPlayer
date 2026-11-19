@@ -1,5 +1,7 @@
 # M5 手動驗收清單：FFmpeg 轉檔（EditorCEVPlayer）
 
+> 2026-11-19 註記：本清單從未執行。之後的變動：FFmpeg 路徑改存在編輯器偏好設定頁 `CEVPlayer/FFmpeg`（`editor.json` 只在第一次啟動讀入一次），Info 欄的 FFmpeg 區塊只顯示狀態與「Open preferences」；最小版已發佈並釘進程式（`ffmpeg-minimal-v8.0.3-cev1`），下載鍵可用。與本清單衝突處以 [`manual-acceptance.md`](manual-acceptance.md) 第 5～6 節為準。
+
 對象：官方版 CRYENGINE 5.7.1（`D:/coding11/Cryengine_5.7.1`，Profile 建置）。自動化冒煙測試（`docs/design/M5-ffmpeg.md` §12）證明「偵測、轉檔、變體、批次、取消、拒絕訊息、不崩潰」；以下項目需要人眼確認對話框、操作手感與畫面。M4 清單（`manual-acceptance-M4.md`）仍然適用；本清單只列 M5 新增的部分。建議總時間約 20 分鐘。
 
 ## 0. 準備

@@ -142,6 +142,7 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
   | | `Info`——Handle；Get（或每幀）→ State、Time、Duration、Width、Height、HasAlpha、AudioTrack、Variant、DecodeBackend、FrameSerial、SurfaceId（A1 起 Language 改 AudioTrack） | State、Time、Duration、Width、Height、HasAlpha、AudioTrack、Variant |
   | | `Events`——Handle → Ready、Started、NewFrame、Marker、Looped、Ended、Skipped、Error | 不變 |
 
+- （2026-11-19 註記，PR 整理時對照程式：M7 起 `UI:PlayToSurface` 與 `Advanced:Settings` 多一個 `PauseDecodeWhenHidden` 輸入，`Advanced:Info` 多一個 `Error` 輸出，CryVS 的 `CEVPlayer::Advanced` 多 `SetPauseDecodeWhenHidden`；完整埠表以 README「Node sets」為準。）
 - 抽屜的位置：主抽屜 `CEVPlayer` 直接放兩個開箱即用節點，`UI` 與 `Advanced` 是它之下的子抽屜（使用者 2026-11-19：「把 basic 獨立抽屜取消放在主抽屜，Advanced 跟 UI 的抽屜保留放在主抽屜內，主抽屜改名 CEVPlayer」）。CryVS 的全域函式命名空間對應為 `CEVPlayer`、`CEVPlayer::UI`、`CEVPlayer::Advanced`（目錄路徑 `Function::CEVPlayer::…`）。
 - 取消：`TextureName`（名詞消失）、`InterfaceVersion` 與 `Caps`（開發者資訊，改由主控台 `cev_info` 顯示）。事件與查詢的幀序號改以字串輸出，不再 2^31 回繞。
 - 描述表仍是單一事實來源：腳本綁定（Schematyc 函式、CryVS）維持一項一個函式——程式裡細粒度是正常的；合併只發生在 FlowGraph 節點這一層（複合節點由手寫的描述組合表內的函式）。Schematyc 元件 `Video Player` 的屬性對應同一組名詞（Output、SurfaceID、Decode、Loop、Autoplay、Skippable）。

@@ -1,5 +1,7 @@
 # M4 手動驗收清單：EditorCEVPlayer（Sandbox 影片資產編輯器）
 
+> 2026-11-19 註記：本清單寫於 E1／E2／A1 之前，從未執行。之後的變動：預覽改為一般 Qt 元件（不是 `QViewport`，沒有 `viewport created / destroyed` log）、Info 欄描述檔改為 property tree（沒有 Apply 鍵）、匯入選項「音訊語言」改為「Audio track name」（預設 `main`）、「Open folder」鍵已移除。與本清單衝突處以 [`manual-acceptance.md`](manual-acceptance.md) 第 4～5 節為準。
+
 對象：官方版 CRYENGINE 5.7.1（`D:/coding11/Cryengine_5.7.1`，Profile 建置）。自動化冒煙測試只證明「外掛載入、視窗能開關、匯入產生檔案、不崩潰」；以下項目需要人眼確認畫面與操作手感。建議總時間約 15 分鐘。
 
 ## 0. 準備
