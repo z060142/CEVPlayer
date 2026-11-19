@@ -23,15 +23,26 @@
 
 ## 3. 貼圖來源契約（`CryTexSource`）
 
-發現方式：來源 DLL 匯出 `CryTexSource_v1`；消費端掃描行程已載入的模組，逐一 `GetProcAddress`。回傳的 `CryTexSourceApi::version` 是來源支援的最高版本；結構只在尾端加欄位，雙方以 `size`／`version` 判斷可用的部分。v1 是 docs/09 §9.3 已定的內容；**v2 是下面尾端新增的部分**（提案，待消費端審）。
+發現方式：來源 DLL 匯出 `CryTexSource_v1`；消費端掃描行程已載入的模組，逐一 `GetProcAddress`。回傳的 `CryTexSourceApi::version` 是來源支援的最高版本；結構只在尾端加欄位。v1 是 docs/09 §9.3 已定的內容；**v2 是下面尾端新增的部分**（2026-11-19 經 XTFrame 主線審過，十二點修訂已納入；消費端的副本在 CE 倉 docs/09 §9.11）。
 
 ```c
-/* All calls: main thread only. Strings: UTF-8. Names are surface ids, compared case-insensitively. */
+/* Threading: all calls come from one thread at a time - the consumer's UI update thread. That is
+   the main thread, except during level loading as specified in <loading doc, pending>. The source
+   must not assume the engine main thread.
+   Strings: UTF-8, valid only for the duration of the call. Names are surface ids, compared
+   case-insensitively.
+   Sizes: every struct starts with `size` (set by whoever allocates it). Neither side reads or writes
+   a field that lies beyond the other side's `size`; fields that were not written keep the caller's
+   zero-initialised value. */
 
 enum { CTS_LAYOUT_RGBA8 = 0,          /* one RGBA8 texture, premultiplied per flags bit0 */
        CTS_LAYOUT_PACKED_YUV420 = 1,  /* one R8 texture: Y on top, U and V side by side below */
-       CTS_LAYOUT_PACKED_YUVA420 = 2, /* same, plus a straight-alpha plane below */
+       CTS_LAYOUT_PACKED_YUVA420 = 2, /* same, plus an alpha plane below */
        CTS_LAYOUT_NV12 = 3 };         /* reserved: two textures (R8 luma, R8G8 chroma) */
+
+enum { CTS_SITING_LEFT = 0,           /* chroma co-sited with the left luma column, centred vertically (MPEG-2 style) */
+       CTS_SITING_CENTER = 1,         /* centred both ways (JPEG / MPEG-1 style) */
+       CTS_SITING_TOPLEFT = 2 };      /* co-sited with the top-left luma sample */
 
 typedef struct CryTexSourceRect { int32_t x, y, w, h; } CryTexSourceRect;   /* texels */
 
@@ -40,27 +51,32 @@ typedef struct CryTexSourceInfo {       /* out */
     uint32_t size;
     int32_t  textureId;       /* engine texture id, 0 when there is none right now */
     int32_t  width, height;   /* picture size in pixels (not the packed texture's size) */
-    uint32_t flags;           /* bit0 premultiplied (RGBA8 only), bit1 has alpha, bit2 playing */
-    uint64_t contentSerial;   /* increases whenever the pixels were replaced; never decreases */
+    uint32_t flags;           /* bit0 premultiplied (RGBA8), bit1 has alpha, bit2 playing,
+                                 bit3 (v2) planar colour planes are already multiplied by alpha */
+    uint64_t contentSerial;   /* increases whenever the pixels were replaced AND whenever
+                                 `generation` changes; never decreases */
     /* v2 */
     uint32_t generation;      /* +1 whenever textureId, the texture size or layout changed */
     uint32_t layout;          /* CTS_LAYOUT_* */
     uint32_t colorMatrix;     /* 0 BT.601, 1 BT.709 (planar layouts) */
     uint32_t colorRange;      /* 0 limited (16-235), 1 full (planar layouts) */
+    uint32_t chromaSiting;    /* CTS_SITING_* (planar layouts) */
     int32_t  textureId2;      /* second texture of a two-texture layout, else 0 */
     CryTexSourceRect planeY, planeU, planeV, planeA;   /* rects inside textureId (packed layouts) */
     uint32_t state;           /* 0 none, 1 loading, 2 ready, 3 playing, 4 paused, 5 ended, 6 error */
     int32_t  errorCode;       /* source-defined, 0 = none */
     double   timeSeconds, durationSeconds;   /* the source's clock (audio master) */
+    uint32_t loopCount;       /* +1 on every wrap of a looping video */
 } CryTexSourceInfo;
 
 typedef struct CryTexSourceHint {       /* in */
     /* v1 */
-    uint32_t size;
-    uint32_t flags;           /* bit0 visible on screen this frame */
+    uint32_t size;            /* a hint with flags = 0 and pixelWidth = pixelHeight = 0 from a v2
+                                 consumer that also sets `release` means "I stopped using the name" */
+    uint32_t flags;           /* bit0 visible on screen this frame, bit1 (v2) release */
     int32_t  pixelWidth, pixelHeight;   /* largest on-screen size it is sampled at, 0 = unknown */
     /* v2 */
-    uint64_t consumer;        /* any value unique to the calling consumer (e.g. an address) */
+    uint64_t consumer;        /* unique per consumer (e.g. an address); 0 = anonymous v1 consumer */
     uint32_t acceptLayouts;   /* bit n = can sample CTS_LAYOUT_n; 0 means RGBA8 only */
 } CryTexSourceHint;
 
@@ -79,7 +95,9 @@ typedef struct CryTexSourceApi {
     int  (*query)(const char* name, CryTexSourceInfo* out);            /* 1 = name is ours, out filled */
     void (*hint)(const char* name, const CryTexSourceHint* hint);      /* advisory */
     /* v2 */
-    int  (*open)(const char* name, const char* src, const CryTexSourceOpen* options); /* 1 = taken */
+    /* 0 = not taken; 1 = opened, owned by this name's opener (who must `close`);
+       2 = the name already exists and is not owned by this open - attach by `query`, do not `close`. */
+    int  (*open)(const char* name, const char* src, const CryTexSourceOpen* options);
     void (*close)(const char* name);
     int  (*control)(const char* name, uint32_t verb, double value);    /* intent; 0 = refused */
 } CryTexSourceApi;
@@ -88,12 +106,16 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 ```
 
 規則：
-1. **名字＝Surface ID**。來源以它查自己的登錄表；`open` 的 `name` 由消費端給（作者自選的 id，或消費端為 `<video src>` 產生的），`src` 是已解析的 CryPak 路徑。`open` 開的播放器屬於那個名字，`close` 銷毀；關卡邏輯（節點／元件）開的播放器不能被 `close`。
-2. **消費端每幀 `query`**；回 0（名字不存在、來源已關閉）時顯示透明並放掉貼圖參考——兩個插件之間沒有關機順序的協調，靠這條。`generation` 改變時重新取貼圖並更新固有尺寸。
-3. **`hint` 以 `(name, consumer)` 累計**：任一消費端可見即可見；像素大小取最大；**所有**活著的消費端都接受某個平面排列時才用它。超過 2 秒沒有再送 hint 的消費端視為離開。沒有任何消費端送過 hint 的名字＝只有 RGBA8（不經契約的 UI、材質、全螢幕、編輯器預覽都屬於這一類）。
-4. 排列切換（RGBA8 ↔ 打包平面）不重新載入影片、聲音不中斷：只重建貼圖，`generation`＋1（§5.2）。
-5. 平面排列的 alpha 是 straight；消費端轉色後輸出預乘。RGBA8 維持預乘（bit0＝1）。
-6. `control` 是意圖，來源可以拒絕；時鐘永遠是來源的（聲音為主）。
+1. **名字＝Surface ID**。來源以它查自己的登錄表。`open` 的 `name` 由消費端給（作者自選的 id，或消費端為 `<video src>` 產生的），`src` 是已解析的 CryPak 路徑。回 1 的播放器屬於這次 `open`，由開的人 `close`；回 2 表示關卡邏輯（節點／元件）已經用同一個 ID 建了播放器——消費端以 `query` 接上，不得 `close`。兩個來源對同一個名字都回應 `query` 時，模組掃描順序在前者為準。
+2. **`open` 不阻塞**：只做便宜的容器辨識就返回；開檔與解碼器建立是非同步的，期間 `state`＝loading，失敗以 `state`＝error＋`errorCode` 呈現。消費端只在回 0 時問下一個來源，之後的錯誤不再轉交。
+3. **消費端每幀 `query`**；回 0（名字不存在、來源已關閉）時顯示透明並放掉貼圖參考——兩個插件之間沒有關機順序的協調，靠這條。`generation` 改變時重新取貼圖並更新固有尺寸（`contentSerial` 同時也會變）。
+4. **模組生命週期**：消費端對保留其 API 的模組持有一個模組參考；名字解析不到或 `open` 無人接手時重新掃描，至多每秒一次。來源的插件關閉之後，匯出函式必須仍可呼叫到行程結束：`query`／`open`／`control` 回 0、`hint`／`close` 不做事。
+5. **`hint` 以 `(name, consumer)` 累計**：活著的消費端在持有名字的每一幀都送 hint（不可見時 visible＝0）。任一可見即可見；像素大小取最大；**所有**活著的消費端都接受某個平面排列時才用它。`consumer`＝0 是匿名的 v1 消費端，算作一個只接受 RGBA8 的消費端。消費端離開：明確送 `release`，或在來源自己被 tick 的連續 120 次更新裡都沒有送 hint（不以牆鐘計——主執行緒卡住時不會誤判）。沒有任何消費端送過 hint 的名字＝只有 RGBA8（不經契約的 UI、材質、全螢幕、編輯器預覽都屬於這一類）。
+6. 排列切換（RGBA8 ↔ 打包平面）不重新載入影片、聲音不中斷：只重建貼圖，`generation`＋1（§5.2）。
+7. **色彩**：v2 只有 8 位元、SDR、sRGB 傳遞函數；其他內容由來源轉換或以 RGBA8 提供。平面排列的色彩平面是否已乘 alpha 由 `flags` bit3 回報（未乘的 straight 色彩經雙線性取樣在 alpha＝0 的邊緣可能出現暈邊——消費端依 bit3 選擇正確的合成）；消費端的輸出一律是預乘。4:2:0 的色度位置由 `chromaSiting` 回報。RGBA8 維持預乘（bit0＝1）。
+8. **打包排列沒有 mip**：縮小顯示時的品質靠依畫面大小選變體（§5.4）。
+9. `control` 是意圖，來源可以拒絕；時鐘永遠是來源的（聲音為主）。SEEK 是盡力而為的幀精確，`timeSeconds` 回報實際位置；`state`＝loading 時的 SEEK 會被記住；RATE 超出支援範圍回 0。循環時不會出現 ended——以 `loopCount` 得知每次回繞。
+10. **CEVPlayer 的實作方式**（為了規則裡的執行緒條款）：契約的函式不呼叫任何引擎 API。`query` 讀播放器在自己 tick 結尾寫好的快照；`hint` 只記錄；`open`／`close`／`control` 排進佇列，在下一次 tick 套用。所有引擎呼叫（貼圖建立與上傳、聲音、檔案）都發生在 CEVPlayer 自己的 tick。
 
 ## 4. 對外介面（M6）
 
@@ -150,7 +172,7 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 
 | 里程碑 | 內容 | 驗收 |
 |---|---|---|
-| 階段 0 | 只量不改產品行為：`eTF_R8` 上傳、UI 是否同一幀取到新畫面、MF 硬解在本機是否成立、基準表 | 四個答案與基準表寫進 `docs/research/05-ui-source-baseline.md` |
+| 階段 0 | 只量不改產品行為：`eTF_R8` 上傳、UI 是否同一幀取到新畫面、MF 硬解在本機是否成立、現行 CPU 轉色採用的色度位置與素材標記（決定 `chromaSiting` 的回報值）、基準表 | 五個答案與基準表寫進 `docs/research/05-ui-source-baseline.md` |
 | M6 | Surface ID 登錄表、契約 v1 `query`、舊節點刪除、兩個抽屜、介面版本 5、文件改寫 | UI 與節點各寫同一個 ID 就出畫面（RGBA8）；換檔／換語言後不需重新接線；重複 ID 被拒；沒有消費端插件時全部功能照舊；Core 自測與 `cev_apitest` 過 |
 | M7 | `hint`：可見性（§5.3）、開始時選變體、匯入 `-g`、結尾判定、量測欄位；契約 v2 的 `state`／時間與 `open`／`close`／`control` | 暫停時 `contentSerial` 不動；不可見時複製／轉色／上傳為零、2 秒後解碼為零、重新可見的補解時間有上限；`<video src>` 經由 `open` 播放 |
 | M8 | 打包排列、按需 RGBA、`eTF_R8` 上傳、`acceptLayouts` 協商 | 兩種排列的畫面在消費端逐像素比對差 ≤ 2 級；協商切換時聲音不中斷；基準表更新為實測 |
