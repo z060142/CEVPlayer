@@ -1,0 +1,3 @@
+# <variant> <full commit sha>  (informational; trees are identified by BASE_FILES.<variant>, see tools/apply_patches.sh)
+vanilla   86736a0e731e6382f2f1967e7892230d4ea932e4   # CRYENGINE 5.7.1 (86736a0)
+community e1326cfd4da61e599890e538919c057c3b038cb1   # CryENGINE-5-7-community / CECE (e1326cf)

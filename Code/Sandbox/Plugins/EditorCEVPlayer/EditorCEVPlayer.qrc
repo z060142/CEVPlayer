@@ -1,0 +1,6 @@
+<!DOCTYPE RCC><RCC version="1.0">
+ <qresource prefix="/EditorCEVPlayer">
+     <file>icons/assets_video.ico</file>
+     <file>icons/assets_video.png</file>
+ </qresource>
+</RCC>

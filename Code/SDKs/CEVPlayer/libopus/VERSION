@@ -1,0 +1,8 @@
+libopus 1.6.1
+Source:   https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+SHA-256:  6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1 (release tarball, upstream tag v1.6.1)
+Build:    CMake (VS2022 generator, -DOPUS_BUILD_SHARED_LIBRARY=OFF, default x86 intrinsics with runtime CPU detection), Release flags: /Ox /GS- /DNDEBUG /D_RELEASE, Debug flags: /Z7 /Od /Ob0 /Oy- /RTC1 /GS /DDEBUG /D_DEBUG
+Target:   Windows x64, MSVC (Visual Studio 2022 v143), static library
+CRT:      /MD (release, also Profile) and /MDd (debug), static library, x64, VS2022 v143
+Layout:   lib/win64/release = Release + Profile builds, lib/win64/debug = Debug builds
+Built by: tools/build_sdks.sh

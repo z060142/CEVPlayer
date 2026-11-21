@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- M2a test: wrong values everywhere: every one gets a default + warning, the video still plays. -->
+<CEVVideo version="abc" route="banana" video="opus_preskip.webm" avOffsetMs="soon">
+  <AudioTracks default="klingon" followGameLanguage="perhaps">
+    <Track embedded="1"/>
+    <Track name="english"/>
+    <Track name="two words" embedded="1"/>
+    <Track name="english" embedded="1"/>
+    <Track name="English" embedded="1"/>
+  </AudioTracks>
+  <Variants rule="whatever">
+    <Variant file="nothing.webm" width="x" height="-4"/>
+  </Variants>
+  <Markers>
+    <Marker name="ok" time="2.0"/>
+    <Marker name="bad_time" time="later"/>
+    <Marker time="1.0"/>
+    <Marker name="negative" time="-1"/>
+  </Markers>
+  <Unknown/>
+</CEVVideo>

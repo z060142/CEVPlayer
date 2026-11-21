@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  M0 baseline: build-time compatibility for stock CRYENGINE 5.7.1 / CECE fork on VS 2022 17.14
+  (MSVC 14.44), injected with -p:ForceImportBeforeCppTargets=<this file> and the same env var
+  (so the nested RC ExternalProject build sees it too). No engine file is edited.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- XTFrame-CRYENGINE: Qt 5.12 stdext::make_checked_array_iterator under /WX -->
+  <Import Project="D:\coding11\XTFrame-CRYENGINE\tools\msbuild\toolset_compat.props" />
+
+  <!-- VS installer lacks ATL/MFC (no admin to add it): vsix-extracted copy, same toolset version 14.44.35207 -->
+  <PropertyGroup>
+    <CevAtlMfc>D:\coding11\_tools\atlmfc\MSVC\atlmfc</CevAtlMfc>
+    <IncludePath>$(CevAtlMfc)\include;$(IncludePath)</IncludePath>
+    <LibraryPath>$(CevAtlMfc)\lib\x64;$(LibraryPath)</LibraryPath>
+    <ExternalIncludePath>$(CevAtlMfc)\include;$(ExternalIncludePath)</ExternalIncludePath>
+  </PropertyGroup>
+
+  <!-- Alembic (RC): std::unary_function/binary_function are removed in C++17 mode of the new STL -->
+  <ItemDefinitionGroup Condition="'$(MSBuildProjectName)'=='alembic'">
+    <ClCompile>
+      <PreprocessorDefinitions>_HAS_AUTO_PTR_ETC=1;_HAS_UNARY_BINARY_FUNCTION=1;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <!-- Missing transitive includes with the new STL; only for .cpp items (the projects also hold .c files) -->
+  <Target Name="CevForceIncludes" BeforeTargets="ClCompile" Condition="'$(MSBuildProjectName)'=='oculus' Or $(MSBuildProjectFullPath.Contains('RC-prefix'))">
+    <ItemGroup>
+      <ClCompile Condition="'%(Extension)'=='.cpp' And '$(MSBuildProjectName)'=='oculus'"><ForcedIncludeFiles>algorithm;%(ClCompile.ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
+      <ClCompile Condition="'%(Extension)'=='.cpp' And $(MSBuildProjectFullPath.Contains('RC-prefix'))"><ForcedIncludeFiles>chrono;thread;functional;%(ClCompile.ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
+    </ItemGroup>
+  </Target>
+</Project>
