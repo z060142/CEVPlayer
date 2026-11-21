@@ -106,7 +106,7 @@ __declspec(dllexport) const CryTexSourceApi* CryTexSource_v1(void);
 ```
 
 規則：
-1. **名字＝Surface ID**。來源以它查自己的登錄表。`open` 的 `name` 由消費端給（作者自選的 id，或消費端為 `<video src>` 產生的），`src` 是已解析的 CryPak 路徑。回 1 的播放器屬於這次 `open`，由開的人 `close`；回 2 表示關卡邏輯（節點／元件）已經用同一個 ID 建了播放器——消費端以 `query` 接上，不得 `close`。兩個來源對同一個名字都回應 `query` 時，模組掃描順序在前者為準。
+1. **名字＝Surface ID**。來源以它查自己的登錄表。`open` 的 `name` 由消費端給（作者自選的 id，或消費端為 `<video src>` 產生的），`src` 是 CryPak 能開的路徑（相對遊戲目錄或絕對路徑；2026-11-21 與消費端講定，絕對路徑實測可用——散檔、`.cevvideo` 描述檔、專案目錄之外；只存在於 `.pak` 內而以絕對路徑指向者未測）。`control` 的 value：PLAY／PAUSE 不讀，SEEK＝秒，RATE＝倍率，LOOP／MUTE＝非 0 為真，VOLUME＝0..1；`open` 非同步，ready 之前送達的 SEEK 會被記住、其餘照順序套用。回 1 的播放器屬於這次 `open`，由開的人 `close`；回 2 表示關卡邏輯（節點／元件）已經用同一個 ID 建了播放器——消費端以 `query` 接上，不得 `close`。兩個來源對同一個名字都回應 `query` 時，模組掃描順序在前者為準。
 2. **`open` 不阻塞**：函式內只依副檔名與既有登錄決定接不接（規則 10：契約函式不呼叫引擎，所以不開檔；2026-11-19 M7 實作時的釐清，已通知消費端）；開檔、容器辨識與解碼器建立是非同步的，期間 `state`＝loading，失敗（含容器不是它認得的格式）以 `state`＝error＋`errorCode` 呈現。消費端只在回 0 時問下一個來源，之後的錯誤不再轉交。CEVPlayer 接 `.webm` 與 `.cevvideo`。
 3. **消費端每幀 `query`**；回 0（名字不存在、來源已關閉）時顯示透明並放掉貼圖參考——兩個插件之間沒有關機順序的協調，靠這條。`generation` 改變時重新取貼圖並更新固有尺寸（`contentSerial` 同時也會變）。
 4. **模組生命週期**：消費端對保留其 API 的模組持有一個模組參考；名字解析不到或 `open` 無人接手時重新掃描，至多每秒一次。來源的插件關閉之後，匯出函式必須仍可呼叫到行程結束：`query`／`open`／`control` 回 0、`hint`／`close` 不做事。
