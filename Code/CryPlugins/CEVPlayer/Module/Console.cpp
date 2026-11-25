@@ -1046,7 +1046,7 @@ namespace CEVPlayer
 #endif
 
 	// ------------------------------------------------------------------------------------------------
-	// Development-only (L1): cev_probe_xui2dl <case> [surface] | off sends one XUI2DLApi::SetFrame per case (three for
+	// Development-only (L1): cev_probe_xui2dl <case> [surface] | off | stats sends one XUI2DLApi::SetFrame per case (three for
 	// case 8) and logs the result and the stage's statistics before and after. Cases 2-4 (and 7) take the texture of
 	// the surface player <surface> (cev_play_surface). Layer positions follow the size of the stage's output.
 	namespace XUI2DLProbe
@@ -1130,7 +1130,7 @@ namespace CEVPlayer
 		{
 			if (args == nullptr || args->GetArgCount() < 2)
 			{
-				LogAlways("usage: cev_probe_xui2dl <case 1-8> [surface] | off   (cases 2-4 need the surface of a cev_play_surface player)");
+				LogAlways("usage: cev_probe_xui2dl <case 1-8> [surface] | off | stats   (cases 2-4 need the surface of a cev_play_surface player)");
 				return;
 			}
 			const XUI2DLApi* const api = XUI2DLClient::Get();
@@ -1140,6 +1140,11 @@ namespace CEVPlayer
 				return;
 			}
 			const char* const name = args->GetArg(1);
+			if (stricmp(name, "stats") == 0)
+			{
+				LogStats(api, "now");
+				return;
+			}
 			const XUI2DLRect whole = { 0.f, 0.f, 0.f, 0.f };
 			LogStats(api, "before");
 			if (stricmp(name, "off") == 0)
@@ -1501,7 +1506,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_hidden_bench", CmdHiddenBench, VF_NULL, "Measurement: cev_hidden_bench <path> [cycles] [hidden s] [visible s] plays into surface CevBench and toggles a consumer hint hidden / visible, logs the catch-up of every cycle");
 		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");
 		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> draws the surface's texture top left as it is (an R8 packed texture shows the planes in grey); no argument = off");
-		REGISTER_COMMAND("cev_probe_xui2dl", XUI2DLProbe::Cmd, VF_NULL, "Development (L1): cev_probe_xui2dl <case 1-8> [surface] | off sends one XUI2DL SetFrame per case (docs/tasks/L1.md; cases 2-4 draw the texture of the cev_play_surface player <surface>) and logs the result and the XUI2DL statistics; off clears the retained list");
+		REGISTER_COMMAND("cev_probe_xui2dl", XUI2DLProbe::Cmd, VF_NULL, "Development (L1): cev_probe_xui2dl <case 1-8> [surface] | off | stats sends one XUI2DL SetFrame per case (docs/tasks/L1.md; cases 2-4 draw the texture of the cev_play_surface player <surface>) and logs the result and the XUI2DL statistics; off clears the retained list; stats only logs every XUI2DLStats field");
 #if CEV_HAVE_LOADTIME_CALLBACKS
 		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>|control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]...] registers an order-100 loading-loop callback that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
 #endif

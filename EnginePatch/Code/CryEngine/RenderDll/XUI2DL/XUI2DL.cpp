@@ -73,6 +73,7 @@ SSnapshot*         s_pCurrent = nullptr;
 //////////////////////////////////////////////////////////////////////////
 // Statistics (XUI2DLStats)
 
+std::atomic<bool>   s_deviceAvailable{ false };   //!< between RT_CreateResources and RT_ReleaseResources
 std::atomic<bool>   s_resourcesReady{ false };
 std::atomic<bool>   s_shaderReady{ false };
 std::atomic<uint32> s_layersHeld{ 0 };
@@ -146,7 +147,9 @@ struct SResources
 	uint64                                skippedSinceLog = 0;
 };
 
-SResources* s_pRes = nullptr;   //!< render thread only
+SResources* s_pRes = nullptr;   //!< render thread only; created lazily by RT_EnsureResources
+
+void RT_EnsureResources();
 
 bool ShaderValid(const SResources& r)
 {
@@ -244,6 +247,9 @@ struct SDrawItem
 
 void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
 {
+	// Lazy creation (M11 section 5): the first non-empty snapshot to execute creates the resources.
+	if (!s_pRes && snap.count > 0 && s_deviceAvailable.load(std::memory_order_acquire))
+		RT_EnsureResources();
 	SResources* const pRes = s_pRes;
 	if (!pRes || !ShaderValid(*pRes) || !pRes->pPass || !pRes->pPassCB || pRes->vb == ~0u || pRes->ib == ~0u)
 	{
@@ -494,12 +500,9 @@ void GetStats(XUI2DLStats* pStats)
 
 const XUI2DLApi s_api = { uint32(sizeof(XUI2DLApi)), XUI2DL_API_VERSION, XUI2DL_CAP_CORE, 0, &SetFrame, &GetStats };
 
-} // namespace
-
-//////////////////////////////////////////////////////////////////////////
-// Engine entry points
-
-void RT_CreateResources()
+//! Render thread, from the first RT_Draw of a non-empty snapshot. A technique still compiling is only
+//! requested here; its draws are skipped and counted until it is ready.
+void RT_EnsureResources()
 {
 	if (s_pRes)
 		return;
@@ -547,8 +550,20 @@ void RT_CreateResources()
 	             bShader ? "ok" : "MISSING", found, int(eTech_Count), ready, bBuffers ? "ok" : "FAILED");
 }
 
+} // namespace
+
+//////////////////////////////////////////////////////////////////////////
+// Engine entry points
+
+void RT_CreateResources()
+{
+	// Nothing is created here (M11 section 5, lazy resources): only the device is noted as available.
+	s_deviceAvailable.store(true, std::memory_order_release);
+}
+
 void RT_ReleaseResources()
 {
+	s_deviceAvailable.store(false, std::memory_order_release);
 	SSnapshot* pDropped = nullptr;
 	{
 		CryAutoCriticalSection lock(s_currentLock);
@@ -579,7 +594,7 @@ void RT_ReleaseResources()
 
 void EndFrame(const SDisplayContextKey& key)
 {
-	if (!s_resourcesReady.load(std::memory_order_acquire))
+	if (!s_deviceAvailable.load(std::memory_order_acquire))
 		return;
 	SSnapshot* pSnap = nullptr;
 	{
