@@ -138,7 +138,7 @@ typedef struct XUI2DLApi
 | L1 | 引擎核心：介面、純色與 RGBA、混合、viewport／scissor、資源管理、套用腳本、探測指令（L1b：延後建立資源，並在社群版樹建置與驗證） | 社群版樹 |
 | L2 | YUV 著色器與合規測試 | 社群版樹 |
 | L3 | 讀取迴圈 | 共用樹（有補丁 17）＋社群版樹（沒有） |
-| L5 | XUI2D 後端：有 XTFrame 時經 `IXUIRenderer` 送幀（等 XTFrame 主線的 CE 端更新後規劃） | 共用樹 |
+| L5 | XUI2D 後端：有 XTFrame 時經 `IXUIRenderer` 送幀（`Module/Render/FullscreenXUI2D.*`，`CEV_HAVE_XUI2D`）。實際做法：①提交時機＝插件 `UpdateBeforeRender` 的最後（播放器 tick 與所有貼圖上傳之後），與 CryXTUI 的幀同一批；有圖層的幀每幀送、沒有圖層的幀不送（該表面那一幀不畫）。②一個主視窗螢幕表面，`SetSurfaceOrder` = `-(1 << 20)`，排在 CryXTUI 的表面之下。③XUI2D 不持有包裝的引擎貼圖：插件對每張用到的貼圖持有 `_smart_ptr<ITexture>`，最後一次被送出的幀用到之後再保留 4 個主執行緒幀才釋放（並銷毀其句柄） | 共用樹 |
 | L4 | 插件切換：`FullscreenOutput` 改送圖層、全螢幕不再強制 RGBA、刪除全部 Aux、更新探測指令與文件 | 兩棵樹 |
 
 ## 9. 已知限制與待定

@@ -31,6 +31,8 @@ The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3
   `EnginePatch/apply_xui2dl.py` (`docs/design/M11-xui2dl.md`); the renderer's aux geometry is no longer used.
 * An engine without the XUI2DL patch has no fullscreen output (one error line in the log; playback, audio, material and
   surface outputs are unaffected).
+* On an engine with XTFrame (its XUI2D 2D pass with planar shading), the fullscreen output goes through that XUI2D
+  instead, as one more screen surface drawn below the XTFrame UI; XUI2DL is not used there.
 * `cev_stats` is no longer drawn on screen; it only writes the log (and the `cev_stats_file` CSV).
 * C++ interface `IVideoPlugin` / `IVideoPlayer`, interface version 5 (`CreatePlayerForSurface`, `FindPlayerBySurface`,
   `GetSurfaceId`, `GetPixelLayout`, `GetDecodeBackend`).
