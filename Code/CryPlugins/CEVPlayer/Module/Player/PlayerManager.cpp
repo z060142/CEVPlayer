@@ -729,11 +729,23 @@ namespace CEVPlayer
 		s_contractCommands.clear();
 	}
 
+	void CPlayerManager::PresentFullscreenBeforeRender()
+	{
+		CTickLock lock(m_tickMutex);
+		PresentFullscreen(true);
+	}
+
 	void CPlayerManager::UpdateAfterRender()
 	{
 		CTickLock lock(m_tickMutex);
-		if (!RenderCallsAllowed())
-			return;
+		PresentFullscreen(false);
+	}
+
+	void CPlayerManager::PresentFullscreen(bool beforeRender)
+	{
+		const FullscreenOutput::EStep step = beforeRender ? FullscreenOutput::EStep::BeforeRender : FullscreenOutput::EStep::AfterRender;
+		if (!RenderCallsAllowed() || !FullscreenOutput::PresentsAt(step))
+			return; // the debug layers are taken only in the backend's step (one take per frame)
 
 		s_layers.clear();
 		for (const CVideoPlayerImpl* p : m_fullscreen)
@@ -763,7 +775,7 @@ namespace CEVPlayer
 		const FullscreenOutput::SDebugLayer* pDebug = nullptr;
 		size_t debugCount = 0;
 		DevProbesDebugLayers(pDebug, debugCount);
-		FullscreenOutput::Present(s_layers.data(), s_layers.size(), pDebug, debugCount);
+		FullscreenOutput::Present(step, s_layers.data(), s_layers.size(), pDebug, debugCount);
 	}
 
 	void CPlayerManager::LogStats()

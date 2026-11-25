@@ -2,11 +2,15 @@
 #include "PluginEnv.h"
 #include "FullscreenOutput.h"
 
+#include <cstdint>
 #include <cstring>
 
 #include <CryRenderer/IRenderer.h>
 
 #include "Render/XUI2DLClient.h"
+#if CEV_HAVE_XUI2D
+#include "Render/FullscreenXUI2D.h"
+#endif
 
 namespace CEVPlayer
 {
@@ -17,6 +21,7 @@ namespace CEVPlayer
 			bool s_backendKnown = false;
 			EBackend s_backend = EBackend::None;
 			const XUI2DLApi* s_pApi = nullptr;
+			bool s_planarXui2d = false;              // XUI2D: XUI2D_Patched has the planar bit
 
 			XUI2DLLayer s_sent[XUI2DL_MAX_LAYERS];   // the list sent last (s_sentCount layers)
 			uint32_t s_sentCount = 0;
@@ -27,33 +32,24 @@ namespace CEVPlayer
 
 			XUI2DLLayer s_build[XUI2DL_MAX_LAYERS];
 			uint32_t s_buildCount = 0;
+			std::vector<SQuad> s_quads;              // scratch of Present (kept across frames)
 
-			XUI2DLLayer Blank(uint32_t kind, uint32_t blend, float x, float y, float w, float h)
+			void Copy4(uint32 (&dst)[4], const uint32 (&src)[4]) { std::memcpy(dst, src, sizeof(dst)); }
+
+			SQuad Quad(EQuadKind kind, bool replace, float x, float y, float w, float h)
 			{
-				XUI2DLLayer l;
-				std::memset(&l, 0, sizeof(l)); // byte comparison of whole lists: no stale bytes anywhere
-				l.size = sizeof(l);
-				l.kind = kind;
-				l.blend = blend;
-				l.dst = XUI2DLRect{ x, y, w, h };
-				l.color[0] = l.color[1] = l.color[2] = l.color[3] = 1.f;
-				return l;
+				SQuad q;
+				q.kind = kind;
+				q.replace = replace;
+				q.x = x;
+				q.y = y;
+				q.w = w;
+				q.h = h;
+				return q;
 			}
 
-			XUI2DLLayer Solid(float x, float y, float w, float h, float r, float g, float b, float a)
-			{
-				XUI2DLLayer l = Blank(XUI2DL_KIND_SOLID, XUI2DL_BLEND_REPLACE, x, y, w, h);
-				l.color[0] = r;
-				l.color[1] = g;
-				l.color[2] = b;
-				l.color[3] = a;
-				return l;
-			}
-
-			XUI2DLPlane Plane(const uint32 (&p)[4]) { return XUI2DLPlane{ p[0], p[1], p[2], p[3] }; }
-
-			//! The layers of one player (letterbox bars, then the picture) into pOut; returns how many (0..5).
-			uint32_t PlayerLayers(const SLayer& layer, float screenW, float screenH, XUI2DLLayer* pOut)
+			//! The quads of one player (letterbox bars, then the picture) into pOut; returns how many (0..5).
+			uint32_t PlayerQuads(const SLayer& layer, float screenW, float screenH, SQuad* pOut)
 			{
 				if (layer.textureId <= 0 || layer.imageWidth <= 0 || layer.imageHeight <= 0)
 					return 0;
@@ -78,41 +74,79 @@ namespace CEVPlayer
 
 					if (layer.fit == EVideoFit::Letterbox)
 					{
-						const XUI2DLRect bars[4] = {
+						const float bars[4][4] = {
 							{ 0.f, 0.f, screenW, y },
 							{ 0.f, y + h, screenW, screenH - y - h },
 							{ 0.f, y, x, h },
 							{ x + w, y, screenW - x - w, h },
 						};
-						for (const XUI2DLRect& r : bars)
+						for (const auto& r : bars)
 						{
-							if (r.w > 0.f && r.h > 0.f)
-								pOut[n++] = Solid(r.x, r.y, r.w, r.h, 0.f, 0.f, 0.f, 1.f);
+							if (r[2] > 0.f && r[3] > 0.f)
+							{
+								SQuad bar = Quad(EQuadKind::Solid, true, r[0], r[1], r[2], r[3]);
+								bar.color[0] = bar.color[1] = bar.color[2] = 0.f;
+								bar.color[3] = 1.f;
+								pOut[n++] = bar;
+							}
 						}
 					}
 				}
 
-				uint32_t kind = XUI2DL_KIND_RGBA_PREMULT;
+				EQuadKind kind = EQuadKind::RgbaPremult;
 				if (layer.layout == EVideoPixelLayout::PackedYuv420)
-					kind = XUI2DL_KIND_YUV420;
+					kind = EQuadKind::Yuv420;
 				else if (layer.layout == EVideoPixelLayout::PackedYuva420)
-					kind = XUI2DL_KIND_YUVA420;
-				XUI2DLLayer& v = pOut[n++];
-				v = Blank(kind, XUI2DL_BLEND_SRCOVER, x, y, w, h);
+					kind = EQuadKind::Yuva420;
+				SQuad& v = pOut[n++];
+				v = Quad(kind, false, x, y, w, h);
 				v.textureId = layer.textureId;
-				if (kind != XUI2DL_KIND_RGBA_PREMULT)
+				if (kind != EQuadKind::RgbaPremult)
 				{
-					v.imageWidth = static_cast<uint32_t>(layer.imageWidth);
-					v.imageHeight = static_cast<uint32_t>(layer.imageHeight);
-					v.planeY = Plane(layer.planeY);
-					v.planeU = Plane(layer.planeU);
-					v.planeV = Plane(layer.planeV);
-					v.planeA = Plane(layer.planeA);
+					v.imageWidth = static_cast<uint32>(layer.imageWidth);
+					v.imageHeight = static_cast<uint32>(layer.imageHeight);
+					Copy4(v.planeY, layer.planeY);
+					Copy4(v.planeU, layer.planeU);
+					Copy4(v.planeV, layer.planeV);
+					Copy4(v.planeA, layer.planeA);
 					v.colorMatrix = layer.colorMatrix;
 					v.colorRange = layer.colorRange;
 					v.chromaSiting = layer.chromaSiting;
 				}
 				return n;
+			}
+
+			XUI2DLLayer ToXui2dl(const SQuad& q)
+			{
+				XUI2DLLayer l;
+				std::memset(&l, 0, sizeof(l)); // byte comparison of whole lists: no stale bytes anywhere
+				l.size = sizeof(l);
+				switch (q.kind)
+				{
+				case EQuadKind::Solid:   l.kind = XUI2DL_KIND_SOLID; break;
+				case EQuadKind::Yuv420:  l.kind = XUI2DL_KIND_YUV420; break;
+				case EQuadKind::Yuva420: l.kind = XUI2DL_KIND_YUVA420; break;
+				default:                 l.kind = XUI2DL_KIND_RGBA_PREMULT; break;
+				}
+				l.blend = q.replace ? XUI2DL_BLEND_REPLACE : XUI2DL_BLEND_SRCOVER;
+				l.dst = XUI2DLRect{ q.x, q.y, q.w, q.h };
+				for (int c = 0; c < 4; ++c)
+					l.color[c] = q.color[c];
+				if (q.kind != EQuadKind::Solid)
+					l.textureId = q.textureId;
+				if (q.kind == EQuadKind::Yuv420 || q.kind == EQuadKind::Yuva420)
+				{
+					l.imageWidth = q.imageWidth;
+					l.imageHeight = q.imageHeight;
+					l.planeY = XUI2DLPlane{ q.planeY[0], q.planeY[1], q.planeY[2], q.planeY[3] };
+					l.planeU = XUI2DLPlane{ q.planeU[0], q.planeU[1], q.planeU[2], q.planeU[3] };
+					l.planeV = XUI2DLPlane{ q.planeV[0], q.planeV[1], q.planeV[2], q.planeV[3] };
+					l.planeA = XUI2DLPlane{ q.planeA[0], q.planeA[1], q.planeA[2], q.planeA[3] };
+					l.colorMatrix = q.colorMatrix;
+					l.colorRange = q.colorRange;
+					l.chromaSiting = q.chromaSiting;
+				}
+				return l;
 			}
 
 			void Send(const XUI2DLLayer* pLayers, uint32_t count)
@@ -134,6 +168,69 @@ namespace CEVPlayer
 				s_sentCount = count;
 				s_forceSend = false;
 			}
+
+			void PresentXui2dl(float screenW, float screenH, const SLayer* pLayers, size_t count, const SDebugLayer* pDebug, size_t debugCount)
+			{
+				bool dropped = false;
+				BuildQuads(pLayers, count, pDebug, debugCount, screenW, screenH, XUI2DL_MAX_LAYERS, s_quads, dropped);
+				if (dropped && !s_overflowWarned)
+				{
+					s_overflowWarned = true;
+					LogWarning("fullscreen output: more than %d layers; debug layers and then the topmost players were dropped", static_cast<int>(XUI2DL_MAX_LAYERS));
+				}
+				s_buildCount = 0;
+				for (const SQuad& q : s_quads)
+					s_build[s_buildCount++] = ToXui2dl(q);
+
+				if (s_buildCount == 0)
+				{
+					if (s_sentCount != 0 || s_forceSend)
+						Send(nullptr, 0);
+					return;
+				}
+				if (!s_forceSend && s_buildCount == s_sentCount && std::memcmp(s_build, s_sent, sizeof(XUI2DLLayer) * s_buildCount) == 0)
+					return;
+				Send(s_build, s_buildCount);
+			}
+		}
+
+		void BuildQuads(const SLayer* pLayers, size_t count, const SDebugLayer* pDebug, size_t debugCount, float screenW, float screenH,
+		                size_t maxQuads, std::vector<SQuad>& out, bool& dropped)
+		{
+			// Players first (bottom), then the debug layers; past maxQuads the debug layers go first, then the topmost
+			// players.
+			out.clear();
+			dropped = false;
+			for (size_t i = 0; pLayers != nullptr && i < count; ++i)
+			{
+				SQuad one[5];
+				const uint32_t n = PlayerQuads(pLayers[i], screenW, screenH, one);
+				if (n == 0)
+					continue;
+				if (out.size() + n > maxQuads)
+				{
+					dropped = true;
+					break; // this player and every one above it
+				}
+				out.insert(out.end(), one, one + n);
+			}
+			for (size_t i = 0; pDebug != nullptr && i < debugCount; ++i)
+			{
+				const SDebugLayer& d = pDebug[i];
+				if (d.w <= 0.f || d.h <= 0.f || (!d.solid && d.textureId <= 0))
+					continue;
+				if (out.size() >= maxQuads)
+				{
+					dropped = true;
+					return;
+				}
+				SQuad q = d.solid ? Quad(EQuadKind::Solid, true, d.x, d.y, d.w, d.h) : Quad(EQuadKind::RgbaPremult, false, d.x, d.y, d.w, d.h);
+				if (!d.solid)
+					q.textureId = d.textureId;
+				for (int c = 0; c < 4; ++c)
+					q.color[c] = d.color[c];
+				out.push_back(q);
+			}
 		}
 
 		EBackend Backend()
@@ -143,21 +240,60 @@ namespace CEVPlayer
 			if (gEnv == nullptr || gEnv->pRenderer == nullptr || gEnv->IsDedicated())
 				return EBackend::None; // no renderer yet: decided once there is one
 			s_backendKnown = true;
+#if CEV_HAVE_XUI2D
+			// XTFrame's XUI2D first: on such an engine XUI2DL is never touched.
+			if (FullscreenXUI2D::Available())
+			{
+				s_backend = EBackend::XUI2D;
+				s_planarXui2d = (FullscreenXUI2D::PatchedBits() & 256) != 0;
+				LogAlways("fullscreen output: backend xui2d (XUI2D_Patched 0x%x, planar %d)", static_cast<unsigned>(FullscreenXUI2D::PatchedBits()), s_planarXui2d ? 1 : 0);
+				return s_backend;
+			}
+#endif
 			s_pApi = XUI2DLClient::Get();
 			s_backend = s_pApi != nullptr ? EBackend::XUI2DL : EBackend::None;
-			if (s_backend == EBackend::None)
+			if (s_backend == EBackend::XUI2DL)
+				LogAlways("fullscreen output: backend xui2dl (caps 0x%x)", s_pApi->caps);
+			else
 				LogError("fullscreen output is unavailable: the renderer has no XUI2DL (apply EnginePatch/apply_xui2dl.py and rebuild the renderer)");
 			return s_backend;
 		}
 
-		bool SupportsPlanar()
+		const char* BackendName()
 		{
-			return Backend() == EBackend::XUI2DL && (s_pApi->caps & XUI2DL_CAP_YUV) != 0;
+			switch (Backend())
+			{
+			case EBackend::XUI2D:  return "xui2d";
+			case EBackend::XUI2DL: return "xui2dl";
+			default:               return "none";
+			}
 		}
 
-		void Present(const SLayer* pLayers, size_t count, const SDebugLayer* pDebug, size_t debugCount)
+		bool SupportsPlanar()
 		{
-			if (Backend() != EBackend::XUI2DL || s_probeOwnsFrame)
+			switch (Backend())
+			{
+			case EBackend::XUI2D:  return s_planarXui2d;
+			case EBackend::XUI2DL: return (s_pApi->caps & XUI2DL_CAP_YUV) != 0;
+			default:               return false;
+			}
+		}
+
+		bool PresentsAt(EStep step)
+		{
+			switch (Backend())
+			{
+			case EBackend::XUI2D:  return step == EStep::BeforeRender;
+			case EBackend::XUI2DL: return step == EStep::AfterRender;
+			default:               return false;
+			}
+		}
+
+		void Present(EStep step, const SLayer* pLayers, size_t count, const SDebugLayer* pDebug, size_t debugCount)
+		{
+			if (!PresentsAt(step))
+				return;
+			if (s_backend == EBackend::XUI2DL && s_probeOwnsFrame)
 				return;
 
 			// Overlay size is what UI drawing uses; fall back to the main resolution.
@@ -171,69 +307,28 @@ namespace CEVPlayer
 			if (screenW <= 0.f || screenH <= 0.f)
 				return;
 
-			// Players first (bottom), then the debug layers; past XUI2DL_MAX_LAYERS the debug layers go first, then the
-			// topmost players.
-			XUI2DLLayer players[XUI2DL_MAX_LAYERS];
-			uint32_t playerCount = 0;
+			if (s_backend == EBackend::XUI2DL)
+			{
+				PresentXui2dl(screenW, screenH, pLayers, count, pDebug, debugCount);
+				return;
+			}
+#if CEV_HAVE_XUI2D
 			bool dropped = false;
-			s_buildCount = 0;
-			for (size_t i = 0; pLayers != nullptr && i < count; ++i)
-			{
-				XUI2DLLayer one[5];
-				const uint32_t n = PlayerLayers(pLayers[i], screenW, screenH, one);
-				if (n == 0)
-					continue;
-				if (playerCount + n > XUI2DL_MAX_LAYERS)
-				{
-					dropped = true;
-					break; // this player and every one above it
-				}
-				std::memcpy(players + playerCount, one, sizeof(XUI2DLLayer) * n);
-				playerCount += n;
-			}
-			std::memcpy(s_build, players, sizeof(XUI2DLLayer) * playerCount);
-			s_buildCount = playerCount;
-			for (size_t i = 0; pDebug != nullptr && i < debugCount; ++i)
-			{
-				const SDebugLayer& d = pDebug[i];
-				if (d.w <= 0.f || d.h <= 0.f || (!d.solid && d.textureId <= 0))
-					continue;
-				if (s_buildCount >= XUI2DL_MAX_LAYERS)
-				{
-					dropped = true;
-					break;
-				}
-				XUI2DLLayer l = d.solid ? Blank(XUI2DL_KIND_SOLID, XUI2DL_BLEND_REPLACE, d.x, d.y, d.w, d.h)
-				                        : Blank(XUI2DL_KIND_RGBA_PREMULT, XUI2DL_BLEND_SRCOVER, d.x, d.y, d.w, d.h);
-				if (!d.solid)
-					l.textureId = d.textureId;
-				for (int c = 0; c < 4; ++c)
-					l.color[c] = d.color[c];
-				s_build[s_buildCount++] = l;
-			}
-			// Debug layers fill only what the players left: when players were dropped, no debug layer can be in.
-			if (dropped && !s_overflowWarned)
-			{
-				s_overflowWarned = true;
-				LogWarning("fullscreen output: more than %d layers; debug layers and then the topmost players were dropped", static_cast<int>(XUI2DL_MAX_LAYERS));
-			}
-
-			if (s_buildCount == 0)
-			{
-				if (s_sentCount != 0 || s_forceSend)
-					Send(nullptr, 0);
-				return;
-			}
-			if (!s_forceSend && s_buildCount == s_sentCount && std::memcmp(s_build, s_sent, sizeof(XUI2DLLayer) * s_buildCount) == 0)
-				return;
-			Send(s_build, s_buildCount);
+			BuildQuads(pLayers, count, pDebug, debugCount, screenW, screenH, SIZE_MAX, s_quads, dropped);
+			FullscreenXUI2D::Present(s_quads, static_cast<int>(screenW), static_cast<int>(screenH));
+#endif
 		}
 
 		void Shutdown()
 		{
-			if (!s_backendKnown || s_backend != EBackend::XUI2DL)
+			if (!s_backendKnown)
 				return;
-			Send(nullptr, 0);
+			if (s_backend == EBackend::XUI2DL)
+				Send(nullptr, 0);
+#if CEV_HAVE_XUI2D
+			else if (s_backend == EBackend::XUI2D)
+				FullscreenXUI2D::Shutdown();
+#endif
 		}
 
 		void SetProbeOwnsFrame(bool owns)

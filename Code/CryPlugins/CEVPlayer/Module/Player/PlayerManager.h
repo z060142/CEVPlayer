@@ -47,7 +47,11 @@ namespace CEVPlayer
 		//! UpdateBeforeRender: ticks the players (texture uploads), then dispatches listener events. `dt` = seconds
 		//! since the previous call, given by the caller; no engine timer or frame id is read inside.
 		void UpdateBeforeRender(float dt);
-		//! UpdateAfterRender: hands the fullscreen outputs (and the debug layers of the probes) to FullscreenOutput.
+		//! End of the plug-in's UpdateBeforeRender (after the players' and the probes' texture uploads): hands the
+		//! fullscreen outputs (and the debug layers of the probes) to FullscreenOutput, which takes them here when its
+		//! backend is XUI2D.
+		void PresentFullscreenBeforeRender();
+		//! UpdateAfterRender: the same for the XUI2DL backend, which takes them here.
 		void UpdateAfterRender();
 		//! M10: the tick of the renderer's loading loop (render thread, LoadtimeUpdate of the order-100 callback). Applies
 		//! the queued contract commands and ticks the players that run during loads (RunsDuringLoad). No listener
@@ -130,6 +134,7 @@ namespace CEVPlayer
 		//! Applies the open / close / control requests the texture source contract queued since the last tick.
 		void ProcessContractCommands();
 		void LogStats();
+		void PresentFullscreen(bool beforeRender);   //!< under the tick lock
 		void DestroyConsolePlayer();
 		bool TextureNameInUse(const std::string& name, const CVideoPlayerImpl* pSelf) const;
 		void BeginLevelLoading(const char* why);

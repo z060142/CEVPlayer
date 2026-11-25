@@ -196,7 +196,8 @@ namespace CEVPlayer
 		}
 
 		//! cev_probe_fullscreen <path> [fit] | pop | off: one more fullscreen player per call through the public player
-		//! interface (looping, started at once); pop destroys the most recent one, off all of them.
+		//! interface (looping, started at once); pop destroys the most recent one, off all of them. surface:<id> [fit] /
+		//! unsurface:<id>: SetFullscreen on an existing surface player (it is not added to the list; pop / off leave it).
 		void CmdProbeFullscreen(IConsoleCmdArgs* args)
 		{
 			if (mEnv->pManager == nullptr || mEnv->pManager->IsShutDown())
@@ -207,7 +208,7 @@ namespace CEVPlayer
 			const char* const arg = args != nullptr && args->GetArgCount() > 1 ? args->GetArg(1) : nullptr;
 			if (arg == nullptr)
 			{
-				LogAlways("usage: cev_probe_fullscreen <path> [fit 0 Fill|1 Fit|2 Letterbox, default 2] | pop | off   (%u running)", static_cast<unsigned>(s_fullscreenPlayers.size()));
+				LogAlways("usage: cev_probe_fullscreen <path> [fit 0 Fill|1 Fit|2 Letterbox, default 2] | pop | off | surface:<id> [fit] | unsurface:<id>   (%u running)", static_cast<unsigned>(s_fullscreenPlayers.size()));
 				return;
 			}
 			if (stricmp(arg, "off") == 0 || stricmp(arg, "pop") == 0)
@@ -227,6 +228,21 @@ namespace CEVPlayer
 			if (fitArg < static_cast<int>(EVideoFit::Fill) || fitArg > static_cast<int>(EVideoFit::Letterbox))
 			{
 				LogAlways("cev_probe_fullscreen: fit %d out of range (0 Fill, 1 Fit, 2 Letterbox)", fitArg);
+				return;
+			}
+			if (strnicmp(arg, "surface:", 8) == 0 || strnicmp(arg, "unsurface:", 10) == 0)
+			{
+				// L5: an existing surface player (cev_play_surface) also in the fullscreen output, or out of it again.
+				const bool on = arg[0] == 's' || arg[0] == 'S';
+				const char* const id = arg + (on ? 8 : 10);
+				IVideoPlayer* const p = mEnv->pManager->FindPlayerBySurface(id);
+				if (p == nullptr)
+				{
+					LogAlways("cev_probe_fullscreen: no surface player <%s>", id);
+					return;
+				}
+				p->SetFullscreen(on, static_cast<EVideoFit>(fitArg));
+				LogAlways("cev_probe_fullscreen: surface player <%s> fullscreen %d fit %d", id, on ? 1 : 0, fitArg);
 				return;
 			}
 			IVideoPlayer* const p = mEnv->pManager->CreatePlayer(nullptr);
@@ -380,7 +396,7 @@ namespace CEVPlayer
 			l.color[3] = 1.f;
 		}
 
-		//! The probes' layers for this frame (UpdateAfterRender, main thread); the labels go to the log once a second.
+		//! The probes' layers for this frame (the fullscreen output's step, main thread); the labels go to the log once a second.
 		void BuildDebugLayers()
 		{
 			s_debugCount = 0;
@@ -420,17 +436,20 @@ namespace CEVPlayer
 			}
 			if (s_syncId > 0)
 			{
-				// A and B: two colour blocks of the same retained list, A with the index of UpdateBeforeRender, B with the
-				// index of UpdateAfterRender; C: the uploaded texture.
+				// A and B: two colour blocks of the same fullscreen output frame, A with the index of UpdateBeforeRender, B
+				// with the index of UpdateAfterRender (XUI2D backend: its frame is submitted in UpdateBeforeRender, so B
+				// shows the UpdateBeforeRender index as well); C: the uploaded texture.
+				const bool bBefore = FullscreenOutput::Backend() == FullscreenOutput::EBackend::XUI2D;
 				float r, g, b;
 				SyncColor(s_syncIndexBefore, r, g, b);
 				AddDebugSolid(20.f, 300.f, 80.f, 80.f, r, g, b);
-				SyncColor(s_syncIndex, r, g, b);
+				SyncColor(bBefore ? s_syncIndexBefore : s_syncIndex, r, g, b);
 				AddDebugSolid(120.f, 300.f, 80.f, 80.f, r, g, b);
 				AddDebugTexture(s_syncId, 220.f, 300.f, 80.f, 80.f);
 				if (logLabels)
 				{
-					LogAlways("cev_probe_sync: A solid@before  B solid@after  C texture   frame %u idx %u", s_syncFrame, s_syncIndex);
+					LogAlways("cev_probe_sync: A solid@before  B solid@%s  C texture   frame %u idx %u", bBefore ? "before (xui2d: no after-render index)" : "after",
+						s_syncFrame, s_syncIndex);
 					logged = true;
 				}
 			}
@@ -1513,6 +1532,11 @@ namespace CEVPlayer
 				LogAlways("usage: cev_probe_xui2dl <case 1-8> [surface] | off | stats | yuv <n 1-16> [scale] | read <tag> | yuvsurface <surface> [seek seconds]   (cases 2-4 need the surface of a cev_play_surface player)");
 				return;
 			}
+			if (FullscreenOutput::Backend() == FullscreenOutput::EBackend::XUI2D)
+			{
+				LogAlways("cev_probe_xui2dl: the fullscreen output uses XUI2D on this engine; this probe is not available");
+				return; // nothing of the other stage is touched on such an engine
+			}
 			const XUI2DLApi* const api = XUI2DLClient::Get();
 			if (api == nullptr)
 			{
@@ -1837,8 +1861,7 @@ namespace CEVPlayer
 		//! L4: the fullscreen output backend (cev_info, cev_surfaces).
 		void LogFullscreenBackend(const char* cmd)
 		{
-			LogAlways("%s: fullscreen backend: %s planar=%d", cmd, FullscreenOutput::Backend() == FullscreenOutput::EBackend::XUI2DL ? "xui2dl" : "none",
-				FullscreenOutput::SupportsPlanar() ? 1 : 0);
+			LogAlways("%s: fullscreen backend: %s planar=%d", cmd, FullscreenOutput::BackendName(), FullscreenOutput::SupportsPlanar() ? 1 : 0);
 		}
 
 		void CmdSurfaces(IConsoleCmdArgs*)
@@ -1922,9 +1945,9 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_contract_selftest", CmdContractSelfTest, VF_NULL, "Self test of the texture source contract through the CryTexSource_v1 export. cev_contract_selftest [pathA] [pathB] (two videos of different sizes), logs PASS / FAIL");
 		// development-only measurement commands (S0)
 		REGISTER_COMMAND("cev_probe_r8", DevProbe::CmdProbeR8, VF_NULL, "Measurement: cev_probe_r8 <w> <h> [rgba] creates an eTF_R8 (or RGBA8) dynamic texture, updates it every frame, draws it top left and logs the process memory it costs (no arguments = off)");
-		REGISTER_COMMAND("cev_probe_sync", DevProbe::CmdProbeSync, VF_NULL, "Measurement: cev_probe_sync 1|0, a 64x64 RGBA texture filled each frame with a colour coding the frame index (C), next to two colour blocks of one retained fullscreen output list: A with the index at UpdateBeforeRender, B with the index at UpdateAfterRender");
+		REGISTER_COMMAND("cev_probe_sync", DevProbe::CmdProbeSync, VF_NULL, "Measurement: cev_probe_sync 1|0, a 64x64 RGBA texture filled each frame with a colour coding the frame index (C), next to two colour blocks of one fullscreen output frame: A with the index at UpdateBeforeRender, B with the index at UpdateAfterRender (XUI2D backend: at UpdateBeforeRender too, its frame is submitted there)");
 		REGISTER_COMMAND("cev_bench_play", DevProbe::CmdBenchPlay, VF_NULL, "Measurement: cev_bench_play <path> <texture name> [loop 0|1] plays into a named texture (not fullscreen); no arguments = stop");
-		REGISTER_COMMAND("cev_probe_fullscreen", DevProbe::CmdProbeFullscreen, VF_NULL, "Development (L4): cev_probe_fullscreen <path> [fit] creates one more fullscreen player (looping, started at once, on top of the previous ones) with fit 0 = Fill, 1 = Fit, 2 = Letterbox (EVideoFit order; default 2); pop destroys the most recent one, off destroys all of them");
+		REGISTER_COMMAND("cev_probe_fullscreen", DevProbe::CmdProbeFullscreen, VF_NULL, "Development (L4): cev_probe_fullscreen <path> [fit] creates one more fullscreen player (looping, started at once, on top of the previous ones) with fit 0 = Fill, 1 = Fit, 2 = Letterbox (EVideoFit order; default 2); pop destroys the most recent one, off destroys all of them; surface:<id> [fit] / unsurface:<id> (L5) puts an existing surface player (cev_play_surface) into the fullscreen output too / takes it out");
 		REGISTER_COMMAND("cev_bench_stop", DevProbe::CmdBenchStop, VF_NULL, "Measurement: stop the cev_bench_play player");
 		REGISTER_COMMAND("cev_hidden_bench", CmdHiddenBench, VF_NULL, "Measurement: cev_hidden_bench <path> [cycles] [hidden s] [visible s] plays into surface CevBench and toggles a consumer hint hidden / visible, logs the catch-up of every cycle");
 		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");

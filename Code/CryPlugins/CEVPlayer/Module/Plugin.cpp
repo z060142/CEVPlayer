@@ -110,8 +110,8 @@ namespace CEVPlayer
 			}
 		}
 
-		// One tick per frame before the scene is rendered (frame step, texture upload, listener dispatch) and
-		// the fullscreen output step (the XUI2DL layer list) after the game framework drew its own overlays.
+		// One tick per frame before the scene is rendered (frame step, texture upload, listener dispatch, and the XUI2D
+		// fullscreen frame) and the XUI2DL fullscreen layer list after the game framework drew its own overlays.
 		EnableUpdate(EUpdateStep::BeforeRender, true);
 		EnableUpdate(EUpdateStep::AfterRender, true);
 		return true;
@@ -139,12 +139,16 @@ namespace CEVPlayer
 #endif
 		TickRunScript(); // development test driver (cev_run_script)
 		DevProbesBeforeRender(); // measurement only (S0)
+		// Last: every texture of this frame is uploaded. The XUI2D backend submits here, in the same frame batch as
+		// CryXTUI's surfaces (an XUI2D frame submitted after the scene could land above the UI).
+		if (m_pManager)
+			m_pManager->PresentFullscreenBeforeRender(); // takes the probes' debug layers (DevProbesDebugLayers)
 	}
 
 	void CVideoPlugin::UpdateAfterRender()
 	{
 		if (m_pManager)
-			m_pManager->UpdateAfterRender(); // takes the probes' debug layers (DevProbesDebugLayers)
+			m_pManager->UpdateAfterRender(); // XUI2DL backend: takes the probes' debug layers (DevProbesDebugLayers)
 	}
 
 	void CVideoPlugin::ShutdownBridge()

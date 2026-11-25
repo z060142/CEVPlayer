@@ -81,6 +81,22 @@ if(EXISTS "${CRYENGINE_DIR}/Code/CryEngine/CryCommon/CryVS")
 			"Bindings/CryVSEnv.cpp"
 	)
 endif()
+# L5: the XUI2D fullscreen backend. Only built when the engine's IXUIRenderer.h (XTFrame's CE_XTUI patches) has the planar
+# shading (EShading::TexturePlanar, patch 18); an engine without it builds the XUI2DL backend alone. The renderer is
+# checked again at run time (XUI2D_Patched) before the interface is used.
+set(CEV_HAVE_XUI2D OFF)
+set(CEV_IXUIRENDERER_H "${CRYENGINE_DIR}/Code/CryEngine/CryCommon/CryRenderer/IXUIRenderer.h")
+if(EXISTS "${CEV_IXUIRENDERER_H}")
+	file(STRINGS "${CEV_IXUIRENDERER_H}" CEV_XUI2D_PLANAR_HITS REGEX "TexturePlanar")
+	if(CEV_XUI2D_PLANAR_HITS)
+		set(CEV_HAVE_XUI2D ON)
+		add_sources("NoUberFile"
+		    SOURCE_GROUP "Render"
+				"Render/FullscreenXUI2D.cpp"
+				"Render/FullscreenXUI2D.h"
+		)
+	endif()
+endif()
 add_sources("NoUberFile"
     SOURCE_GROUP "Components"
 		"Components/VideoPlayerComponent.cpp"
@@ -123,6 +139,12 @@ if(CEV_HAVE_LOADTIME_CALLBACKS)
 	target_compile_definitions(${THIS_PROJECT} PRIVATE CEV_HAVE_LOADTIME_CALLBACKS=1)
 else()
 	message(STATUS "CEVPlayer: no AddLoadtimeCallback in IRenderer.h, building without loading-loop callbacks")
+endif()
+if(CEV_HAVE_XUI2D)
+	message(STATUS "CEVPlayer: IXUIRenderer.h has EShading::TexturePlanar, building the XUI2D fullscreen backend (CEV_HAVE_XUI2D=1)")
+	target_compile_definitions(${THIS_PROJECT} PRIVATE CEV_HAVE_XUI2D=1)
+else()
+	message(STATUS "CEVPlayer: no IXUIRenderer.h with TexturePlanar, building without the XUI2D fullscreen backend")
 endif()
 set_target_properties(${THIS_PROJECT} PROPERTIES LINK_FLAGS "/ignore:4099 /ignore:4075 /ignore:4098")
 
