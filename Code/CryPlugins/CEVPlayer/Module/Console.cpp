@@ -1046,7 +1046,7 @@ namespace CEVPlayer
 #endif
 
 	// ------------------------------------------------------------------------------------------------
-	// Development-only (L1): cev_probe_xui2dl <case> [surface] | off | stats sends one XUI2DLApi::SetFrame per case (three for
+	// Development-only (L1, L2): cev_probe_xui2dl <case> [surface] | off | stats | yuv | read | yuvsurface sends one XUI2DLApi::SetFrame per case (three for
 	// case 8) and logs the result and the stage's statistics before and after. Cases 2-4 (and 7) take the texture of
 	// the surface player <surface> (cev_play_surface). Layer positions follow the size of the stage's output.
 	namespace XUI2DLProbe
@@ -1124,13 +1124,264 @@ namespace CEVPlayer
 				LogAlways("cev_probe_xui2dl: case %s SetFrame -> %d", name, r);
 				return r;
 			}
+
+			// L2: synthetic packed Y'CbCr pictures (XTFrame 23-host-integration.md section 23.aj; the plug-in's packing:
+			// Y (0,0,W,H), U (0,H,W/2,ceil(H/2)), V (W/2,H,...), A (0,H+ch,W,H)). Fixed content, no randomness.
+			struct SYuvPicture
+			{
+				uint32_t w = 0, h = 0, kind = XUI2DL_KIND_YUV420, matrix = 0, range = 0, siting = 0, texW = 0, texH = 0;
+				XUI2DLPlane y = {}, u = {}, v = {}, a = {};
+			};
+			int s_yuvTexId = 0;
+			uint32 s_yuvTexSerial = 0;
+			std::vector<uint8> s_yuvBuf;   // kept alive while the texture update may still read it
+
+			uint8 Clamp255(double v) { return static_cast<uint8>(std::min(255.0, std::max(0.0, std::floor(v + 0.5)))); }
+
+			// n 1-12: gradient, 2 matrices x 2 ranges x 3 sitings; 13: odd height; 14: with alpha; 15: sharp red/blue chroma edges;
+			// 16: plane borders (Y 16, U 255, V 0, each plane's last column and row 235 / 64 / 192).
+			bool MakeYuvPicture(int n, SYuvPicture& p, std::vector<uint8>& buf)
+			{
+				if (n < 1 || n > 16)
+					return false;
+				p.w = 640;
+				p.h = n == 13 ? 359u : 360u;
+				p.kind = n == 14 ? XUI2DL_KIND_YUVA420 : XUI2DL_KIND_YUV420;
+				p.matrix = n <= 12 ? static_cast<uint32_t>((n - 1) / 6) : 1u;
+				p.range = n <= 12 ? static_cast<uint32_t>(((n - 1) / 3) % 2) : 0u;
+				p.siting = n <= 12 ? static_cast<uint32_t>((n - 1) % 3) : 0u;
+				const uint32_t w = p.w, h = p.h, cw = w / 2, ch = (h + 1) / 2;
+				const bool alpha = p.kind == XUI2DL_KIND_YUVA420;
+				p.y = XUI2DLPlane{ 0, 0, w, h };
+				p.u = XUI2DLPlane{ 0, h, cw, ch };
+				p.v = XUI2DLPlane{ cw, h, cw, ch };
+				p.a = alpha ? XUI2DLPlane{ 0, h + ch, w, h } : XUI2DLPlane{ 0, 0, 0, 0 };
+				p.texW = w;
+				p.texH = h + ch + (alpha ? h : 0u);
+				buf.assign(static_cast<size_t>(p.texW) * p.texH, 0);
+				auto Y = [&](uint32_t x, uint32_t yy) -> uint8& { return buf[static_cast<size_t>(yy) * p.texW + x]; };
+				auto U = [&](uint32_t x, uint32_t yy) -> uint8& { return buf[static_cast<size_t>(h + yy) * p.texW + x]; };
+				auto V = [&](uint32_t x, uint32_t yy) -> uint8& { return buf[static_cast<size_t>(h + yy) * p.texW + cw + x]; };
+				if (n == 15)
+				{
+					// Red / blue stripes of widths 1,1,2,2,4,4 (period 14): vertical in the top half, horizontal in the bottom half.
+					const double kr = 0.2126, kb = 0.0722, kg = 1.0 - kr - kb;
+					std::vector<double> cb(static_cast<size_t>(w) * h), cr(static_cast<size_t>(w) * h);
+					for (uint32_t yy = 0; yy < h; ++yy)
+						for (uint32_t x = 0; x < w; ++x)
+						{
+							const uint32_t t = (yy < h / 2 ? x : yy) % 14u;
+							// segments: [0,1) red, [1,2) blue, [2,4) red, [4,6) blue, [6,10) red, [10,14) blue
+							const bool isRed = t < 1 || (t >= 2 && t < 4) || (t >= 6 && t < 10);
+							const double R = isRed ? 1.0 : 0.0, G = 0.0, B = isRed ? 0.0 : 1.0;
+							const double yl = kr * R + kg * G + kb * B;
+							Y(x, yy) = Clamp255(16.0 + 219.0 * yl);
+							cb[static_cast<size_t>(yy) * w + x] = (B - yl) / (2.0 * (1.0 - kb));
+							cr[static_cast<size_t>(yy) * w + x] = (R - yl) / (2.0 * (1.0 - kr));
+						}
+					for (uint32_t cy = 0; cy < ch; ++cy)
+						for (uint32_t cx = 0; cx < cw; ++cx)
+						{
+							double sb = 0.0, sr = 0.0;
+							int cnt = 0;
+							for (uint32_t dy = 0; dy < 2; ++dy)
+								for (uint32_t dx = 0; dx < 2; ++dx)
+								{
+									const uint32_t x = 2 * cx + dx, yy = 2 * cy + dy;
+									if (yy >= h)
+										continue;
+									sb += cb[static_cast<size_t>(yy) * w + x];
+									sr += cr[static_cast<size_t>(yy) * w + x];
+									++cnt;
+								}
+							U(cx, cy) = Clamp255(128.0 + 224.0 * sb / cnt);
+							V(cx, cy) = Clamp255(128.0 + 224.0 * sr / cnt);
+						}
+					return true;
+				}
+				if (n == 16)
+				{
+					for (uint32_t yy = 0; yy < h; ++yy)
+						for (uint32_t x = 0; x < w; ++x)
+							Y(x, yy) = (x == w - 1 || yy == h - 1) ? 235 : 16;
+					for (uint32_t cy = 0; cy < ch; ++cy)
+						for (uint32_t cx = 0; cx < cw; ++cx)
+						{
+							const bool edge = cx == cw - 1 || cy == ch - 1;
+							U(cx, cy) = edge ? 64 : 255;
+							V(cx, cy) = edge ? 192 : 0;
+						}
+					return true;
+				}
+				// Smooth gradients over the range's span.
+				const double lo = p.range == 0 ? 16.0 : 0.0, hiY = p.range == 0 ? 235.0 : 255.0, hiC = p.range == 0 ? 240.0 : 255.0;
+				for (uint32_t yy = 0; yy < h; ++yy)
+					for (uint32_t x = 0; x < w; ++x)
+						Y(x, yy) = Clamp255(lo + (hiY - lo) * double(x + yy) / double(w - 1 + h - 1));
+				for (uint32_t cy = 0; cy < ch; ++cy)
+					for (uint32_t cx = 0; cx < cw; ++cx)
+					{
+						U(cx, cy) = Clamp255(lo + (hiC - lo) * double(cx) / double(cw - 1));
+						V(cx, cy) = Clamp255(lo + (hiC - lo) * double(cy) / double(ch - 1));
+					}
+				if (alpha)
+					for (uint32_t yy = 0; yy < h; ++yy)
+						for (uint32_t x = 0; x < w; ++x)
+							buf[static_cast<size_t>(h + ch + yy) * p.texW + x] = Clamp255(255.0 * double(x) / double(w - 1));
+				return true;
+			}
+
+			// <user folder>/<file>, a real path for writing.
+			std::string UserFile(const char* file)
+			{
+				CryPathString adjusted;
+				gEnv->pCryPak->AdjustFileName((std::string("%USER%/") + file).c_str(), adjusted, ICryPak::FLAGS_PATH_REAL | ICryPak::FLAGS_FOR_WRITING);
+				return adjusted.c_str();
+			}
+
+			XUI2DLLayer YuvLayer(uint32_t kind, uint32_t imageW, uint32_t imageH, const XUI2DLPlane& y, const XUI2DLPlane& u, const XUI2DLPlane& v, const XUI2DLPlane& a,
+			                     uint32_t matrix, uint32_t range, uint32_t siting, int texId, const XUI2DLRect& dst, uint32_t blend)
+			{
+				XUI2DLLayer l = Layer(kind, blend, dst.x, dst.y, dst.w, dst.h, 1.f, 1.f, 1.f, 1.f);
+				l.textureId = texId;
+				l.imageWidth = imageW;
+				l.imageHeight = imageH;
+				l.planeY = y;
+				l.planeU = u;
+				l.planeV = v;
+				l.planeA = a;
+				l.colorMatrix = matrix;
+				l.colorRange = range;
+				l.chromaSiting = siting;
+				return l;
+			}
+
+			// cev_probe_xui2dl yuv <n> [scale]: an R8 texture of synthetic picture n (made as cev_probe_r8 does), one YUV layer at
+			// the top left (scale 1 = 1:1), the packed bytes and the parameters written to <user>/xui2dl_yuv_<n>.bin / .txt.
+			void CmdYuv(const XUI2DLApi* api, int n, float scale)
+			{
+				SYuvPicture p;
+				std::vector<uint8> buf;
+				if (!MakeYuvPicture(n, p, buf) || !(scale > 0.f))
+				{
+					LogAlways("cev_probe_xui2dl: yuv <n 1-16> [scale > 0]");
+					return;
+				}
+				const int oldId = s_yuvTexId;
+				s_yuvBuf.swap(buf);
+				char texName[48];
+				cry_sprintf(texName, "$CevProbeYuv%u", ++s_yuvTexSerial);   // a new texture per call: the stage may still hold the previous one
+				s_yuvTexId = static_cast<int>(gEnv->pRenderer->UploadToVideoMemory(nullptr, p.texW, p.texH, eTF_R8, eTF_R8, 0, false, FILTER_BILINEAR, 0, texName, FT_NOMIPS));
+				gEnv->pRenderer->UpdateTextureInVideoMemory(static_cast<uint32>(s_yuvTexId), s_yuvBuf.data(), 0, 0, p.texW, p.texH, eTF_R8);
+				DevProbe::LogTexture("cev_probe_xui2dl yuv", s_yuvTexId);
+
+				const XUI2DLRect dst = { 0.f, 0.f, p.w * scale, p.h * scale };
+				XUI2DLLayer layers[2];
+				uint32_t count = 0;
+				if (p.kind == XUI2DL_KIND_YUVA420)
+					layers[count++] = Layer(XUI2DL_KIND_SOLID, XUI2DL_BLEND_REPLACE, dst.x, dst.y, dst.w, dst.h, 1.f, 1.f, 1.f, 1.f);
+				layers[count++] = YuvLayer(p.kind, p.w, p.h, p.y, p.u, p.v, p.a, p.matrix, p.range, p.siting, s_yuvTexId, dst,
+				                           p.kind == XUI2DL_KIND_YUVA420 ? XUI2DL_BLEND_SRCOVER : XUI2DL_BLEND_REPLACE);
+				char label[32];
+				cry_sprintf(label, "yuv %d", n);
+				const XUI2DLRect whole = { 0.f, 0.f, 0.f, 0.f };
+				Send(api, label, layers, count, whole);
+				if (oldId > 0 && oldId != s_yuvTexId)
+					gEnv->pRenderer->RemoveTexture(static_cast<unsigned int>(oldId));   // the stage's snapshot held its own reference
+
+				char file[64];
+				cry_sprintf(file, "xui2dl_yuv_%d.bin", n);
+				const std::string bin = UserFile(file);
+				std::ofstream(bin, std::ios::binary).write(reinterpret_cast<const char*>(s_yuvBuf.data()), static_cast<std::streamsize>(s_yuvBuf.size()));
+				cry_sprintf(file, "xui2dl_yuv_%d.txt", n);
+				const std::string txt = UserFile(file);
+				std::ofstream t(txt);
+				t << "n " << n << "\nimage " << p.w << " " << p.h << "\nkind " << p.kind << "\nmatrix " << p.matrix << "\nrange " << p.range << "\nsiting " << p.siting
+				  << "\ntexture " << p.texW << " " << p.texH << "\nplaneY " << p.y.x << " " << p.y.y << " " << p.y.w << " " << p.y.h
+				  << "\nplaneU " << p.u.x << " " << p.u.y << " " << p.u.w << " " << p.u.h << "\nplaneV " << p.v.x << " " << p.v.y << " " << p.v.w << " " << p.v.h
+				  << "\nplaneA " << p.a.x << " " << p.a.y << " " << p.a.w << " " << p.a.h << "\nscale " << scale << "\ndst " << dst.x << " " << dst.y << " " << dst.w << " " << dst.h
+				  << "\nunder " << (p.kind == XUI2DL_KIND_YUVA420 ? "white" : "none") << "\nblend " << layers[count - 1].blend << "\n";
+				LogAlways("cev_probe_xui2dl: yuv %d %ux%u kind %u matrix %u range %u siting %u texture %ux%u id %d scale %g -> <%s> <%s>", n, p.w, p.h, p.kind, p.matrix, p.range,
+				          p.siting, p.texW, p.texH, s_yuvTexId, scale, bin.c_str(), txt.c_str());
+			}
+
+			// cev_probe_xui2dl read <tag>: the presented back buffer at the stage's output size (ReadFrameBuffer, RGB8, the read-back
+			// of cev_probe_loadtime) to <user>/xui2dl_read_<tag>.ppm.
+			void CmdRead(const XUI2DLApi* api, const char* tag)
+			{
+				float fw = 0.f, fh = 0.f;
+				OutputSize(api, fw, fh);
+				const int w = static_cast<int>(fw), h = static_cast<int>(fh);
+				if (w <= 0 || h <= 0)
+					return;
+				std::vector<uint8> px(static_cast<size_t>(w) * h * 3, 0);
+				const bool ok = gEnv->pRenderer->ReadFrameBuffer(reinterpret_cast<uint32*>(px.data()), w, h, true, EReadTextureFormat::RGB8);
+				std::string file = UserFile((std::string("xui2dl_read_") + tag + ".ppm").c_str());
+				if (ok)
+				{
+					std::ofstream out(file, std::ios::binary);
+					out << "P6\n" << w << " " << h << "\n255\n";
+					out.write(reinterpret_cast<const char*>(px.data()), static_cast<std::streamsize>(px.size()));
+				}
+				LogAlways("cev_probe_xui2dl: read %s %dx%d (renderer %dx%d) %s -> <%s>", tag, w, h, gEnv->pRenderer->GetWidth(), gEnv->pRenderer->GetHeight(), ok ? "ok" : "FAILED",
+				          ok ? file.c_str() : "");
+			}
+
+			// cev_probe_xui2dl yuvsurface <surface> [seek seconds]: with a time, pauses the surface player and seeks there (contract
+			// control); without, queries the contract snapshot and shows the texture 1:1 at the top left - a YUV layer with the
+			// snapshot's planes, matrix, range and siting for a packed layout, an RGBA layer for RGBA8.
+			void CmdYuvSurface(const XUI2DLApi* api, const char* surface, const char* seek)
+			{
+				using PFN_Source = const CryTexSourceApi* (*)(void);
+				HMODULE self = nullptr;
+				::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(&CmdYuvSurface), &self);
+				const PFN_Source fn = self != nullptr ? reinterpret_cast<PFN_Source>(::GetProcAddress(self, "CryTexSource_v1")) : nullptr;
+				const CryTexSourceApi* const cts = fn != nullptr ? fn() : nullptr;
+				if (cts == nullptr || cts->version < 2)
+				{
+					LogAlways("cev_probe_xui2dl: yuvsurface: no v2 contract table");
+					return;
+				}
+				if (seek != nullptr)
+				{
+					const int rp = cts->control(surface, CTS_VERB_PAUSE, 0.0);
+					const int rs = cts->control(surface, CTS_VERB_SEEK, std::atof(seek));
+					LogAlways("cev_probe_xui2dl: yuvsurface <%s> pause -> %d, seek %s -> %d", surface, rp, seek, rs);
+					return;
+				}
+				CryTexSourceInfo info = {};
+				info.size = sizeof(info);
+				if (cts->query(surface, &info) != 1 || info.textureId <= 0 || info.width <= 0 || info.height <= 0)
+				{
+					LogAlways("cev_probe_xui2dl: yuvsurface <%s>: no texture", surface);
+					return;
+				}
+				auto Plane = [](const CryTexSourceRect& r) { return XUI2DLPlane{ static_cast<uint32_t>(r.x), static_cast<uint32_t>(r.y), static_cast<uint32_t>(r.w), static_cast<uint32_t>(r.h) }; };
+				const XUI2DLRect dst = { 0.f, 0.f, static_cast<float>(info.width), static_cast<float>(info.height) };
+				XUI2DLLayer l;
+				if (info.layout == CTS_LAYOUT_PACKED_YUV420 || info.layout == CTS_LAYOUT_PACKED_YUVA420)
+					l = YuvLayer(info.layout == CTS_LAYOUT_PACKED_YUV420 ? XUI2DL_KIND_YUV420 : XUI2DL_KIND_YUVA420, static_cast<uint32_t>(info.width), static_cast<uint32_t>(info.height),
+					             Plane(info.planeY), Plane(info.planeU), Plane(info.planeV), Plane(info.planeA), info.colorMatrix, info.colorRange, info.chromaSiting, info.textureId, dst,
+					             XUI2DL_BLEND_REPLACE);
+				else
+				{
+					l = Layer((info.flags & 1u) ? XUI2DL_KIND_RGBA_PREMULT : XUI2DL_KIND_RGBA_STRAIGHT, XUI2DL_BLEND_REPLACE, dst.x, dst.y, dst.w, dst.h, 1.f, 1.f, 1.f, 1.f);
+					l.textureId = info.textureId;
+				}
+				LogAlways("cev_probe_xui2dl: yuvsurface <%s> layout %u %dx%d tex %d gen %u t=%.3f state %u matrix %u range %u siting %u flags 0x%x Y(%d,%d,%d,%d) U(%d,%d,%d,%d) V(%d,%d,%d,%d) A(%d,%d,%d,%d)",
+				          surface, info.layout, info.width, info.height, info.textureId, info.generation, info.timeSeconds, info.state, info.colorMatrix, info.colorRange, info.chromaSiting,
+				          info.flags, info.planeY.x, info.planeY.y, info.planeY.w, info.planeY.h, info.planeU.x, info.planeU.y, info.planeU.w, info.planeU.h, info.planeV.x, info.planeV.y,
+				          info.planeV.w, info.planeV.h, info.planeA.x, info.planeA.y, info.planeA.w, info.planeA.h);
+				const XUI2DLRect whole = { 0.f, 0.f, 0.f, 0.f };
+				Send(api, "yuvsurface", &l, 1, whole);
+			}
 		}
 
 		void Cmd(IConsoleCmdArgs* args)
 		{
 			if (args == nullptr || args->GetArgCount() < 2)
 			{
-				LogAlways("usage: cev_probe_xui2dl <case 1-8> [surface] | off | stats   (cases 2-4 need the surface of a cev_play_surface player)");
+				LogAlways("usage: cev_probe_xui2dl <case 1-8> [surface] | off | stats | yuv <n 1-16> [scale] | read <tag> | yuvsurface <surface> [seek seconds]   (cases 2-4 need the surface of a cev_play_surface player)");
 				return;
 			}
 			const XUI2DLApi* const api = XUI2DLClient::Get();
@@ -1150,6 +1401,24 @@ namespace CEVPlayer
 			if (stricmp(name, "off") == 0)
 			{
 				Send(api, "off", nullptr, 0, whole);
+				LogStats(api, "after");
+				return;
+			}
+			if (stricmp(name, "yuv") == 0)
+			{
+				CmdYuv(api, args->GetArgCount() > 2 ? std::atoi(args->GetArg(2)) : 0, args->GetArgCount() > 3 ? static_cast<float>(std::atof(args->GetArg(3))) : 1.f);
+				LogStats(api, "after");
+				return;
+			}
+			if (stricmp(name, "read") == 0)
+			{
+				CmdRead(api, args->GetArgCount() > 2 ? args->GetArg(2) : "frame");
+				return;
+			}
+			if (stricmp(name, "yuvsurface") == 0)
+			{
+				if (args->GetArgCount() > 2)
+					CmdYuvSurface(api, args->GetArg(2), args->GetArgCount() > 3 ? args->GetArg(3) : nullptr);
 				LogStats(api, "after");
 				return;
 			}
@@ -1506,7 +1775,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_hidden_bench", CmdHiddenBench, VF_NULL, "Measurement: cev_hidden_bench <path> [cycles] [hidden s] [visible s] plays into surface CevBench and toggles a consumer hint hidden / visible, logs the catch-up of every cycle");
 		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");
 		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> draws the surface's texture top left as it is (an R8 packed texture shows the planes in grey); no argument = off");
-		REGISTER_COMMAND("cev_probe_xui2dl", XUI2DLProbe::Cmd, VF_NULL, "Development (L1): cev_probe_xui2dl <case 1-8> [surface] | off | stats sends one XUI2DL SetFrame per case (docs/tasks/L1.md; cases 2-4 draw the texture of the cev_play_surface player <surface>) and logs the result and the XUI2DL statistics; off clears the retained list; stats only logs every XUI2DLStats field");
+		REGISTER_COMMAND("cev_probe_xui2dl", XUI2DLProbe::Cmd, VF_NULL, "Development (L1, L2): cev_probe_xui2dl <case 1-8> [surface] | off | stats | yuv <n 1-16> [scale] | read <tag> | yuvsurface <surface> [seek seconds] sends one XUI2DL SetFrame per case (docs/tasks/L1.md; cases 2-4 draw the texture of the cev_play_surface player <surface>) and logs the result and the XUI2DL statistics; off clears the retained list; stats only logs every XUI2DLStats field; yuv shows synthetic packed YUV picture n (docs/tasks/L2.md) and writes it to <user>/xui2dl_yuv_<n>.bin/.txt; read writes the presented frame to <user>/xui2dl_read_<tag>.ppm; yuvsurface shows a surface texture 1:1 from its contract snapshot (with a time: pause and seek)");
 #if CEV_HAVE_LOADTIME_CALLBACKS
 		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>|control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]...] registers an order-100 loading-loop callback that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
 #endif
