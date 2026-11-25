@@ -3,6 +3,7 @@
 #include "Contract/ContractTest.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -27,6 +28,14 @@ namespace CEVPlayer
 	{
 		namespace
 		{
+			//! Real seconds since the first call (steady_clock). The engine's async time follows the smoothed / clamped
+			//! frame time and runs 5-17% slow, which the wall-clock checks must not see.
+			double SteadySeconds()
+			{
+				static const std::chrono::steady_clock::time_point s_start = std::chrono::steady_clock::now();
+				return std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count();
+			}
+
 			constexpr const char* kSurface = "CevSelfTest";
 			constexpr uint64_t kConsumerA = 0x1111;
 			constexpr uint64_t kConsumerB = 0x2222;
@@ -57,7 +66,7 @@ namespace CEVPlayer
 						++failed;
 					LogAlways("cev_contract_selftest: %s %s", ok ? "ok  " : "FAIL", what.c_str());
 				}
-				double Now() const { return gEnv->pTimer != nullptr ? gEnv->pTimer->GetAsyncCurTime() : 0.0; }
+				double Now() const { return SteadySeconds(); }
 				bool Query(const char* name, CryTexSourceInfo& out)
 				{
 					std::memset(&out, 0, sizeof(out));
@@ -157,7 +166,7 @@ namespace CEVPlayer
 			constexpr const char* kBench = "CevBench";
 			constexpr uint64_t kBenchConsumer = 0xBE7C;
 
-			double BenchNow() { return gEnv->pTimer != nullptr ? gEnv->pTimer->GetAsyncCurTime() : 0.0; }
+			double BenchNow() { return SteadySeconds(); }
 
 			void EndBench(const char* why)
 			{

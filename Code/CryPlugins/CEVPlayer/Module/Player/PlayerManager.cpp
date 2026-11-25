@@ -3,6 +3,7 @@
 #include "PlayerManager.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <string>
 
@@ -30,10 +31,12 @@ namespace CEVPlayer
 		constexpr float kLoadIdleTimeout = 120.f;
 		constexpr float kLoadCompleteTimeout = 15.f; // after OnLoadingComplete only the precache steps are left
 
-		//! Main thread only (engine timer): level loading bookkeeping and the stats file name stamp, never the tick.
+		//! Real seconds since the first call (steady_clock), for the level loading deadlines only (never the tick). Not
+		//! the engine's async time: it follows the smoothed / clamped frame time and runs slow.
 		float NowSeconds()
 		{
-			return gEnv != nullptr && gEnv->pTimer != nullptr ? gEnv->pTimer->GetAsyncCurTime() : 0.f;
+			static const std::chrono::steady_clock::time_point s_start = std::chrono::steady_clock::now();
+			return std::chrono::duration<float>(std::chrono::steady_clock::now() - s_start).count();
 		}
 
 		// Scratch buffers of the per-frame output step (kept across frames: no allocation in steady state).
