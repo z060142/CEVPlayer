@@ -31,6 +31,7 @@
 #include "Player/PlayerManager.h"
 #include "Player/VideoPlayerImpl.h"
 #include "Render/RenderBridge.h"
+#include "Render/XUI2DLClient.h"
 
 namespace CEVPlayer
 {
@@ -1044,6 +1045,195 @@ namespace CEVPlayer
 	}
 #endif
 
+	// ------------------------------------------------------------------------------------------------
+	// Development-only (L1): cev_probe_xui2dl <case> [surface] | off sends one XUI2DLApi::SetFrame per case (three for
+	// case 8) and logs the result and the stage's statistics before and after. Cases 2-4 (and 7) take the texture of
+	// the surface player <surface> (cev_play_surface). Layer positions follow the size of the stage's output.
+	namespace XUI2DLProbe
+	{
+		namespace
+		{
+			XUI2DLLayer Layer(uint32_t kind, uint32_t blend, float x, float y, float w, float h, float r, float g, float b, float a)
+			{
+				XUI2DLLayer l;
+				std::memset(&l, 0, sizeof(l));
+				l.size = sizeof(l);
+				l.kind = kind;
+				l.blend = blend;
+				l.dst = XUI2DLRect{ x, y, w, h };
+				l.color[0] = r;
+				l.color[1] = g;
+				l.color[2] = b;
+				l.color[3] = a;
+				return l;
+			}
+
+			void LogStats(const XUI2DLApi* api, const char* when)
+			{
+				XUI2DLStats s;
+				std::memset(&s, 0, sizeof(s));
+				s.size = sizeof(s);
+				api->GetStats(&s);
+				LogAlways("cev_probe_xui2dl: stats %s: resourcesReady %u shaderReady %u layersHeld %u output %ux%u framesDrawn %llu drawsExecuted %llu drawsSkipped %llu", when,
+					s.resourcesReady, s.shaderReady, s.layersHeld, s.outputWidth, s.outputHeight, static_cast<unsigned long long>(s.framesDrawn),
+					static_cast<unsigned long long>(s.drawsExecuted), static_cast<unsigned long long>(s.drawsSkipped));
+			}
+
+			// The stage's output size (its last executed frame), else the renderer's.
+			void OutputSize(const XUI2DLApi* api, float& w, float& h)
+			{
+				XUI2DLStats s;
+				std::memset(&s, 0, sizeof(s));
+				s.size = sizeof(s);
+				api->GetStats(&s);
+				w = static_cast<float>(s.outputWidth);
+				h = static_cast<float>(s.outputHeight);
+				if (w <= 0.f || h <= 0.f)
+				{
+					w = static_cast<float>(gEnv->pRenderer->GetWidth());
+					h = static_cast<float>(gEnv->pRenderer->GetHeight());
+				}
+			}
+
+			// Three opaque blocks (red, green, blue) in a box of width `boxW`; the blue one's scissor shows its left half.
+			void ThreeBlocks(float boxW, XUI2DLLayer* pOut)
+			{
+				const float u = boxW / 32.f;
+				pOut[0] = Layer(XUI2DL_KIND_SOLID, XUI2DL_BLEND_REPLACE, u, u, 6.f * u, 4.f * u, 1.f, 0.f, 0.f, 1.f);
+				pOut[1] = Layer(XUI2DL_KIND_SOLID, XUI2DL_BLEND_REPLACE, 8.f * u, u, 6.f * u, 4.f * u, 0.f, 1.f, 0.f, 1.f);
+				pOut[2] = Layer(XUI2DL_KIND_SOLID, XUI2DL_BLEND_REPLACE, 15.f * u, u, 6.f * u, 4.f * u, 0.f, 0.f, 1.f, 1.f);
+				pOut[2].scissor = XUI2DLRect{ 15.f * u, u, 3.f * u, 4.f * u };
+			}
+
+			// The largest rectangle of the image's aspect inside (x, y, w, h), centred.
+			XUI2DLRect Fit(float x, float y, float w, float h, float imageW, float imageH)
+			{
+				const float s = std::min(w / imageW, h / imageH);
+				return XUI2DLRect{ x + 0.5f * (w - imageW * s), y + 0.5f * (h - imageH * s), imageW * s, imageH * s };
+			}
+
+			int Send(const XUI2DLApi* api, const char* name, const XUI2DLLayer* pLayers, uint32_t count, const XUI2DLRect& viewport, uint32_t frameSize = sizeof(XUI2DLFrame))
+			{
+				XUI2DLFrame f;
+				std::memset(&f, 0, sizeof(f));
+				f.size = frameSize;
+				f.layerCount = count;
+				f.pLayers = pLayers;
+				f.viewport = viewport;
+				const int r = api->SetFrame(&f);
+				LogAlways("cev_probe_xui2dl: case %s SetFrame -> %d", name, r);
+				return r;
+			}
+		}
+
+		void Cmd(IConsoleCmdArgs* args)
+		{
+			if (args == nullptr || args->GetArgCount() < 2)
+			{
+				LogAlways("usage: cev_probe_xui2dl <case 1-8> [surface] | off   (cases 2-4 need the surface of a cev_play_surface player)");
+				return;
+			}
+			const XUI2DLApi* const api = XUI2DLClient::Get();
+			if (api == nullptr)
+			{
+				LogAlways("cev_probe_xui2dl: no XUI2DL stage in this renderer");
+				return;
+			}
+			const char* const name = args->GetArg(1);
+			const XUI2DLRect whole = { 0.f, 0.f, 0.f, 0.f };
+			LogStats(api, "before");
+			if (stricmp(name, "off") == 0)
+			{
+				Send(api, "off", nullptr, 0, whole);
+				LogStats(api, "after");
+				return;
+			}
+			const int c = std::atoi(name);
+			float W = 0.f, H = 0.f;
+			OutputSize(api, W, H);
+
+			// The surface player's texture (cases 2-4 and 7).
+			int texId = 0;
+			float texW = 0.f, texH = 0.f;
+			if (args->GetArgCount() > 2 && mEnv->pManager != nullptr)
+			{
+				if (IVideoPlayer* const p = mEnv->pManager->FindPlayerBySurface(args->GetArg(2)))
+				{
+					if (ITexture* const pTex = p->GetTexture())
+					{
+						texId = pTex->GetTextureID();
+						texW = static_cast<float>(pTex->GetWidth());
+						texH = static_cast<float>(pTex->GetHeight());
+						LogAlways("cev_probe_xui2dl: surface <%s> texture id %d %dx%d layout %s", args->GetArg(2), texId, pTex->GetWidth(), pTex->GetHeight(),
+							p->GetPixelLayout() == EVideoPixelLayout::RGBA8 ? "RGBA8" : "packed YUV");
+					}
+				}
+			}
+			if ((c >= 2 && c <= 4) && (texId <= 0 || texW <= 0.f || texH <= 0.f))
+			{
+				LogAlways("cev_probe_xui2dl: case %d needs a surface player with a texture (cev_probe_xui2dl %d <surface>)", c, c);
+				return;
+			}
+
+			XUI2DLLayer layers[XUI2DL_MAX_LAYERS + 1];
+			switch (c)
+			{
+			case 1:
+				ThreeBlocks(W, layers);
+				Send(api, "1", layers, 3, whole);
+				break;
+			case 2:
+			case 3:
+				layers[0] = Layer(XUI2DL_KIND_SOLID, XUI2DL_BLEND_REPLACE, 0.f, 0.f, W, H, 0.f, 0.f, 0.f, 1.f);
+				layers[1] = Layer(XUI2DL_KIND_RGBA_PREMULT, XUI2DL_BLEND_SRCOVER, 0.f, 0.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f);
+				layers[1].textureId = texId;
+				layers[1].dst = Fit(0.f, 0.f, W, H, texW, texH);
+				if (c == 3)
+					layers[1].src = XUI2DLRect{ 0.5f * texW, 0.5f * texH, 0.5f * texW, 0.5f * texH };
+				Send(api, c == 2 ? "2" : "3", layers, 2, whole);
+				break;
+			case 4:
+				layers[0] = Layer(XUI2DL_KIND_SOLID, XUI2DL_BLEND_REPLACE, 0.f, 0.f, W, H, 1.f, 1.f, 1.f, 1.f);
+				layers[1] = Layer(XUI2DL_KIND_RGBA_PREMULT, XUI2DL_BLEND_SRCOVER, 0.f, 0.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f);
+				layers[1].textureId = texId;
+				layers[1].dst = Fit(0.05f * W, 0.1f * H, 0.4f * W, 0.8f * H, texW, texH);
+				layers[2] = layers[1];
+				layers[2].blend = XUI2DL_BLEND_REPLACE;
+				layers[2].dst = Fit(0.55f * W, 0.1f * H, 0.4f * W, 0.8f * H, texW, texH);
+				Send(api, "4", layers, 3, whole);
+				break;
+			case 5:
+				ThreeBlocks(0.5f * W, layers);
+				Send(api, "5", layers, 3, XUI2DLRect{ 0.5f * W, 0.5f * H, 0.5f * W, 0.5f * H });
+				break;
+			case 6:
+				layers[0] = Layer(XUI2DL_KIND_SOLID, XUI2DL_BLEND_SRCOVER, 0.25f * W, 0.25f * H, 0.5f * W, 0.5f * H, 0.5f, 0.f, 0.f, 0.5f);
+				Send(api, "6", layers, 1, whole);
+				break;
+			case 7:
+				layers[0] = Layer(XUI2DL_KIND_YUV420, XUI2DL_BLEND_SRCOVER, 0.25f * W, 0.25f * H, 0.5f * W, 0.5f * H, 1.f, 1.f, 1.f, 1.f);
+				layers[0].textureId = texId;
+				Send(api, "7", layers, 1, whole);
+				break;
+			case 8:
+				for (uint32_t i = 0; i < XUI2DL_MAX_LAYERS + 1; ++i)
+					layers[i] = Layer(XUI2DL_KIND_SOLID, XUI2DL_BLEND_REPLACE, 10.f * i, 10.f, 8.f, 8.f, 1.f, 1.f, 0.f, 1.f);
+				Send(api, "8 (17 layers)", layers, XUI2DL_MAX_LAYERS + 1, whole);
+				layers[0].size = sizeof(XUI2DLLayer) - 4;
+				Send(api, "8 (layer size)", layers, 1, whole);
+				layers[0].size = sizeof(XUI2DLLayer);
+				Send(api, "8 (frame size)", layers, 1, whole, sizeof(XUI2DLFrame) + 4);
+				layers[0].kind = XUI2DL_KIND_YUVA420 + 1;
+				Send(api, "8 (kind)", layers, 1, whole);
+				break;
+			default:
+				LogAlways("cev_probe_xui2dl: unknown case <%s>", name);
+				return;
+			}
+			LogStats(api, "after");
+		}
+	}
+
 	void TickRunScript() { RunScript::Tick(); }
 	void ShutdownRunScript() { RunScript::Shutdown(); }
 
@@ -1311,6 +1501,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_hidden_bench", CmdHiddenBench, VF_NULL, "Measurement: cev_hidden_bench <path> [cycles] [hidden s] [visible s] plays into surface CevBench and toggles a consumer hint hidden / visible, logs the catch-up of every cycle");
 		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");
 		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> draws the surface's texture top left as it is (an R8 packed texture shows the planes in grey); no argument = off");
+		REGISTER_COMMAND("cev_probe_xui2dl", XUI2DLProbe::Cmd, VF_NULL, "Development (L1): cev_probe_xui2dl <case 1-8> [surface] | off sends one XUI2DL SetFrame per case (docs/tasks/L1.md; cases 2-4 draw the texture of the cev_play_surface player <surface>) and logs the result and the XUI2DL statistics; off clears the retained list");
 #if CEV_HAVE_LOADTIME_CALLBACKS
 		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>|control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]...] registers an order-100 loading-loop callback that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
 #endif
@@ -1340,7 +1531,7 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface", "cev_probe_xui2dl" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 #if CEV_HAVE_LOADTIME_CALLBACKS
