@@ -635,11 +635,15 @@ void RT_EnsureResources()
 		r.pPassCB->SetDebugName("XUI2DL pass CB");
 	r.pPass.reset(new CPrimitiveRenderPass(true));
 	r.pSlots.reset(new SSlot[XUI2DL_MAX_LAYERS]);
+	// A constant buffer has no device buffer until its first upload, and every draw binds b1: upload zeros now.
 	bool bSlotCBs = true;
 	for (uint32 i = 0; i < XUI2DL_MAX_LAYERS; ++i)
 	{
-		r.pSlots[i].pPlanarCB = gRenDev->m_DevBufMan.CreateConstantBuffer(sizeof(SPlanarConstants));
-		bSlotCBs = bSlotCBs && r.pSlots[i].pPlanarCB;
+		SSlot& slot = r.pSlots[i];
+		slot.pPlanarCB = gRenDev->m_DevBufMan.CreateConstantBuffer(sizeof(SPlanarConstants));
+		memset(&slot.lastPlanar, 0, sizeof(slot.lastPlanar));
+		slot.bHasPlanar = slot.pPlanarCB && slot.pPlanarCB->UpdateBuffer(&slot.lastPlanar, sizeof(slot.lastPlanar));
+		bSlotCBs = bSlotCBs && slot.bHasPlanar;
 	}
 	r.bSlotCBs = bSlotCBs;
 	s_pRes = pRes;
