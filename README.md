@@ -221,7 +221,7 @@ the descriptor's folder.
 | `cev_hiddenStopSeconds` | 2.0 | surfaces no consumer sees stop decoding after this many seconds; 0 = never |
 | `cev_loadtime` | 1 | texture-only players keep running during level loading screens (needs a renderer with load-time callbacks); 0 = pause everything while a level loads |
 | `cev_cueForceFallback` | 0 | 1 = the cue route ignores the optional engine patch and follows the video clock |
-| `cev_stats` | 0 | 1 = log and draw a statistics line per player every second (timings, uploads, layout, decoder) |
+| `cev_stats` | 0 | 1 = log a statistics line per player every second (timings, uploads, layout, decoder) |
 | `cev_log` | 0 | 1 = verbose log |
 
 ### Runtime plug-in - development and tests

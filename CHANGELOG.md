@@ -27,6 +27,11 @@ The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3
 * Optional hardware decode of VP9 through Media Foundation (VP9 Video Extensions), read back into the same frame ring,
   automatic fallback to libvpx; per player `Decode = Auto | GPU | CPU`, `cev_decodeMode`, `cev_decodeAutoMinHeight`.
 * Console variables and commands `cev_*` (see the README); statistics `cev_stats`, `cev_stats_file`.
+* The fullscreen output is drawn by XUI2DL, a minimal 2D stage inside the renderer added by the engine patch
+  `EnginePatch/apply_xui2dl.py` (`docs/design/M11-xui2dl.md`); the renderer's aux geometry is no longer used.
+* An engine without the XUI2DL patch has no fullscreen output (one error line in the log; playback, audio, material and
+  surface outputs are unaffected).
+* `cev_stats` is no longer drawn on screen; it only writes the log (and the `cev_stats_file` CSV).
 * C++ interface `IVideoPlugin` / `IVideoPlayer`, interface version 5 (`CreatePlayerForSurface`, `FindPlayerBySurface`,
   `GetSurfaceId`, `GetPixelLayout`, `GetDecodeBackend`).
 
