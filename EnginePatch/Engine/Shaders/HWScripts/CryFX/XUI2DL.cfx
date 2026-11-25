@@ -1,7 +1,8 @@
 // Portions derived from XTFrame for CRYENGINE (XUI2D), Copyright (c) 2026 XTFrame contributors, MIT license.
 // XUI2DL: the minimal 2D stage of CEVPlayer (Code/CryEngine/RenderDll/XUI2DL). Derived from XUI2D.cfx
 // of XTFrame for CRYENGINE (CE_XTUI), MIT; see RenderDll/XUI2DL/NOTICE.md. Techniques: XUI2DLSolid,
-// XUI2DLTexture (premultiplied texture), XUI2DLTextureStraight (straight texture, premultiplied here).
+// XUI2DLTexture (premultiplied texture), XUI2DLTextureStraight (straight texture, premultiplied here),
+// XUI2DLPlanar (packed Y'CbCr 4:2:0 planes in one R8 texture, XTFrame 23-host-integration.md section 23.aj).
 // Every output is premultiplied; texture row 0 is the top row.
 
 #include "common.cfi"
@@ -29,6 +30,18 @@ struct SXUILVS2PS
 	float4 pos : SV_Position;
 	float2 tex : TEXCOORD0;
 	float4 col : COLOR0;
+};
+
+// Per-draw constants of XUI2DLPlanar (XUI2DL.cpp SPlanarConstants), register b1. Planes Y, U, V, A.
+cbuffer CBXUI2DLPlanar : register(b1)
+{
+	struct
+	{
+		float4 uv[4];          // picture uv -> texture uv: scale.xy, offset.zw (chroma siting folded into U and V)
+		float4 clampRect[4];   // plane rectangle inset by half a texel, texture uv (x0, y0, x1, y1)
+		float4 matrixRows[3];  // R, G, B: cY, cU, cV, offset
+		float4 flags;          // x = 1 with an alpha plane
+	} cbXUILPlanar;
 };
 
 Texture2D    texXUIL0 : register(t0);
@@ -59,6 +72,24 @@ float4 XUI2DLTextureStraightPS(SXUILVS2PS IN) : SV_Target0
 	return float4(s.rgb * s.a, s.a) * IN.col;
 }
 
+// One bilinear sample of plane i, clamped inside its rectangle (bilinear filtering never reads a neighbouring plane).
+float XUI2DLPlane(int i, float2 uv)
+{
+	const float2 t = clamp(uv * cbXUILPlanar.uv[i].xy + cbXUILPlanar.uv[i].zw, cbXUILPlanar.clampRect[i].xy, cbXUILPlanar.clampRect[i].zw);
+	return GetTexture2D(texXUIL0, smpXUIL, t).r;
+}
+
+// Y'CbCr -> RGB with the precomputed 3x4 matrix, clamped to [0,1]; colour planes are straight, so the output is
+// (rgb * a, a), a = 1 without an alpha plane; then the vertex colour.
+float4 XUI2DLPlanarPS(SXUILVS2PS IN) : SV_Target0
+{
+	const float4 yuv1 = float4(XUI2DLPlane(0, IN.tex), XUI2DLPlane(1, IN.tex), XUI2DLPlane(2, IN.tex), 1.0);
+	const float3 rgb = saturate(float3(dot(cbXUILPlanar.matrixRows[0], yuv1), dot(cbXUILPlanar.matrixRows[1], yuv1), dot(cbXUILPlanar.matrixRows[2], yuv1)));
+	const float  a = lerp(1.0, XUI2DLPlane(3, IN.tex), cbXUILPlanar.flags.x);
+	return float4(rgb * a, a) * IN.col;
+}
+
 technique XUI2DLSolid           { pass p0 { VertexShader = XUI2DLVS(); PixelShader = XUI2DLSolidPS(); } }
 technique XUI2DLTexture         { pass p0 { VertexShader = XUI2DLVS(); PixelShader = XUI2DLTexturePS(); } }
 technique XUI2DLTextureStraight { pass p0 { VertexShader = XUI2DLVS(); PixelShader = XUI2DLTextureStraightPS(); } }
+technique XUI2DLPlanar          { pass p0 { VertexShader = XUI2DLVS(); PixelShader = XUI2DLPlanarPS(); } }

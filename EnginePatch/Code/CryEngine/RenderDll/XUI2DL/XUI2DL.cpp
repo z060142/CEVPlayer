@@ -115,13 +115,30 @@ const uint32 kVertexBytes = XUI2DL_MAX_LAYERS * 4 * sizeof(SVertex);
 const uint32 kIndexBytes = XUI2DL_MAX_LAYERS * 6 * sizeof(uint32);
 const uint32 kLogEvery = 300;
 
-enum ETechnique { eTech_Solid, eTech_Texture, eTech_TextureStraight, eTech_Count };
-const char* const kTechniqueNames[eTech_Count] = { "XUI2DLSolid", "XUI2DLTexture", "XUI2DLTextureStraight" };
+//! Per-draw constants of XUI2DLPlanar, register b1 (XTFrame 23-host-integration.md section 23.aj, "PlanarParams").
+//! Planes in the order Y, U, V, A. 192 bytes.
+struct SPlanarConstants
+{
+	Vec4 uv[4];          //!< picture uv -> texture uv: scale.xy, offset.zw (chroma siting folded into U and V)
+	Vec4 clampRect[4];   //!< the plane rectangle inset by half a texel, texture uv (x0, y0, x1, y1)
+	Vec4 matrix[3];      //!< rows R, G, B: cY, cU, cV, offset
+	Vec4 flags;          //!< x = 1 with an alpha plane
+};
+static_assert(sizeof(SPlanarConstants) == 192, "SPlanarConstants must match CBXUI2DLPlanar");
+
+//! CE-111 of XUI2D (XUI2DPass.cpp:42-48): every draw on a slot binds b1 with this same stage mask.
+const EShaderStage kPlanarCBStages = EShaderStage_Pixel;
+
+enum ETechnique { eTech_Solid, eTech_Texture, eTech_TextureStraight, eTech_Planar, eTech_Count };
+const char* const kTechniqueNames[eTech_Count] = { "XUI2DLSolid", "XUI2DLTexture", "XUI2DLTextureStraight", "XUI2DLPlanar" };
 
 struct SSlot
 {
-	CRenderPrimitive prim;
-	uint64           boundKey = 0;   //!< identity of the bound texture (XUI2DResources.cpp:716-731)
+	CRenderPrimitive   prim;
+	uint64             boundKey = 0;   //!< identity of the bound texture (XUI2DResources.cpp:716-731)
+	CConstantBufferPtr pPlanarCB;      //!< b1, bound on every draw of the slot; read only by XUI2DLPlanar
+	SPlanarConstants   lastPlanar;
+	bool               bHasPlanar = false;
 	SSlot() : prim(CRenderPrimitive::eFlags_None) {}
 };
 
@@ -140,6 +157,7 @@ struct SResources
 	bool                                  bHasPass = false;
 	std::unique_ptr<CPrimitiveRenderPass> pPass;
 	std::unique_ptr<SSlot[]>              pSlots;
+	bool                                  bSlotCBs = false;   //!< every slot's b1 buffer exists
 	// The open pass instance (XUI2DPass.cpp:714-734): one per scissor run.
 	bool                                  open = false;
 	bool                                  scissor = false;
@@ -240,11 +258,70 @@ CTexture* ResolveOutput(const SDisplayContextKey& key, SRenderViewport& viewport
 
 struct SDrawItem
 {
-	uint32       layer;
-	ETechnique   technique;
-	bool         bScissor;
-	D3DRectangle rect;
+	uint32           layer;
+	ETechnique       technique;
+	bool             bScissor;
+	D3DRectangle     rect;
+	SPlanarConstants planar;   //!< eTech_Planar only
 };
+
+//! The plane lies inside the texture and is not empty.
+bool PlaneInside(const XUI2DLPlane& p, uint32 texW, uint32 texH)
+{
+	return p.w > 0 && p.h > 0 && p.x < texW && p.y < texH && p.w <= texW - p.x && p.h <= texH - p.y;
+}
+
+//! Section 23.aj, "繪製": a plane sampled at luma position uv * (lumaW, lumaH), `step` luma pixels per plane texel
+//! (1, or 2 for chroma), plus `offX`/`offY` plane texels of chroma siting; the clamp is the rectangle inset by half a texel.
+void PlaneMapping(const XUI2DLPlane& p, double lumaW, double lumaH, double step, double offX, double offY, double texW, double texH,
+                  Vec4& uv, Vec4& clampRect)
+{
+	uv = Vec4(float(lumaW / step / texW), float(lumaH / step / texH), float((p.x + offX) / texW), float((p.y + offY) / texH));
+	clampRect = Vec4(float((p.x + 0.5) / texW), float((p.y + 0.5) / texH), float((p.x + p.w - 0.5) / texW), float((p.y + p.h - 0.5) / texH));
+}
+
+//! The constants of a YUV layer from its description and the texture's actual size; false = invalid description
+//! (a plane outside the texture or empty, picture size 0, an enum out of range, a texture that is not R8).
+bool PlanarConstants(const XUI2DLLayer& l, const CTexture& tex, SPlanarConstants& out)
+{
+	const bool alpha = l.kind == XUI2DL_KIND_YUVA420;
+	const int  tw = tex.GetWidth(), th = tex.GetHeight();
+	if (tex.GetDstFormat() != eTF_R8 || tw <= 0 || th <= 0 || l.imageWidth == 0 || l.imageHeight == 0 ||
+	    l.colorMatrix > 1 || l.colorRange > 1 || l.chromaSiting > 2)
+		return false;
+	if (!PlaneInside(l.planeY, uint32(tw), uint32(th)) || !PlaneInside(l.planeU, uint32(tw), uint32(th)) ||
+	    !PlaneInside(l.planeV, uint32(tw), uint32(th)) || (alpha && !PlaneInside(l.planeA, uint32(tw), uint32(th))))
+		return false;
+
+	memset(&out, 0, sizeof(out));
+	// Chroma siting (0 left, 1 center, 2 top-left): Xc = X/2 (+0.25), Yc = Y/2 (+0.25) in plane texels.
+	const double cx = l.chromaSiting == 1 ? 0.0 : 0.25;
+	const double cy = l.chromaSiting == 2 ? 0.25 : 0.0;
+	const double lumaW = l.planeY.w, lumaH = l.planeY.h;
+	PlaneMapping(l.planeY, lumaW, lumaH, 1.0, 0.0, 0.0, tw, th, out.uv[0], out.clampRect[0]);
+	PlaneMapping(l.planeU, lumaW, lumaH, 2.0, cx, cy, tw, th, out.uv[1], out.clampRect[1]);
+	PlaneMapping(l.planeV, lumaW, lumaH, 2.0, cx, cy, tw, th, out.uv[2], out.clampRect[2]);
+	if (alpha)
+		PlaneMapping(l.planeA, lumaW, lumaH, 1.0, 0.0, 0.0, tw, th, out.uv[3], out.clampRect[3]);
+
+	// Limited: Y' = (y - 16/255) * 255/219, C = (c - 128/255) * 255/224; full: Y' = y, C = c - 128/255.
+	// R = Y' + 2(1-Kr) Cr, B = Y' + 2(1-Kb) Cb, G = (Y' - Kr R - Kb B) / (1-Kr-Kb).
+	const double kr = l.colorMatrix == 1 ? 0.2126 : 0.299;
+	const double kb = l.colorMatrix == 1 ? 0.0722 : 0.114;
+	const double kg = 1.0 - kr - kb;
+	const bool   limited = l.colorRange == 0;
+	const double ys = limited ? 255.0 / 219.0 : 1.0;
+	const double yo = limited ? -16.0 / 219.0 : 0.0;
+	const double cs = limited ? 255.0 / 224.0 : 1.0;
+	const double co = limited ? -128.0 / 224.0 : -128.0 / 255.0;
+	const double rv = 2.0 * (1.0 - kr), bu = 2.0 * (1.0 - kb);
+	const double gv = rv * kr / kg, gu = bu * kb / kg;
+	out.matrix[0] = Vec4(float(ys), 0.0f, float(rv * cs), float(yo + rv * co));
+	out.matrix[1] = Vec4(float(ys), float(-gu * cs), float(-gv * cs), float(yo - (gu + gv) * co));
+	out.matrix[2] = Vec4(float(ys), float(bu * cs), 0.0f, float(yo + bu * co));
+	out.flags = Vec4(alpha ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+	return true;
+}
 
 void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
 {
@@ -252,7 +329,7 @@ void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
 	if (!s_pRes && snap.count > 0 && s_deviceAvailable.load(std::memory_order_acquire))
 		RT_EnsureResources();
 	SResources* const pRes = s_pRes;
-	if (!pRes || !ShaderValid(*pRes) || !pRes->pPass || !pRes->pPassCB || pRes->vb == ~0u || pRes->ib == ~0u)
+	if (!pRes || !ShaderValid(*pRes) || !pRes->pPass || !pRes->pPassCB || !pRes->bSlotCBs || pRes->vb == ~0u || pRes->ib == ~0u)
 	{
 		s_drawsSkipped.fetch_add(snap.count, std::memory_order_relaxed);
 		return;
@@ -319,8 +396,22 @@ void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
 		}
 		else
 		{
-			++skipped;   // YUV kinds: not in L1 (caps without XUI2DL_CAP_YUV)
-			continue;
+			// YUV kinds: the quad's uv is picture uv; `src` is in picture pixels.
+			CTexture* const pTex = held.pTexture;
+			if (!pTex || !pTex->GetDevTexture() || !PlanarConstants(l, *pTex, item.planar))
+			{
+				++skipped;   // texture gone or invalid description
+				continue;
+			}
+			item.technique = eTech_Planar;
+			if (l.src.w > 0.0f && l.src.h > 0.0f)
+			{
+				const float iw = float(l.imageWidth), ih = float(l.imageHeight);
+				u0 = l.src.x / iw;
+				v0 = l.src.y / ih;
+				u1 = (l.src.x + l.src.w) / iw;
+				v1 = (l.src.y + l.src.h) / ih;
+			}
 		}
 		// Scissor in viewport pixels -> target pixels, clamped to the viewport and the target (XUI2DPass.cpp:1360-1375).
 		item.bScissor = l.scissor.w > 0.0f && l.scissor.h > 0.0f;
@@ -399,6 +490,13 @@ void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
 			prim.SetCullMode(eCULL_None);
 			prim.SetEnableDepthClip(true);
 			prim.SetInlineConstantBuffer(eConstantBufferShaderSlot_PerDraw, r.pPassCB, EShaderStage_Vertex | EShaderStage_Pixel);
+			if (item.technique == eTech_Planar && (!slot.bHasPlanar || memcmp(&slot.lastPlanar, &item.planar, sizeof(item.planar)) != 0))
+			{
+				slot.pPlanarCB->UpdateBuffer(&item.planar, sizeof(item.planar));
+				slot.lastPlanar = item.planar;
+				slot.bHasPlanar = true;
+			}
+			prim.SetInlineConstantBuffer(eConstantBufferShaderSlot_PerMaterial, slot.pPlanarCB, kPlanarCBStages);
 			if (slot.boundKey != key)
 			{
 				// A different texture may sit at the address bound last time: make the resource set see a change.
@@ -499,7 +597,7 @@ void GetStats(XUI2DLStats* pStats)
 	memcpy(pStats, &s, bytes);
 }
 
-const XUI2DLApi s_api = { uint32(sizeof(XUI2DLApi)), XUI2DL_API_VERSION, XUI2DL_CAP_CORE, 0, &SetFrame, &GetStats };
+const XUI2DLApi s_api = { uint32(sizeof(XUI2DLApi)), XUI2DL_API_VERSION, XUI2DL_CAP_CORE | XUI2DL_CAP_YUV, 0, &SetFrame, &GetStats };
 
 //! Render thread, from the first RT_Draw of a non-empty snapshot. A technique still compiling is only
 //! requested here; its draws are skipped and counted until it is ready.
@@ -537,6 +635,13 @@ void RT_EnsureResources()
 		r.pPassCB->SetDebugName("XUI2DL pass CB");
 	r.pPass.reset(new CPrimitiveRenderPass(true));
 	r.pSlots.reset(new SSlot[XUI2DL_MAX_LAYERS]);
+	bool bSlotCBs = true;
+	for (uint32 i = 0; i < XUI2DL_MAX_LAYERS; ++i)
+	{
+		r.pSlots[i].pPlanarCB = gRenDev->m_DevBufMan.CreateConstantBuffer(sizeof(SPlanarConstants));
+		bSlotCBs = bSlotCBs && r.pSlots[i].pPlanarCB;
+	}
+	r.bSlotCBs = bSlotCBs;
 	s_pRes = pRes;
 
 	if (bShader)
@@ -545,7 +650,7 @@ void RT_EnsureResources()
 		for (int t = 0; t < eTech_Count; ++t)
 			ready += (r.techniqueFound[t] && !r.techniquePending[t]) ? 1u : 0u;
 	}
-	const bool bBuffers = r.vb != ~0u && r.ib != ~0u && r.pPassCB;
+	const bool bBuffers = r.vb != ~0u && r.ib != ~0u && r.pPassCB && r.bSlotCBs;
 	s_resourcesReady.store(bBuffers, std::memory_order_release);
 	CryLogAlways("[XUI2DL] render resources created (shader %s, %u/%d technique(s), %u ready from the shader cache, buffers %s)",
 	             bShader ? "ok" : "MISSING", found, int(eTech_Count), ready, bBuffers ? "ok" : "FAILED");
