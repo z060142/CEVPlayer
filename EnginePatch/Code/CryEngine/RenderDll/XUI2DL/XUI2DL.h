@@ -1,3 +1,4 @@
+// Portions derived from XTFrame for CRYENGINE (XUI2D), Copyright (c) 2026 XTFrame contributors, MIT license.
 // XUI2DL: the minimal 2D stage CEVPlayer draws fullscreen video with (docs/design/M11-xui2dl.md).
 // Derived from the XUI2D render stage of XTFrame for CRYENGINE (CE_XTUI), MIT; see NOTICE.md.
 //

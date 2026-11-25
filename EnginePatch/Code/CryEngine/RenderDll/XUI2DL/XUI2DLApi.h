@@ -1,3 +1,4 @@
+/* Portions derived from XTFrame for CRYENGINE (XUI2D), Copyright (c) 2026 XTFrame contributors, MIT license. */
 /* XUI2DL: the frozen C interface between the renderer DLL and its client (CEVPlayer docs/design/M11-xui2dl.md section 4).
    The renderer exports extern "C" const XUI2DLApi* XUI2DL_GetApi(uint32_t version); nullptr when the version differs.
    Two copies exist (the engine patch and the CEVPlayer plug-in); they must stay byte-identical. */

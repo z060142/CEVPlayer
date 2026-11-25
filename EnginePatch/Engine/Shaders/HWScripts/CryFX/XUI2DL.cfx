@@ -1,3 +1,4 @@
+// Portions derived from XTFrame for CRYENGINE (XUI2D), Copyright (c) 2026 XTFrame contributors, MIT license.
 // XUI2DL: the minimal 2D stage of CEVPlayer (Code/CryEngine/RenderDll/XUI2DL). Derived from XUI2D.cfx
 // of XTFrame for CRYENGINE (CE_XTUI), MIT; see RenderDll/XUI2DL/NOTICE.md. Techniques: XUI2DLSolid,
 // XUI2DLTexture (premultiplied texture), XUI2DLTextureStraight (straight texture, premultiplied here).

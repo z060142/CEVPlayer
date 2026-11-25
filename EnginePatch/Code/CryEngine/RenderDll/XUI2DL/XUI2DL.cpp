@@ -1,3 +1,4 @@
+// Portions derived from XTFrame for CRYENGINE (XUI2D), Copyright (c) 2026 XTFrame contributors, MIT license.
 // XUI2DL (CEVPlayer docs/design/M11-xui2dl.md sections 4 and 5). Derived from the XUI2D render stage of
 // XTFrame for CRYENGINE (CE_XTUI), MIT; see NOTICE.md. The pieces taken from XUI2D name their origin.
 #include "StdAfx.h"
