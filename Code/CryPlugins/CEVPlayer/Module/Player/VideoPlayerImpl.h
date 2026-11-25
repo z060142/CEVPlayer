@@ -117,6 +117,17 @@ namespace CEVPlayer
 		void TakeUploadTiming(float& avgMs, float& p99Ms, uint32_t& samples);
 		uint64_t LastUploadBytes() const { return m_lastUploadBytes; }
 		EVideoFit Fit() const { return m_fit; }
+		//! Packed (R8) texture parameters, the values of the contract snapshot: plane rectangles {x, y, w, h} inside the
+		//! texture while the current texture is packed, the colour fields once loaded; zero otherwise.
+		struct SPackedParams
+		{
+			bool packed = false;   //!< the current texture is the packed R8 one
+			int32_t planeY[4] = {}, planeU[4] = {}, planeV[4] = {}, planeA[4] = {};
+			uint32_t colorMatrix = 0, colorRange = 0, chromaSiting = 0;
+		};
+		SPackedParams PackedParams() const;
+		//! The loaded stream can use a packed layout (4:2:0, even width; false before Ready).
+		bool StreamPackable() const { return m_phase == EPhase::Ready && m_info.packedLayout; }
 		//! Values last given to SetRate / SetVolume (API table queries Rate / Volume).
 		float GetRate() const { return m_rate; }
 		float GetVolume() const { return m_volume; }

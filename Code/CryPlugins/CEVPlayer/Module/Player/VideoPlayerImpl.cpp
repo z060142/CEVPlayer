@@ -17,6 +17,7 @@
 #include "Contract/TexSource.h"
 #include "Player/CryPakByteSource.h"
 #include "Player/PlayerManager.h"
+#include "Render/FullscreenOutput.h"
 #include "Render/RenderBridge.h"
 
 namespace CEVPlayer
@@ -1331,27 +1332,20 @@ namespace CEVPlayer
 		info.width = GetWidth();
 		info.height = GetHeight();
 		const EVideoPlayerState state = GetState();
-		const bool packed = m_pTexture != nullptr && m_textureR8;
+		const SPackedParams pp = PackedParams();
+		const bool packed = pp.packed;
 		// bit0 premultiplied only for RGBA8; bit3 = 0: the VP9 alpha planes are straight (not multiplied by alpha)
 		info.flags = (packed ? 0u : 1u) | (HasAlpha() ? 2u : 0u) | (state == EVideoPlayerState::Playing ? 4u : 0u);
 		info.contentSerial = m_contentSerial;
 		info.generation = m_generation;
 		info.layout = packed ? static_cast<uint32_t>(m_layout) : CTS_LAYOUT_RGBA8;
-		if (m_phase == EPhase::Ready)
-		{
-			info.colorMatrix = m_info.colorStandard == cev::ColorStandard::BT709 ? 1u : 0u;
-			info.colorRange = m_info.colorRange == cev::ColorRange::Full ? 1u : 0u;
-			info.chromaSiting = static_cast<uint32_t>(m_info.chromaSiting); // same values as CTS_SITING_*
-		}
-		if (packed)
-		{
-			const int w = m_info.width, h = m_info.height, cw = w / 2, ch = (h + 1) / 2;
-			info.planeY = { 0, 0, w, h };
-			info.planeU = { 0, h, cw, ch };
-			info.planeV = { cw, h, cw, ch };
-			if (m_layout == EVideoPixelLayout::PackedYuva420)
-				info.planeA = { 0, h + ch, w, h };
-		}
+		info.colorMatrix = pp.colorMatrix;
+		info.colorRange = pp.colorRange;
+		info.chromaSiting = pp.chromaSiting;
+		info.planeY = { pp.planeY[0], pp.planeY[1], pp.planeY[2], pp.planeY[3] };
+		info.planeU = { pp.planeU[0], pp.planeU[1], pp.planeU[2], pp.planeU[3] };
+		info.planeV = { pp.planeV[0], pp.planeV[1], pp.planeV[2], pp.planeV[3] };
+		info.planeA = { pp.planeA[0], pp.planeA[1], pp.planeA[2], pp.planeA[3] };
 		switch (m_phase)
 		{
 		case EPhase::None:    info.state = 0; break;
@@ -1373,6 +1367,33 @@ namespace CEVPlayer
 		char decode[64];
 		DecodeText(decode, sizeof(decode), false);
 		Contract::PublishSnapshot(m_surfaceId.c_str(), info, decode);
+	}
+
+	CVideoPlayerImpl::SPackedParams CVideoPlayerImpl::PackedParams() const
+	{
+		// No engine call (used by PublishSnapshot, rule 10, and by the fullscreen output): members of this player only.
+		SPackedParams pp;
+		pp.packed = m_pTexture != nullptr && m_textureR8;
+		if (m_phase == EPhase::Ready)
+		{
+			pp.colorMatrix = m_info.colorStandard == cev::ColorStandard::BT709 ? 1u : 0u;
+			pp.colorRange = m_info.colorRange == cev::ColorRange::Full ? 1u : 0u;
+			pp.chromaSiting = static_cast<uint32_t>(m_info.chromaSiting); // same values as CTS_SITING_*
+		}
+		if (pp.packed)
+		{
+			const int32_t w = m_info.width, h = m_info.height, cw = w / 2, ch = (h + 1) / 2;
+			const int32_t y[4] = { 0, 0, w, h }, u[4] = { 0, h, cw, ch }, v[4] = { cw, h, cw, ch }, a[4] = { 0, h + ch, w, h };
+			for (int i = 0; i < 4; ++i)
+			{
+				pp.planeY[i] = y[i];
+				pp.planeU[i] = u[i];
+				pp.planeV[i] = v[i];
+				if (m_layout == EVideoPixelLayout::PackedYuva420)
+					pp.planeA[i] = a[i];
+			}
+		}
+		return pp;
 	}
 
 	void CVideoPlayerImpl::ApplyVisibility(float dt)
@@ -1525,15 +1546,32 @@ namespace CEVPlayer
 	EVideoPixelLayout CVideoPlayerImpl::DesiredLayout(bool& consumerDriven) const
 	{
 		consumerDriven = false;
-		// Forced RGBA8: no surface, a fullscreen or material output, planar off, a stream that cannot be packed.
-		if (!m_surfaceRegistered || m_fullscreen || !m_bindings.empty() || mEnv->m_cevAllowPlanar == 0 || !m_info.packedLayout)
+		// Forced RGBA8: a material output, planar off, a stream that cannot be packed, no surface and not fullscreen.
+		if (!m_bindings.empty() || mEnv->m_cevAllowPlanar == 0 || !m_info.packedLayout)
 			return EVideoPixelLayout::RGBA8;
-		consumerDriven = true;
-		Contract::SHintSummary hints;
-		if (!Contract::GetHintSummary(m_surfaceId.c_str(), hints) || hints.consumers == 0)
-			return EVideoPixelLayout::RGBA8; // nobody negotiates: RGBA8 as before
+		if (!m_surfaceRegistered && !m_fullscreen)
+			return EVideoPixelLayout::RGBA8;
+		// Fullscreen: only when the output backend draws packed layouts (a fullscreen player ticks on the main thread).
+		if (m_fullscreen && !FullscreenOutput::SupportsPlanar())
+			return EVideoPixelLayout::RGBA8;
 		const EVideoPixelLayout planar = m_info.hasAlpha ? EVideoPixelLayout::PackedYuva420 : EVideoPixelLayout::PackedYuv420;
-		return (hints.acceptLayouts & (1u << static_cast<uint32_t>(planar))) != 0 ? planar : EVideoPixelLayout::RGBA8;
+		if (m_surfaceRegistered)
+		{
+			Contract::SHintSummary hints;
+			const bool haveConsumers = Contract::GetHintSummary(m_surfaceId.c_str(), hints) && hints.consumers != 0;
+			if (haveConsumers)
+			{
+				// The consumers decide (a fullscreen output accepts too: checked above).
+				consumerDriven = true;
+				return (hints.acceptLayouts & (1u << static_cast<uint32_t>(planar))) != 0 ? planar : EVideoPixelLayout::RGBA8;
+			}
+			if (!m_fullscreen)
+			{
+				consumerDriven = true;
+				return EVideoPixelLayout::RGBA8; // nobody negotiates: RGBA8 as before
+			}
+		}
+		return planar; // fullscreen alone
 	}
 
 	void CVideoPlayerImpl::UpdateLayout()

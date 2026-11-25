@@ -19,6 +19,7 @@
 #include "Contract/TexSource.h"
 #include "Player/PlayerManager.h"
 #include "Player/VideoPlayerImpl.h"
+#include "Render/FullscreenOutput.h"
 
 namespace CEVPlayer
 {
@@ -613,10 +614,24 @@ namespace CEVPlayer
 				});
 				add([](STest& t, double now) {
 					CryTexSourceInfo info = {};
-					if (!WaitGeneration(t, kM8, now, 3.0, info, "fullscreen"))
-						return false;
-					CheckSwitch(t, s_m8.p, info, now, "fullscreen", false);
-					CheckRgba(t, s_m8.p, info, "fullscreen");
+					if (FullscreenOutput::SupportsPlanar())
+					{
+						// L4: the fullscreen output draws packed layouts, the consumer accepts them: nothing changes (7 checks,
+						// as many as the RGBA8 branch below)
+						t.Query(kM8, info);
+						if (info.generation == s_m8.generation && Elapsed(now) < 3.0)
+							return false;
+						t.Check(info.generation == s_m8.generation, "fullscreen (planar output): no texture switch within 3 s, generation unchanged (" + Num(s_m8.generation) + " -> " + Num(info.generation) + ")");
+						t.Check(Impl(s_m8.p)->LoadCount() == s_m8.loads, "fullscreen (planar output): no reload (loads " + Num(static_cast<long long>(Impl(s_m8.p)->LoadCount())) + ")");
+						CheckPacked(t, s_m8.p, info, false, "fullscreen (planar output)");
+					}
+					else
+					{
+						if (!WaitGeneration(t, kM8, now, 3.0, info, "fullscreen"))
+							return false;
+						CheckSwitch(t, s_m8.p, info, now, "fullscreen", false);
+						CheckRgba(t, s_m8.p, info, "fullscreen");
+					}
 					s_m8.p->SetFullscreen(false, EVideoFit::Letterbox);
 					Unsustain(kM8, kM8ConsumerA, true);
 					return true;

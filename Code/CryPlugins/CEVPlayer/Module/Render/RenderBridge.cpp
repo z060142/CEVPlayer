@@ -80,7 +80,7 @@ namespace CEVPlayer
 			if (patched)
 				LogAlways("renderer probe: CEVPlayer_Patched found, stage 2 available (M1 still renders with stage 1)");
 			else
-				LogAlways("renderer probe: CEVPlayer_Patched not found, stage 1 (CPU conversion, aux fullscreen)");
+				LogAlways("renderer probe: CEVPlayer_Patched not found, stage 1 (CPU conversion)");
 		}
 
 		bool LoadtimeAvailable()

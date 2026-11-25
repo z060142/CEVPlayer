@@ -10,6 +10,7 @@
 #include <CryRenderer/IRenderer.h>
 #include <ILevelSystem.h>
 
+#include "Console.h"
 #include "Contract/TexSource.h"
 #include "Player/VideoPlayerImpl.h"
 #include "Render/FullscreenOutput.h"
@@ -37,8 +38,6 @@ namespace CEVPlayer
 
 		// Scratch buffers of the per-frame output step (kept across frames: no allocation in steady state).
 		std::vector<FullscreenOutput::SLayer> s_layers;
-		std::vector<std::string> s_statsLines;
-		std::vector<const char*> s_statsLinePtrs;
 
 		std::vector<Contract::SCommand> s_contractCommands; // scratch of ProcessContractCommands
 
@@ -619,8 +618,6 @@ namespace CEVPlayer
 		if (m_shutdown)
 			return;
 		m_clock += static_cast<double>(dt);
-		if (m_players.empty())
-			s_statsLines.clear(); // no stale overlay lines once the last player is gone
 		if (m_levelLoading)
 			return;
 		ProcessContractCommands(); // may create the first player
@@ -657,8 +654,6 @@ namespace CEVPlayer
 
 		if (wantStats)
 			LogStats();
-		else if (!s_statsLines.empty())
-			s_statsLines.clear();
 	}
 
 	void CPlayerManager::ProcessContractCommands()
@@ -740,25 +735,32 @@ namespace CEVPlayer
 		s_layers.clear();
 		for (const CVideoPlayerImpl* p : m_fullscreen)
 		{
-			if (!p->IsLoaded() || p->GetTextureId() <= 0 || p->FullscreenHidden() || p->GetPixelLayout() != EVideoPixelLayout::RGBA8)
-				continue; // a planar texture is never drawn (the player switches to RGBA8 in its next tick)
+			if (!p->IsLoaded() || p->GetTextureId() <= 0 || p->FullscreenHidden())
+				continue;
+			const CVideoPlayerImpl::SPackedParams packed = p->PackedParams();
 			FullscreenOutput::SLayer layer;
 			layer.textureId = p->GetTextureId();
-			layer.textureWidth = p->GetWidth();
-			layer.textureHeight = p->GetHeight();
+			layer.imageWidth = p->GetWidth();
+			layer.imageHeight = p->GetHeight();
 			layer.fit = p->Fit();
+			layer.layout = packed.packed ? p->GetPixelLayout() : EVideoPixelLayout::RGBA8;
+			layer.hasAlpha = p->HasAlpha();
+			for (int i = 0; i < 4; ++i)
+			{
+				layer.planeY[i] = static_cast<uint32>(packed.planeY[i]);
+				layer.planeU[i] = static_cast<uint32>(packed.planeU[i]);
+				layer.planeV[i] = static_cast<uint32>(packed.planeV[i]);
+				layer.planeA[i] = static_cast<uint32>(packed.planeA[i]);
+			}
+			layer.colorMatrix = packed.colorMatrix;
+			layer.colorRange = packed.colorRange;
+			layer.chromaSiting = packed.chromaSiting;
 			s_layers.push_back(layer);
 		}
-		if (!s_layers.empty())
-			FullscreenOutput::Draw(s_layers.data(), s_layers.size());
-
-		if (GlobalStatsEnabled() && !s_statsLines.empty())
-		{
-			s_statsLinePtrs.clear();
-			for (const std::string& line : s_statsLines)
-				s_statsLinePtrs.push_back(line.c_str());
-			FullscreenOutput::DrawTextLines(s_statsLinePtrs.data(), s_statsLinePtrs.size());
-		}
+		const FullscreenOutput::SDebugLayer* pDebug = nullptr;
+		size_t debugCount = 0;
+		DevProbesDebugLayers(pDebug, debugCount);
+		FullscreenOutput::Present(s_layers.data(), s_layers.size(), pDebug, debugCount);
 	}
 
 	void CPlayerManager::LogStats()
@@ -768,7 +770,6 @@ namespace CEVPlayer
 			return;
 		m_statsNextTime = now + 1.f;
 
-		s_statsLines.clear();
 		const double cpuPct = ProcessCpuPercent(); // one value per second for all rows
 		char line[800];
 		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
@@ -816,7 +817,6 @@ namespace CEVPlayer
 					decode, backend.hardware ? 1 : 0, s.readbackMs.avg, s.readbackMs.p99, cpuPct);
 				std::fflush(s_statsFile);
 			}
-			s_statsLines.push_back(line);
 			CryLogAlways("%s", line);
 		}
 	}
@@ -885,6 +885,7 @@ namespace CEVPlayer
 		m_consoleSurfaces.clear();
 		m_dispatching = false;
 
+		FullscreenOutput::Shutdown(); // the stage lets go of the player textures before they are released
 		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
 			p->PrepareDestroy();
 		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
@@ -901,7 +902,6 @@ namespace CEVPlayer
 		m_audio.Shutdown();
 		m_pool.reset(); // drops the manager's reference only: DecodePool::ShutdownShared() in CVideoPlugin::ShutdownBridge(),
 		                 // right after this at the engine's shutdown event, drops the last one and joins the decode workers
-		s_statsLines.clear();
 		SetStatsFile(nullptr);
 	}
 

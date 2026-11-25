@@ -11,6 +11,7 @@
 #include "Bindings/ApiTable.h"
 #include "Player/VideoDescriptor.h"
 #include "Player/VideoPlayerImpl.h"
+#include "Render/FullscreenOutput.h"
 #include "CEVCore/Status.h"
 
 namespace CEVPlayer
@@ -274,11 +275,16 @@ namespace CEVPlayer
 			t.Check(width > 0 && height > 0, "Width x Height known (" + std::to_string(width) + "x" + std::to_string(height) + ")");
 			t.Check(t.Query("Duration").f > 0.f, "Duration known");
 			t.Check(t.Query("TextureId").i != 0, "TextureId " + std::to_string(t.Query("TextureId").i));
-			t.Check(t.Query("IsPremultiplied").b, "IsPremultiplied");
+			// L4: a fullscreen player uses the packed layout when the output backend draws it and the stream is packable
+			const CVideoPlayerImpl* const pImpl = static_cast<const CVideoPlayerImpl*>(mEnv->pApi->Find(t.handle, false));
+			const bool expectPacked = pImpl != nullptr && FullscreenOutput::SupportsPlanar() && mEnv->m_cevAllowPlanar != 0 && pImpl->StreamPackable();
+			const int expectLayout = !expectPacked ? 0 : (pImpl->HasAlpha() ? 2 : 1);
+			const char* const expectLayoutName = expectLayout == 0 ? "RGBA8" : (expectLayout == 2 ? "yuva420" : "yuv420");
+			t.Check(t.Query("IsPremultiplied").b == !expectPacked, expectPacked ? "IsPremultiplied false (packed fullscreen)" : "IsPremultiplied");
 			// queries added in M6b
 			t.Check(t.Query("SurfaceId").s.empty(), "SurfaceId of a Create player is empty");
 			t.Check(t.Query("Generation").i == 0, "Generation of a player without surface id stays 0 (only surface players count, " + std::to_string(t.Query("Generation").i) + ")");
-			t.Check(t.Query("PixelLayout").i == 0 && t.Query("DecodeBackend").i == 0, "PixelLayout RGBA8, DecodeBackend CPU (SetDecode(CPU) before Load)");
+			t.Check(t.Query("PixelLayout").i == expectLayout && t.Query("DecodeBackend").i == 0, std::string("PixelLayout ") + expectLayoutName + ", DecodeBackend CPU (SetDecode(CPU) before Load)");
 			const std::string serial = t.Query("FrameSerial").s;
 			t.Check(!serial.empty() && serial.find_first_not_of("0123456789") == std::string::npos && std::strtoull(serial.c_str(), nullptr, 10) > 10, "FrameSerial is decimal text > 10 (" + serial + ")");
 			t.Check(t.Query("IsLoaded").b && t.Query("IsLooping").b, "IsLoaded and IsLooping");

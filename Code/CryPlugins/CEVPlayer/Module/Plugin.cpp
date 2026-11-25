@@ -111,7 +111,7 @@ namespace CEVPlayer
 		}
 
 		// One tick per frame before the scene is rendered (frame step, texture upload, listener dispatch) and
-		// the fullscreen aux draw after the game framework drew its own overlays (top layer).
+		// the fullscreen output step (the XUI2DL layer list) after the game framework drew its own overlays.
 		EnableUpdate(EUpdateStep::BeforeRender, true);
 		EnableUpdate(EUpdateStep::AfterRender, true);
 		return true;
@@ -144,8 +144,7 @@ namespace CEVPlayer
 	void CVideoPlugin::UpdateAfterRender()
 	{
 		if (m_pManager)
-			m_pManager->UpdateAfterRender();
-		DevProbesAfterRender(); // measurement only (S0)
+			m_pManager->UpdateAfterRender(); // takes the probes' debug layers (DevProbesDebugLayers)
 	}
 
 	void CVideoPlugin::ShutdownBridge()

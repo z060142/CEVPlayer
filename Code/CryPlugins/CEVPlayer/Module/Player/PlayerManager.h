@@ -47,7 +47,7 @@ namespace CEVPlayer
 		//! UpdateBeforeRender: ticks the players (texture uploads), then dispatches listener events. `dt` = seconds
 		//! since the previous call, given by the caller; no engine timer or frame id is read inside.
 		void UpdateBeforeRender(float dt);
-		//! UpdateAfterRender: draws the fullscreen outputs on top of the frame and the stats overlay.
+		//! UpdateAfterRender: hands the fullscreen outputs (and the debug layers of the probes) to FullscreenOutput.
 		void UpdateAfterRender();
 		//! M10: the tick of the renderer's loading loop (render thread, LoadtimeUpdate of the order-100 callback). Applies
 		//! the queued contract commands and ticks the players that run during loads (RunsDuringLoad). No listener

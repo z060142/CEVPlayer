@@ -19,7 +19,6 @@
 #include <CrySystem/File/ICryPak.h>
 #include <CryCore/Platform/CryWindows.h> // GetModuleHandleA / GetProcAddress / GetLocalTime (M10a probe)
 #include <CryRenderer/IRenderer.h>
-#include <CryRenderer/IRenderAuxGeom.h>
 #include <CryRenderer/ITexture.h>
 
 #include "Bindings/ApiTable.h"
@@ -30,6 +29,7 @@
 #include "Bindings/ApiPlayers.h"
 #include "Player/PlayerManager.h"
 #include "Player/VideoPlayerImpl.h"
+#include "Render/FullscreenOutput.h"
 #include "Render/RenderBridge.h"
 #include "Render/XUI2DLClient.h"
 
@@ -60,17 +60,26 @@ namespace CEVPlayer
 			int s_syncId = 0;
 			uint32 s_syncFrame = 0;
 			uint32 s_syncIndex = 0;
+			uint32 s_syncIndexBefore = 0;   // A: the index at UpdateBeforeRender
 			std::vector<uint32> s_syncBuf;
 			constexpr int kSyncSize = 64;
 
 			// cev_bench_play
 			IVideoPlayer* s_benchPlayer = nullptr;
 
+			// cev_probe_fullscreen (L4): fullscreen players, later = on top
+			std::vector<IVideoPlayer*> s_fullscreenPlayers;
+
 			// cev_bench_hint (M8): one consumer hint sent every frame
 			std::string s_hintSurface;
 			uint32_t s_hintAccept = 0;
 			// cev_show_surface (M8): draw a surface's texture top left (screenshot evidence)
 			std::string s_showSurface;
+
+			// The debug layers handed to the fullscreen output, and the once-per-second label lines.
+			FullscreenOutput::SDebugLayer s_debug[8];
+			size_t s_debugCount = 0;
+			float s_nextLabelTime = 0.f;
 
 			bool RendererOk() { return gEnv != nullptr && gEnv->pRenderer != nullptr && !gEnv->IsDedicated(); }
 
@@ -186,6 +195,56 @@ namespace CEVPlayer
 			LogAlways("cev_bench_play: <%s> -> texture <%s>", args->GetArg(1), args->GetArg(2));
 		}
 
+		//! cev_probe_fullscreen <path> [fit] | pop | off: one more fullscreen player per call through the public player
+		//! interface (looping, started at once); pop destroys the most recent one, off all of them.
+		void CmdProbeFullscreen(IConsoleCmdArgs* args)
+		{
+			if (mEnv->pManager == nullptr || mEnv->pManager->IsShutDown())
+				return;
+			// players destroyed elsewhere are forgotten
+			s_fullscreenPlayers.erase(std::remove_if(s_fullscreenPlayers.begin(), s_fullscreenPlayers.end(),
+				[](IVideoPlayer* p) { return !mEnv->pManager->IsPlayer(p); }), s_fullscreenPlayers.end());
+			const char* const arg = args != nullptr && args->GetArgCount() > 1 ? args->GetArg(1) : nullptr;
+			if (arg == nullptr)
+			{
+				LogAlways("usage: cev_probe_fullscreen <path> [fit 0 Fill|1 Fit|2 Letterbox, default 2] | pop | off   (%u running)", static_cast<unsigned>(s_fullscreenPlayers.size()));
+				return;
+			}
+			if (stricmp(arg, "off") == 0 || stricmp(arg, "pop") == 0)
+			{
+				const bool all = stricmp(arg, "off") == 0;
+				while (!s_fullscreenPlayers.empty())
+				{
+					mEnv->pManager->DestroyPlayer(s_fullscreenPlayers.back());
+					s_fullscreenPlayers.pop_back();
+					if (!all)
+						break;
+				}
+				LogAlways("cev_probe_fullscreen: %s, %u left", all ? "off" : "pop", static_cast<unsigned>(s_fullscreenPlayers.size()));
+				return;
+			}
+			const int fitArg = args->GetArgCount() > 2 ? std::atoi(args->GetArg(2)) : static_cast<int>(EVideoFit::Letterbox);
+			if (fitArg < static_cast<int>(EVideoFit::Fill) || fitArg > static_cast<int>(EVideoFit::Letterbox))
+			{
+				LogAlways("cev_probe_fullscreen: fit %d out of range (0 Fill, 1 Fit, 2 Letterbox)", fitArg);
+				return;
+			}
+			IVideoPlayer* const p = mEnv->pManager->CreatePlayer(nullptr);
+			if (p == nullptr)
+				return;
+			p->SetLoop(true);
+			p->SetFullscreen(true, static_cast<EVideoFit>(fitArg));
+			if (!p->Load(arg))
+			{
+				LogAlways("cev_probe_fullscreen: load rejected <%s>", arg);
+				mEnv->pManager->DestroyPlayer(p);
+				return;
+			}
+			p->Play();
+			s_fullscreenPlayers.push_back(p);
+			LogAlways("cev_probe_fullscreen: <%s> fit %d, %u running", arg, fitArg, static_cast<unsigned>(s_fullscreenPlayers.size()));
+		}
+
 		void CmdBenchStop(IConsoleCmdArgs*)
 		{
 			if (mEnv->pManager != nullptr && s_benchPlayer != nullptr)
@@ -286,15 +345,50 @@ namespace CEVPlayer
 				const uint32 rgba = 0xff000000u | (b > 0.f ? 0x00ff0000u : 0u) | (g > 0.f ? 0x0000ff00u : 0u) | (r > 0.f ? 0x000000ffu : 0u);
 				std::fill(s_syncBuf.begin(), s_syncBuf.end(), rgba);
 				gEnv->pRenderer->UpdateTextureInVideoMemory(static_cast<uint32>(s_syncId), reinterpret_cast<unsigned char*>(s_syncBuf.data()), 0, 0, kSyncSize, kSyncSize, eTF_R8G8B8A8);
-				// A: aux colour block submitted from UpdateBeforeRender (same step as the upload)
-				IRenderAuxImage::Draw2dImage(20.f, 300.f, 80.f, 80.f, -1, 0.f, 0.f, 1.f, 1.f, 0.f, r, g, b, 1.f);
+				// A: the colour block of the index taken here (same step as the upload)
+				s_syncIndexBefore = s_syncIndex;
 			}
 		}
 
-		void AfterRender()
+		void AddDebugTexture(int textureId, float x, float y, float w, float h)
 		{
+			if (s_debugCount >= sizeof(s_debug) / sizeof(s_debug[0]))
+				return;
+			FullscreenOutput::SDebugLayer& l = s_debug[s_debugCount++];
+			l = FullscreenOutput::SDebugLayer();
+			l.textureId = textureId;
+			l.x = x;
+			l.y = y;
+			l.w = w;
+			l.h = h;
+		}
+
+		void AddDebugSolid(float x, float y, float w, float h, float r, float g, float b)
+		{
+			if (s_debugCount >= sizeof(s_debug) / sizeof(s_debug[0]))
+				return;
+			FullscreenOutput::SDebugLayer& l = s_debug[s_debugCount++];
+			l = FullscreenOutput::SDebugLayer();
+			l.solid = true;
+			l.x = x;
+			l.y = y;
+			l.w = w;
+			l.h = h;
+			l.color[0] = r;
+			l.color[1] = g;
+			l.color[2] = b;
+			l.color[3] = 1.f;
+		}
+
+		//! The probes' layers for this frame (UpdateAfterRender, main thread); the labels go to the log once a second.
+		void BuildDebugLayers()
+		{
+			s_debugCount = 0;
 			if (!RendererOk())
 				return;
+			const float now = gEnv->pTimer != nullptr ? gEnv->pTimer->GetAsyncCurTime() : 0.f;
+			const bool logLabels = now >= s_nextLabelTime;
+			bool logged = false;
 			if (!s_showSurface.empty() && mEnv->pManager != nullptr)
 			{
 				if (IVideoPlayer* const p = mEnv->pManager->FindPlayerBySurface(s_showSurface.c_str()))
@@ -303,9 +397,13 @@ namespace CEVPlayer
 					{
 						const float dw = 480.f;
 						const float dh = std::min(640.f, dw * static_cast<float>(pTex->GetHeight()) / static_cast<float>(std::max(1, pTex->GetWidth())));
-						IRenderAuxImage::Draw2dImage(20.f, 20.f, dw, dh, pTex->GetTextureID(), 0.f, 1.f, 1.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f);
-						IRenderAuxText::Draw2dLabel(20.f, 24.f + dh, 1.3f, ColorF(1.f, 1.f, 0.f, 1.f), false, "cev_show_surface %s: %s %dx%d", s_showSurface.c_str(),
-							p->GetPixelLayout() == EVideoPixelLayout::RGBA8 ? "RGBA8" : "R8 packed", pTex->GetWidth(), pTex->GetHeight());
+						AddDebugTexture(pTex->GetTextureID(), 20.f, 20.f, dw, dh);
+						if (logLabels)
+						{
+							LogAlways("cev_show_surface %s: %s %dx%d", s_showSurface.c_str(), p->GetPixelLayout() == EVideoPixelLayout::RGBA8 ? "RGBA8" : "R8 packed",
+								pTex->GetWidth(), pTex->GetHeight());
+							logged = true;
+						}
 					}
 				}
 			}
@@ -313,18 +411,31 @@ namespace CEVPlayer
 			{
 				const float dw = 480.f;
 				const float dh = std::min(400.f, dw * static_cast<float>(s_r8H) / static_cast<float>(s_r8W));
-				IRenderAuxImage::Draw2dImage(20.f, 20.f, dw, dh, s_r8Id, 0.f, 1.f, 1.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f);
-				IRenderAuxText::Draw2dLabel(20.f, 24.f + dh, 1.3f, ColorF(1.f, 1.f, 0.f, 1.f), false, "cev_probe_r8 %dx%d frame %u", s_r8W, s_r8H, s_r8Frame);
+				AddDebugTexture(s_r8Id, 20.f, 20.f, dw, dh);
+				if (logLabels)
+				{
+					LogAlways("cev_probe_r8 %dx%d frame %u", s_r8W, s_r8H, s_r8Frame);
+					logged = true;
+				}
 			}
 			if (s_syncId > 0)
 			{
+				// A and B: two colour blocks of the same retained list, A with the index of UpdateBeforeRender, B with the
+				// index of UpdateAfterRender; C: the uploaded texture.
 				float r, g, b;
+				SyncColor(s_syncIndexBefore, r, g, b);
+				AddDebugSolid(20.f, 300.f, 80.f, 80.f, r, g, b);
 				SyncColor(s_syncIndex, r, g, b);
-				// B: aux colour block submitted from UpdateAfterRender; C: the uploaded texture drawn by aux
-				IRenderAuxImage::Draw2dImage(120.f, 300.f, 80.f, 80.f, -1, 0.f, 0.f, 1.f, 1.f, 0.f, r, g, b, 1.f);
-				IRenderAuxImage::Draw2dImage(220.f, 300.f, 80.f, 80.f, s_syncId, 0.f, 1.f, 1.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f);
-				IRenderAuxText::Draw2dLabel(20.f, 384.f, 1.3f, ColorF(1.f, 1.f, 0.f, 1.f), false, "A aux@before  B aux@after  C aux(tex)   frame %u idx %u", s_syncFrame, s_syncIndex);
+				AddDebugSolid(120.f, 300.f, 80.f, 80.f, r, g, b);
+				AddDebugTexture(s_syncId, 220.f, 300.f, 80.f, 80.f);
+				if (logLabels)
+				{
+					LogAlways("cev_probe_sync: A solid@before  B solid@after  C texture   frame %u idx %u", s_syncFrame, s_syncIndex);
+					logged = true;
+				}
 			}
+			if (logged)
+				s_nextLabelTime = now + 1.f;
 		}
 
 		void Shutdown()
@@ -334,6 +445,12 @@ namespace CEVPlayer
 			if (s_benchPlayer != nullptr && mEnv->pManager != nullptr && !mEnv->pManager->IsShutDown())
 				mEnv->pManager->DestroyPlayer(s_benchPlayer);
 			s_benchPlayer = nullptr;
+			for (IVideoPlayer* p : s_fullscreenPlayers)
+			{
+				if (mEnv->pManager != nullptr && !mEnv->pManager->IsShutDown() && mEnv->pManager->IsPlayer(p))
+					mEnv->pManager->DestroyPlayer(p);
+			}
+			s_fullscreenPlayers.clear();
 		}
 	}
 
@@ -602,9 +719,13 @@ namespace CEVPlayer
 						s_texBuf[static_cast<size_t>(y) * kTexSize + x] = (x >= bar && x < bar + 16) ? 0xFFFFFFFFu : 0xFFFF00FFu;
 			}
 
+			// The probe texture as a debug layer of the next fullscreen output step (one frame; nothing is drawn inside the
+			// loading loop until XUI2DL draws there, M11 section 7).
+			std::atomic<bool> s_drawRequested{ false };
+
 			void DrawTexture()
 			{
-				IRenderAuxImage::Draw2dImage(20.f, 20.f, 300.f, 300.f, s_texId, 0.f, 1.f, 1.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f);
+				s_drawRequested = true;
 				++s_drawCalls;
 			}
 
@@ -1042,6 +1163,14 @@ namespace CEVPlayer
 			if (gEnv != nullptr && gEnv->pRenderer != nullptr)
 				Off();
 		}
+
+		//! The probe texture when DrawTexture() ran since the previous call (main thread).
+		bool TakeDebugLayer(int& textureId)
+		{
+			const bool requested = s_drawRequested.exchange(false);
+			textureId = s_texId;
+			return requested && s_on && s_texId > 0;
+		}
 	}
 #endif
 
@@ -1401,11 +1530,13 @@ namespace CEVPlayer
 			if (stricmp(name, "off") == 0)
 			{
 				Send(api, "off", nullptr, 0, whole);
+				FullscreenOutput::SetProbeOwnsFrame(false); // the fullscreen output sends its list again in its next step
 				LogStats(api, "after");
 				return;
 			}
 			if (stricmp(name, "yuv") == 0)
 			{
+				FullscreenOutput::SetProbeOwnsFrame(true);
 				CmdYuv(api, args->GetArgCount() > 2 ? std::atoi(args->GetArg(2)) : 0, args->GetArgCount() > 3 ? static_cast<float>(std::atof(args->GetArg(3))) : 1.f);
 				LogStats(api, "after");
 				return;
@@ -1417,6 +1548,7 @@ namespace CEVPlayer
 			}
 			if (stricmp(name, "yuvsurface") == 0)
 			{
+				FullscreenOutput::SetProbeOwnsFrame(true);
 				if (args->GetArgCount() > 2)
 					CmdYuvSurface(api, args->GetArg(2), args->GetArgCount() > 3 ? args->GetArg(3) : nullptr);
 				LogStats(api, "after");
@@ -1450,6 +1582,8 @@ namespace CEVPlayer
 			}
 
 			XUI2DLLayer layers[XUI2DL_MAX_LAYERS + 1];
+			if (c >= 1 && c <= 8)
+				FullscreenOutput::SetProbeOwnsFrame(true); // until `off`: the fullscreen output sends nothing
 			switch (c)
 			{
 			case 1:
@@ -1512,7 +1646,17 @@ namespace CEVPlayer
 	void ShutdownRunScript() { RunScript::Shutdown(); }
 
 	void DevProbesBeforeRender() { DevProbe::BeforeRender(); }
-	void DevProbesAfterRender() { DevProbe::AfterRender(); }
+	void DevProbesDebugLayers(const FullscreenOutput::SDebugLayer*& pLayers, size_t& count)
+	{
+		DevProbe::BuildDebugLayers();
+#if CEV_HAVE_LOADTIME_CALLBACKS
+		int loadtimeTex = 0;
+		if (LoadtimeProbe::TakeDebugLayer(loadtimeTex))
+			DevProbe::AddDebugTexture(loadtimeTex, 20.f, 20.f, 300.f, 300.f);
+#endif
+		pLayers = DevProbe::s_debug;
+		count = DevProbe::s_debugCount;
+	}
 	void DevProbesShutdown()
 	{
 		DevProbe::Shutdown();
@@ -1690,10 +1834,18 @@ namespace CEVPlayer
 				mEnv->pManager != nullptr && mEnv->pManager->LoadtimeRegistered() ? 1 : 0, mEnv->m_cevLoadtime);
 		}
 
+		//! L4: the fullscreen output backend (cev_info, cev_surfaces).
+		void LogFullscreenBackend(const char* cmd)
+		{
+			LogAlways("%s: fullscreen backend: %s planar=%d", cmd, FullscreenOutput::Backend() == FullscreenOutput::EBackend::XUI2DL ? "xui2dl" : "none",
+				FullscreenOutput::SupportsPlanar() ? 1 : 0);
+		}
+
 		void CmdSurfaces(IConsoleCmdArgs*)
 		{
 			Contract::LogSurfaces();
 			LogLoadtimeState("cev_surfaces");
+			LogFullscreenBackend("cev_surfaces");
 		}
 
 		void CmdContractSelfTest(IConsoleCmdArgs* args)
@@ -1727,6 +1879,7 @@ namespace CEVPlayer
 			LogAlways("cev_info: API table %u controls, %u queries, %u events; %u FlowGraph node classes",
 				static_cast<unsigned>(Api::Controls().size()), static_cast<unsigned>(Api::Queries().size()), static_cast<unsigned>(Api::Events().size()), Api::FlowNodeCount());
 			LogLoadtimeState("cev_info");
+			LogFullscreenBackend("cev_info");
 		}
 
 		void CmdFlowTest(IConsoleCmdArgs* args)
@@ -1769,19 +1922,20 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_contract_selftest", CmdContractSelfTest, VF_NULL, "Self test of the texture source contract through the CryTexSource_v1 export. cev_contract_selftest [pathA] [pathB] (two videos of different sizes), logs PASS / FAIL");
 		// development-only measurement commands (S0)
 		REGISTER_COMMAND("cev_probe_r8", DevProbe::CmdProbeR8, VF_NULL, "Measurement: cev_probe_r8 <w> <h> [rgba] creates an eTF_R8 (or RGBA8) dynamic texture, updates it every frame, draws it top left and logs the process memory it costs (no arguments = off)");
-		REGISTER_COMMAND("cev_probe_sync", DevProbe::CmdProbeSync, VF_NULL, "Measurement: cev_probe_sync 1|0, a 64x64 RGBA texture filled each frame with a colour coding the frame index, next to aux blocks of the same colour");
+		REGISTER_COMMAND("cev_probe_sync", DevProbe::CmdProbeSync, VF_NULL, "Measurement: cev_probe_sync 1|0, a 64x64 RGBA texture filled each frame with a colour coding the frame index (C), next to two colour blocks of one retained fullscreen output list: A with the index at UpdateBeforeRender, B with the index at UpdateAfterRender");
 		REGISTER_COMMAND("cev_bench_play", DevProbe::CmdBenchPlay, VF_NULL, "Measurement: cev_bench_play <path> <texture name> [loop 0|1] plays into a named texture (not fullscreen); no arguments = stop");
+		REGISTER_COMMAND("cev_probe_fullscreen", DevProbe::CmdProbeFullscreen, VF_NULL, "Development (L4): cev_probe_fullscreen <path> [fit] creates one more fullscreen player (looping, started at once, on top of the previous ones) with fit 0 = Fill, 1 = Fit, 2 = Letterbox (EVideoFit order; default 2); pop destroys the most recent one, off destroys all of them");
 		REGISTER_COMMAND("cev_bench_stop", DevProbe::CmdBenchStop, VF_NULL, "Measurement: stop the cev_bench_play player");
 		REGISTER_COMMAND("cev_hidden_bench", CmdHiddenBench, VF_NULL, "Measurement: cev_hidden_bench <path> [cycles] [hidden s] [visible s] plays into surface CevBench and toggles a consumer hint hidden / visible, logs the catch-up of every cycle");
 		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");
-		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> draws the surface's texture top left as it is (an R8 packed texture shows the planes in grey); no argument = off");
+		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> shows the surface's texture top left as it is (fullscreen output debug layer, sampled as RGBA: an R8 packed texture shows the planes in red); no argument = off");
 		REGISTER_COMMAND("cev_probe_xui2dl", XUI2DLProbe::Cmd, VF_NULL, "Development (L1, L2): cev_probe_xui2dl <case 1-8> [surface] | off | stats | yuv <n 1-16> [scale] | read <tag> | yuvsurface <surface> [seek seconds] sends one XUI2DL SetFrame per case (docs/tasks/L1.md; cases 2-4 draw the texture of the cev_play_surface player <surface>) and logs the result and the XUI2DL statistics; off clears the retained list; stats only logs every XUI2DLStats field; yuv shows synthetic packed YUV picture n (docs/tasks/L2.md) and writes it to <user>/xui2dl_yuv_<n>.bin/.txt; read writes the presented frame to <user>/xui2dl_read_<tag>.ppm; yuvsurface shows a surface texture 1:1 from its contract snapshot (with a time: pause and seek)");
 #if CEV_HAVE_LOADTIME_CALLBACKS
 		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>|control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]...] registers an order-100 loading-loop callback that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
 #endif
 		REGISTER_COMMAND("cev_stats_file", DevProbe::CmdStatsFile, VF_NULL, "Measurement: cev_stats_file <path>|off writes the per-second cev_stats rows as CSV (turns cev_stats on)");
 
-		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log and draw a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");
+		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");
 		REGISTER_CVAR2("cev_decodeThreads", &mEnv->m_cevDecodeThreads, 0, VF_NULL, "Decode worker threads of the shared pool and libvpx threads per video; 0 = automatic. Applies to new pools / players");
 		REGISTER_CVAR2("cev_decodeMode", &mEnv->m_cevDecodeMode, 0, VF_NULL, "Video decoder of players without an explicit SetDecode: 0 = Auto (GPU when available and the video is at least cev_decodeAutoMinHeight tall), 1 = GPU (Media Foundation, falls back to the CPU), 2 = CPU (libvpx). Applies at the next Load / Play from stopped");
 		REGISTER_CVAR2("cev_decodeAutoMinHeight", &mEnv->m_cevDecodeAutoMinHeight, 1080, VF_NULL, "Decode = Auto uses the GPU for videos at least this many pixels tall");
@@ -1805,7 +1959,7 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface", "cev_probe_xui2dl" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface", "cev_probe_xui2dl", "cev_probe_fullscreen" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 #if CEV_HAVE_LOADTIME_CALLBACKS

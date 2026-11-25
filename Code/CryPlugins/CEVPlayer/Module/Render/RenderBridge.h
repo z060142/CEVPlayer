@@ -1,6 +1,6 @@
 // Renderer access of the plug-in, stage 1 (no engine patch): texture creation / upload / release, material slot
-// binding and the renderer capability probe. Every function here is main-thread only. All aux 2D drawing lives in
-// Render/FullscreenOutput.cpp, not here.
+// binding and the renderer capability probe. Every function here is main-thread only. All 2D drawing lives in
+// Render/FullscreenOutput.cpp (XUI2DL), not here.
 #pragma once
 
 #include <cstdint>
@@ -22,7 +22,7 @@ namespace CEVPlayer
 		//! false without CEV_HAVE_LOADTIME_CALLBACKS; otherwise read once from the renderer module's export
 		//! `extern "C" int XUI2D_Patched()` (bit 7 = 128) and cached.
 		bool LoadtimeAvailable();
-		//! 1 = stock renderer (CPU conversion, aux fullscreen), 2 = patched renderer found. M1: always 1.
+		//! 1 = stock renderer (CPU conversion), 2 = patched renderer found. M1: always 1.
 		int Stage();
 
 		//! Largest texture side the renderer accepts (0 = unknown / no limit).
