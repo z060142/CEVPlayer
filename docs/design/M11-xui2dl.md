@@ -5,7 +5,8 @@
 - 徹底拿掉 Aux。全螢幕輸出改走引擎渲染器內的 **XUI2DL**：從 XTFrame 的 XUI2D 衍生的最小版本。
 - XUI2DL 只做最小維護：不加新功能、不追蹤 XUI2D 的功能更新，只修 bug、相容性與資源管理問題。
 - 保留的能力只有六項：2D 貼圖繪製（含純色矩形）、YUV GPU 色彩轉換、alpha 混合、viewport／scissor、讀取迴圈渲染、基本渲染資源管理。
-- 不經 UI 畫影片時純走 XUI2DL。XUI2D 不加 YUV；XTFrame 日後做自己的影片播放時照共用規格實作（XTFrame 倉 `Docs/design/61-packed-yuv-textures.md`，下稱「61 章」）。
+- **選路（2026-11-26 晚間定案）：沒有 XTFrame 的引擎走 XUI2DL；有 XTFrame（完整 XUI2D）的引擎走 XTFrame 帶的 XUI2D，XUI2DL 不建立任何渲染資源。** XTFrame 主線先完成 CE 端的更新（XUI2D 的打包平面著色等，它的 CE-97），通知後我方取得最新原始碼、依本決策重新規劃 XUI2D 那一條路，兩邊一起完成。
+- YUV 的規格是 XTFrame 倉 `Docs/design/23-host-integration.md` §23.aj（下稱「§23.aj」；XTFrame 自 v0.19.0 已有 GPU 打包 YUV 轉色，參考實作在其 `Code/Runtime/gpu/src/planar_params.{h,cpp}` 與 GL／wgpu 的平面著色器）。先前引用的「61 章」已被對方刪除，本文其餘各處的「61 章」一律讀作 §23.aj。
 - YUV 取樣：不要鋸齒優先 → 61 章的雙線性變體。
 - 只掛幀結束一個點：影片在 Scaleform 之上、XUI2D（XTFrame UI）之前。
 - 要用全螢幕就一定得打補丁；沒打補丁的引擎沒有全螢幕輸出，不留 Aux 退路。
@@ -116,7 +117,7 @@ typedef struct XUI2DLApi
 - 主執行緒 `XUI2DL::EndFrame(key)`：目前快照非空時，排一個渲染執行緒命令帶著快照的一個引用去畫。L1 這個命令帶「讀取中略過」旗標（讀取迴圈在 L3 處理）。
 - 渲染執行緒：取輸出與 viewport（做法同 XUI2D 的 `ResolveOutput`）→ 每個圖層一個四邊形，頂點寫進 BU_DYNAMIC 緩衝，**上傳後重設命令列表的串流快取**（XUI2D 的 CE-94 教訓）→ 以 `CPrimitiveRenderPass`／`CRenderPrimitive` 繪製；scissor 改變就另開一個 pass instance。
 - 貼圖生命：快照持有引用，所以插件銷毀播放器後，渲染器仍安全地畫完已排隊的幀。**快照的最後一個引用不得在 render loading thread 上釋放**（`~CTexture` 會斷言），做法照 XUI2D 的 `RT_FreeArena`（延後到迴圈結束）。
-- 資源：`RT_CreateResources` 建著色器、頂點格式、常數緩衝並預熱著色器；`RT_ReleaseResources` 釋放並丟掉目前快照。資源不存在或著色器未就緒時不畫、計入 `drawsSkipped`。解析度改變不重建資源，每幀重讀輸出大小。
+- 資源：**延後建立**——裝置建立時不建任何東西，第一次收到非空的 `SetFrame` 之後才在渲染執行緒建著色器、頂點格式、常數緩衝並預熱著色器（所以走 XUI2D 的引擎上，即使兩個補丁都套了，XUI2DL 也不佔資源）；`RT_ReleaseResources` 釋放並丟掉目前快照。資源不存在或著色器未就緒時不畫、計入 `drawsSkipped`。解析度改變不重建資源，每幀重讀輸出大小。
 - 著色器是引擎目錄下的 `.cfx` 散檔。允許執行期編譯的建置（PC 三個組態的預設）可直接用；關閉編譯的出貨組態需要把預編快取併入引擎的著色器 pak——與 XUI2D 相同的未解問題，列為已知限制。
 
 ## 6. YUV 著色器（L2）
@@ -134,9 +135,10 @@ typedef struct XUI2DLApi
 
 | 單 | 內容 | 驗證的樹 |
 |---|---|---|
-| L1 | 引擎核心：介面、純色與 RGBA、混合、viewport／scissor、資源管理、套用腳本、探測指令 | 共用樹 |
-| L2 | YUV 著色器與合規測試 | 共用樹 |
+| L1 | 引擎核心：介面、純色與 RGBA、混合、viewport／scissor、資源管理、套用腳本、探測指令（L1b：延後建立資源，並在社群版樹建置與驗證） | 社群版樹 |
+| L2 | YUV 著色器與合規測試 | 社群版樹 |
 | L3 | 讀取迴圈 | 共用樹（有補丁 17）＋社群版樹（沒有） |
+| L5 | XUI2D 後端：有 XTFrame 時經 `IXUIRenderer` 送幀（等 XTFrame 主線的 CE 端更新後規劃） | 共用樹 |
 | L4 | 插件切換：`FullscreenOutput` 改送圖層、全螢幕不再強制 RGBA、刪除全部 Aux、更新探測指令與文件 | 兩棵樹 |
 
 ## 9. 已知限制與待定
@@ -146,3 +148,4 @@ typedef struct XUI2DLApi
 - 出貨組態的著色器快取（§5）。
 - `cev_stats` 的畫面文字：XUI2DL 沒有字形，待使用者決定是移除（只留 log 與 CSV）還是另想辦法。
 - 社群版樹的渲染器有第三方改動，套用腳本的錨點要在 L3／L4 另外確認。
+- `NOTICE.md` 目前只有來源與維護說明，沒有附 MIT 的版權聲明與許可全文；要不要補由使用者決定。
