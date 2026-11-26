@@ -43,3 +43,9 @@ GameSDK 範例專案（**唯讀**，不得在其中啟動或寫入任何檔）�
 同 L3a（啟動方式；社群版樹腳本不用 `quit`；每次執行都有逾時；樹忙碌檢查；只關自己啟動的行程；不碰共用樹；不 `git add -A`、不 `git stash`、不推送；英文程式與提交訊息）。提交：一個（只有探測指令），訊息帶 `S1`，結尾 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。證據放 `E:/coding3/xt-bench/cev-s1/`。
 
 報告（繁體中文、精簡，寫在最後訊息裡）：用了哪個 UI 元件與 MovieClip、測試專案怎麼組的；十題各自的結論與證據；讀碼得到的 Scaleform 端事實（檔案:行）；做成品功能時必須處理的事項清單；崩潰或卡住的執行；沒做到的。
+
+## 補充（2026-11-27，使用者裁決後）
+
+- 社群版樹沒有 Scaleform 執行時（`CryScaleformHelper.dll` 載入失敗）。使用者同意測試：從安裝版引擎 `S:/Crytek/cryengine-57-lts/5.7.1/bin/win_x64/` **複製** `CryScaleformHelper.dll`（以及引擎載入時實際要求的其他 `CryScaleform*.dll`，以 log 為準，只複製需要的）到社群版樹的 `bin/win_x64/`。S: 的安裝版唯讀。複製了哪些檔、SHA-256 記在 `E:/coding3/xt-bench/cev-s1/scaleform_dlls.txt`。這些是專有檔：確認它們不在社群版樹的 git 追蹤範圍內（`git -C <樹> status --short -- bin` 照實記錄；若會被當成未追蹤檔列出，照實寫，不要改該樹的 `.gitignore`），**測完留在原處**（使用者之後要自己看），在報告列出以便日後移除。
+- 載入即崩潰或 Scaleform 仍初始化失敗（與 fork 不相容）：保留 log，移除複製的檔，停下回報。
+- 使用者的原則：**這條路只需要做到可以播放與控制，不為效能花心思**。因此第 9 題（成本）刪除；第 8 題（讀取畫面）降為「順手能測就測」。其餘題目不變。
