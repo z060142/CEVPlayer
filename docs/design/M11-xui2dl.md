@@ -127,7 +127,7 @@ typedef struct XUI2DLApi
 ## 7. 讀取迴圈（L3，動工前與 XTFrame 主線對一次）
 
 - 迴圈內、`m_rdldLock` 之內、`RT_PresentFast()` 之前加一個繪製掛點：畫渲染執行緒持有的快照。
-- 沒有補丁 17 的引擎：XUI2DL 自帶「有內容時自動進出迴圈＋一個單一客戶的回呼」（等同補丁 17 的核心），介面追加 `SetLoadtimeTick`，`caps` 加 `XUI2DL_CAP_LOADTIME`。
+- 沒有補丁 17 的引擎：XUI2DL 自帶「有內容時自動進出迴圈＋一個單一客戶的回呼」（等同補丁 17 的核心），介面追加 `SetLoadtimeUpdate`，`caps` 加 `XUI2DL_CAP_LOADTIME`。
 - 有補丁 17 的引擎：沿用它的回呼與自動進出，XUI2DL 只加繪製掛點。
 - 待與 XTFrame 主線確認：兩者並存時後緩衝由誰清、XTFrame 的讀取畫面清除輸出時影片是否被擦掉。
 
