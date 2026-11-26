@@ -612,6 +612,9 @@ namespace CEVPlayer
 			std::string s_openSurface;
 			std::string s_openSrc;
 			bool s_opened = false;
+			// L3c: "reopen:<surface>:<path>" sends the same contract `open` at LOADINGSCREEN but never closes the surface at
+			// `off`, so an opened surface player survives re-arming the probe (a later reopen loads another file into it).
+			bool s_openKeep = false;
 			std::string s_destroySurface;
 			constexpr size_t kMaxControlSteps = 4;
 			struct SControlStep
@@ -1006,7 +1009,7 @@ namespace CEVPlayer
 								options.flags = 1u | 2u; // autoplay, loop
 								options.volume = 1.f;
 								const int r = api->open(s_openSurface.c_str(), s_openSrc.c_str(), &options);
-								s_opened = s_opened || r == 1;
+								s_opened = s_opened || (r == 1 && !s_openKeep);
 								PLog("C: contract open(<%s>, <%s>, autoplay loop) at LOADINGSCREEN returned %d, HasPendingCommands %d", s_openSurface.c_str(), s_openSrc.c_str(), r,
 									Contract::HasPendingCommands() ? 1 : 0);
 							}
@@ -1108,6 +1111,7 @@ namespace CEVPlayer
 					PLog("C: contract close(<%s>)", s_openSurface.c_str());
 				}
 				s_opened = false;
+				s_openKeep = false;
 				s_openSurface.clear();
 				s_destroySurface.clear();
 				s_controlSurface.clear();
@@ -1169,6 +1173,13 @@ namespace CEVPlayer
 					const size_t colon = mode.find(':', 5);
 					s_openSurface = mode.substr(5, colon - 5);
 					s_openSrc = mode.substr(colon + 1);
+				}
+				else if (mode.compare(0, 7, "reopen:") == 0 && mode.find(':', 7) != std::string::npos)
+				{
+					const size_t colon = mode.find(':', 7);
+					s_openSurface = mode.substr(7, colon - 7);
+					s_openSrc = mode.substr(colon + 1);
+					s_openKeep = true;
 				}
 				else if (mode.compare(0, 8, "destroy:") == 0)
 					s_destroySurface = mode.substr(8);
@@ -1986,7 +1997,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");
 		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> shows the surface's texture top left as it is (fullscreen output debug layer, sampled as RGBA: an R8 packed texture shows the planes in red); no argument = off");
 		REGISTER_COMMAND("cev_probe_xui2dl", XUI2DLProbe::Cmd, VF_NULL, "Development (L1, L2): cev_probe_xui2dl <case 1-8> [surface] | off | stats | yuv <n 1-16> [scale] | read <tag> | yuvsurface <surface> [seek seconds] sends one XUI2DL SetFrame per case (docs/tasks/L1.md; cases 2-4 draw the texture of the cev_play_surface player <surface>) and logs the result and the XUI2DL statistics; off clears the retained list; stats only logs every XUI2DLStats field; yuv shows synthetic packed YUV picture n (docs/tasks/L2.md) and writes it to <user>/xui2dl_yuv_<n>.bin/.txt; read writes the presented frame to <user>/xui2dl_read_<tag>.ppm; yuvsurface shows a surface texture 1:1 from its contract snapshot (with a time: pause and seek)");
-		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b, L3a): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>|control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]...] registers an order-100 loading-loop callback (source=patch17; with source=xui2dl a hook in the player manager's update, without P4 / P7) that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
+		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b, L3a): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|reopen:<surface>:<path>|destroy:<surface>|control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]...] registers an order-100 loading-loop callback (source=patch17; with source=xui2dl a hook in the player manager's update, without P4 / P7) that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
 		REGISTER_COMMAND("cev_stats_file", DevProbe::CmdStatsFile, VF_NULL, "Measurement: cev_stats_file <path>|off writes the per-second cev_stats rows as CSV (turns cev_stats on)");
 
 		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");

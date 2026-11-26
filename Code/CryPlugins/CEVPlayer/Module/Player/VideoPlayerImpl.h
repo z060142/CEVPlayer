@@ -89,8 +89,14 @@ namespace CEVPlayer
 		void OnLevelLoadBegin(bool keepRunning);
 		void OnLevelLoadEnd();
 		//! M10: the player outputs only to its texture (not fullscreen, no material binding), so it can run in the
-		//! renderer's loading loop.
-		bool RunsDuringLoad() const { return !m_fullscreen && m_bindings.empty(); }
+		//! renderer's loading loop. L3c: a fullscreen player without material binding also runs there when the
+		//! fullscreen backend is XUI2DL, the loading-loop source is xui2dl and cev_loadtime is 1 (the loop draws it).
+		bool RunsDuringLoad() const;
+		//! L3c: set by CPlayerManager::LoadtimeTick around the loading-loop tick of a fullscreen player. While set the
+		//! texture identity is frozen: no texture is created, released or rebuilt and the layout does not switch; a
+		//! compatible frame is still uploaded. What was refused is done by the first main-thread Tick after the load.
+		void SetLoadFrozen(bool frozen) { m_loadFrozen = frozen; }
+		bool LoadFrozen() const { return m_loadFrozen; }
 		//! Stops decoding / audio and drops listeners and outputs that need no renderer. After this only
 		//! ReleaseRenderResources() and the destructor are valid.
 		void PrepareDestroy();
@@ -341,6 +347,8 @@ namespace CEVPlayer
 		bool m_pausedByLevelLoad = false;
 		bool m_destroyed = false;
 		bool m_releasePending = false; // Unload() while renderer calls were not allowed
+		bool m_loadFrozen = false;     // L3c: fullscreen player inside the loading-loop tick (SetLoadFrozen)
+		bool m_textureDeferred = false; // L3c: a texture rebuild was refused while frozen; EnsureTexture after the load
 		uint64_t m_statsMark = 0;
 		// measurement (S0): upload call timing, cleared by TakeUploadTiming
 		static constexpr uint32_t kUploadTimingWindow = 512;

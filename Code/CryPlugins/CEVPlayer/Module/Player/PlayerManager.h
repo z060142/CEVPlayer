@@ -154,6 +154,7 @@ namespace CEVPlayer
 		std::vector<CVideoPlayerImpl*> m_pendingDestroy;              // destroyed from inside an event callback
 		std::vector<CVideoPlayerImpl*> m_fullscreen;                  // draw order, last = top
 		std::vector<CVideoPlayerImpl*> m_snapshot;                    // scratch for dispatching
+		std::vector<CVideoPlayerImpl*> m_frozenPlayers;               // L3c: fullscreen players frozen for one LoadtimeTick
 
 		CAudioMixer m_audio;
 		std::shared_ptr<cev::DecodePool> m_pool;

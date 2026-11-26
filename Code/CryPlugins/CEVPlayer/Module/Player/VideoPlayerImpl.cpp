@@ -1044,14 +1044,28 @@ namespace CEVPlayer
 		const int texHeight = packed ? m_info.height + (m_info.height + 1) / 2 + (m_layout == EVideoPixelLayout::PackedYuva420 ? m_info.height : 0) : m_info.height;
 		if (m_pTexture != nullptr && (m_textureWidth != texWidth || m_textureHeight != texHeight || m_textureR8 != packed))
 		{
+			if (m_loadFrozen)
+			{
+				m_textureDeferred = true; // L3c: keep the texture (and the picture) until the load has ended
+				return false;
+			}
 			if (!m_manager.RenderCallsAllowed())
 				return false;
 			ReleaseTexture(true); // size / format changed: new texture, bindings move over
 		}
 		if (m_pTexture != nullptr)
+		{
+			m_textureDeferred = false;
 			return true;
+		}
+		if (m_loadFrozen)
+		{
+			m_textureDeferred = true; // L3c: no new texture inside the loading loop
+			return false;
+		}
 		if (!RenderBridge::Available() || !m_manager.RenderCallsAllowed())
 			return false;
+		m_textureDeferred = false;
 
 		RenderBridge::ProbeOnce();
 		if (m_autoName)
@@ -1080,6 +1094,13 @@ namespace CEVPlayer
 
 	void CVideoPlayerImpl::ReleaseTexture(bool keepBindings)
 	{
+		if (m_loadFrozen && m_pTexture != nullptr)
+		{
+			// L3c: a fullscreen player keeps its texture inside the loading loop; the main thread releases it after the load.
+			if (!keepBindings)
+				m_releasePending = true;
+			return;
+		}
 		RemoveAppliedBindings();
 		if (!keepBindings)
 		{
@@ -1469,8 +1490,8 @@ namespace CEVPlayer
 
 		if (m_info.hasVideo)
 		{
-			if (m_pTexture == nullptr)
-				EnsureTexture(); // retry (renderer / level loading state changed)
+			if (m_pTexture == nullptr || (m_textureDeferred && !m_loadFrozen))
+				EnsureTexture(); // retry (renderer / level loading state changed; L3c: a rebuild refused inside the loading loop)
 			else if (!m_bindings.empty())
 			{
 				ProcessBindingRemovals();
@@ -1580,6 +1601,8 @@ namespace CEVPlayer
 		const EVideoPixelLayout desired = DesiredLayout(consumerDriven);
 		if (desired == m_layout)
 			return;
+		if (m_loadFrozen)
+			return; // L3c: no layout switch inside the loading loop; the first main-thread tick after the load switches
 		// Hold: a consumer-driven change waits until the previous switch is kLayoutHoldTicks old (no flapping).
 		constexpr uint64_t kLayoutHoldTicks = 30;
 		if (consumerDriven && m_layoutTick != 0 && m_tick - m_layoutTick < kLayoutHoldTicks)
@@ -1614,6 +1637,18 @@ namespace CEVPlayer
 	}
 
 	// ------------------------------------------------------------------------------------------------ level loading
+	bool CVideoPlayerImpl::RunsDuringLoad() const
+	{
+		if (!m_bindings.empty())
+			return false;
+		if (!m_fullscreen)
+			return true; // M10: texture-only (surface) player
+		// L3c: the XUI2DL loading loop draws the retained fullscreen layers, so the fullscreen player keeps running there
+		// (texture identity frozen, see SetLoadFrozen). With the XUI2D backend it does not (another task).
+		return mEnv->m_cevLoadtime != 0 && FullscreenOutput::Backend() == FullscreenOutput::EBackend::XUI2DL
+			&& RenderBridge::LoadtimeSource() == RenderBridge::ELoadtimeSource::XUI2DL;
+	}
+
 	void CVideoPlayerImpl::ReapplyLevelLoadPause()
 	{
 		// M10: a player that runs in the loading loop (also one created during the load) is not paused

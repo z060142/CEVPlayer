@@ -458,12 +458,26 @@ namespace CEVPlayer
 		dt = std::min(std::max(dt, 0.f), 0.25f); // a longer gap is a stall: the clocks do not catch up
 		m_clock += static_cast<double>(dt);
 		m_inLoadTick = true;
+		// L3c: the fullscreen players' texture identity is frozen for the whole tick (contract commands included): the
+		// retained XUI2DL list the loop draws keeps naming their textures. A frozen player that gets destroyed in this
+		// tick goes to the zombies (DestroyPlayer), so every pointer stays valid until the flags are cleared below.
+		m_frozenPlayers.clear();
+		for (CVideoPlayerImpl* p : m_fullscreen)
+		{
+			if (!p->RunsDuringLoad())
+				continue; // XUI2D backend / material binding: not ticked here, unchanged
+			p->SetLoadFrozen(true);
+			m_frozenPlayers.push_back(p);
+		}
 		ProcessContractCommands();
 		for (size_t i = 0; i < m_players.size(); ++i)
 		{
 			if (m_players[i]->RunsDuringLoad())
 				m_players[i]->Tick(dt);
 		}
+		for (CVideoPlayerImpl* p : m_frozenPlayers)
+			p->SetLoadFrozen(false);
+		m_frozenPlayers.clear();
 		m_inLoadTick = false;
 	}
 
@@ -583,7 +597,9 @@ namespace CEVPlayer
 				continue;
 			std::unique_ptr<CVideoPlayerImpl> owned = std::move(*it);
 			m_players.erase(it);
-			if (owned->HasRenderResources())
+			if (owned->LoadFrozen())
+				m_zombies.push_back(std::move(owned)); // L3c: frozen fullscreen player in the loading loop: kept until after the load
+			else if (owned->HasRenderResources())
 			{
 				if (RenderCallsAllowed())
 					owned->ReleaseRenderResources();

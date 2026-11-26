@@ -117,7 +117,7 @@ typedef struct XUI2DLApi
 - 主執行緒 `XUI2DL::EndFrame(key)`：目前快照非空時，排一個渲染執行緒命令帶著快照的一個引用去畫。L1 這個命令帶「讀取中略過」旗標（讀取迴圈在 L3 處理）。
 - 渲染執行緒：取輸出與 viewport（做法同 XUI2D 的 `ResolveOutput`）→ 每個圖層一個四邊形，頂點寫進 BU_DYNAMIC 緩衝，**上傳後重設命令列表的串流快取**（XUI2D 的 CE-94 教訓）→ 以 `CPrimitiveRenderPass`／`CRenderPrimitive` 繪製；scissor 改變就另開一個 pass instance。
 - 貼圖生命：快照持有引用，所以插件銷毀播放器後，渲染器仍安全地畫完已排隊的幀。**快照的最後一個引用不得在 render loading thread 上釋放**（`~CTexture` 會斷言），做法照 XUI2D 的 `RT_FreeArena`（延後到迴圈結束）。
-- 資源：**延後建立**——裝置建立時不建任何東西，第一次收到非空的 `SetFrame` 之後才在渲染執行緒建著色器、頂點格式、常數緩衝並預熱著色器（所以走 XUI2D 的引擎上，即使兩個補丁都套了，XUI2DL 也不佔資源）；`RT_ReleaseResources` 釋放並丟掉目前快照。資源不存在或著色器未就緒時不畫、計入 `drawsSkipped`。解析度改變不重建資源，每幀重讀輸出大小。
+- 資源：**延後建立**——裝置建立時不建任何東西，第一次收到非空的 `SetFrame` 之後才在渲染執行緒建著色器、頂點格式、常數緩衝並預熱著色器（所以走 XUI2D 的引擎上，即使兩個補丁都套了，XUI2DL 也不佔資源）；`RT_ReleaseResources`（每次卸關卡的 `FreeSystemResources(FRR_SYSTEM_RESOURCES)` 也會走到）只釋放渲染資源，**保留快照**——快照是呼叫端的狀態，跨卸關卡保留；只在渲染器關閉時（`RT_ReleaseRenderResources` 的 `FRR_TEXTURES` 分支、`CTexture::ShutDown` 之前，`XUI2DL::RT_ReleaseRetained()`，L3c）丟掉。資源不存在或著色器未就緒時不畫、計入 `drawsSkipped`。解析度改變不重建資源，每幀重讀輸出大小。
 - 著色器是引擎目錄下的 `.cfx` 散檔。允許執行期編譯的建置（PC 三個組態的預設）可直接用；關閉編譯的出貨組態需要把預編快取併入引擎的著色器 pak——與 XUI2D 相同的未解問題，列為已知限制。
 
 ## 6. YUV 著色器（L2）
@@ -148,4 +148,5 @@ typedef struct XUI2DLApi
 - 出貨組態的著色器快取（§5）。
 - `cev_stats` 的畫面文字：XUI2DL 沒有字形，待使用者決定是移除（只留 log 與 CSV）還是另想辦法。
 - 社群版樹的渲染器有第三方改動，套用腳本的錨點要在 L3／L4 另外確認。
+- 讀取迴圈（L3c）：讀取期間才開始的全螢幕播放器，要到讀取結束後才出現（迴圈內不建立貼圖、不送清單）；讀取中全螢幕播放器的貼圖身分凍結，串流換解析度或排列需求改變時迴圈內保留舊貼圖與畫面，讀取結束後才重建。
 - `NOTICE.md` 目前只有來源與維護說明，沒有附 MIT 的版權聲明與許可全文；要不要補由使用者決定。
