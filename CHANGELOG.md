@@ -80,7 +80,10 @@ The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3
 * Self tests `cev_apitest`, `cev_flowtest`; development script runner `cev_run_script`.
 * Path fields use pickers: FlowGraph `Video` ports open the file dialog and `Material` ports the material browser
   (`_UICONFIG` data types, port names unchanged, saved graphs keep working); the Schematyc and CryVS `Material` property
-  uses the engine's material picker (stored as the same plain string).
+  uses the engine's material picker (stored as the same plain string). Script function inputs too: the CryVS functions
+  and `VideoPlayer` member functions take `Video` / `Path` as a new CryVS type `VideoFileName` (file picker, .webm /
+  .cevvideo) and `Material` / `Name` as the engine's `MaterialFileName`; the Schematyc `Load` / `SetOutput` functions
+  use `VideoFileName` and `MaterialFileName`.
 
 ### Editor
 

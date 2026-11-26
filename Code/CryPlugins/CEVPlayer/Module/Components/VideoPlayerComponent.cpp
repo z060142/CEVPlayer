@@ -177,7 +177,7 @@ namespace CEVPlayer
 				{
 					const Schematyc::CAnyConstPtr pInput = params.GetInput(Schematyc::CUniqueId::FromUInt32(m_inputs[i].id));
 					if (pInput)
-						in[i] = Read(*pInput, m_entry.params[i].type);
+						in[i] = Read(*pInput, m_entry.params[i]);
 				}
 
 				Api::SValue result;
@@ -215,6 +215,11 @@ namespace CEVPlayer
 
 			static Schematyc::CAnyValuePtr MakeDefault(const Api::SParam& p)
 			{
+				// P1b: path parameters get the picker types (file picker for videos, engine material picker)
+				if (p.type == Api::EType::String && p.kind == Api::EParamKind::VideoPath)
+					return Schematyc::CAnyValue::MakeShared(VideoFileName(p.defStr != nullptr ? p.defStr : ""));
+				if (p.type == Api::EType::String && p.kind == Api::EParamKind::MaterialName)
+					return Schematyc::CAnyValue::MakeShared(Schematyc::MaterialFileName(p.defStr != nullptr ? p.defStr : ""));
 				switch (p.type)
 				{
 				case Api::EType::Bool: return Schematyc::CAnyValue::MakeShared(p.defNum != 0.0);
@@ -224,9 +229,13 @@ namespace CEVPlayer
 				}
 			}
 
-			static Api::SValue Read(const Schematyc::CAnyConstRef& any, Api::EType type)
+			static Api::SValue Read(const Schematyc::CAnyConstRef& any, const Api::SParam& p)
 			{
-				switch (type)
+				if (p.type == Api::EType::String && p.kind == Api::EParamKind::VideoPath)
+					return Api::SValue::FromString(Schematyc::DynamicCast<VideoFileName>(any).value.c_str());
+				if (p.type == Api::EType::String && p.kind == Api::EParamKind::MaterialName)
+					return Api::SValue::FromString(Schematyc::DynamicCast<Schematyc::MaterialFileName>(any).value.c_str());
+				switch (p.type)
 				{
 				case Api::EType::Bool: return Api::SValue::FromBool(Schematyc::DynamicCast<bool>(any));
 				case Api::EType::Int: return Api::SValue::FromInt(Schematyc::DynamicCast<int32>(any));

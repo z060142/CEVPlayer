@@ -156,7 +156,7 @@ usual nodes, functions and methods of the surface.
 Component **Video Player** (category *Video*). Properties: Video, Output (Surface / Screen / Material), SurfaceID,
 Material, Slot, Screen Fit, Audio Track (empty = automatic), Loop, Autoplay, Skippable, Decode, PauseDecodeWhenHidden.
 Video has a file picker (.webm / .cevvideo) and Material the engine's material picker (the CryVS `VideoPlayer`
-component too).
+component too), and so do the path parameters of the functions (`Load` Path, `SetOutput` Name).
 Functions: one per entry of the API table (controls and queries, e.g. `Play`, `Pause`, `Seek`, `SetAudioTrack`,
 `SetDecode`, `Time`, `AudioTrackName`, `DecodeBackend`). Signals: Ready, Started, NewFrame (serial), Marker (name,
 time), Looped, Ended, Skipped, Error (code, message).
@@ -171,7 +171,9 @@ Global functions in three namespaces (library path `Function::CEVPlayer::...`):
 * `CEVPlayer::Advanced`: `Open`, `Close`, `Play`, `Pause`, `Stop`, `Seek`, `SetLoop`, `SetRate`, `SetVolume`,
   `SetAudioTrack`, `SetVariant`, `SetSkippable`, `SetPauseDecodeWhenHidden`, `Info` (several outputs).
 
-Enums (Fit, Output, Decode) are registered as CryVS types. Players made by these functions belong to the script and are
+Enums (Fit, Output, Decode) are registered as CryVS types, and so are `VideoFileName` (file picker for .webm /
+.cevvideo) and the engine's `MaterialFileName` (material picker), the types of the `Video` and `Material` inputs and of
+the member functions' `Load` Path / `SetOutput` Name. Players made by these functions belong to the script and are
 destroyed when the level unloads or game mode ends. A component `VideoPlayer` with one member function per API table
 entry (41) and one signal per event is registered as well. Registration happens at `ESYSTEM_EVENT_GAME_POST_INIT` and
 again on every environment refresh.

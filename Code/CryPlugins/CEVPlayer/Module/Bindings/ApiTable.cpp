@@ -30,6 +30,8 @@ namespace CEVPlayer
 		const CryGUID kVideoFileNameTypeGuid  = "DA1FFCAF-AF64-482B-BF62-B2C6002197F2"_cry_guid;
 		const CryGUID kFitTypeGuid            = "4DF842EF-5FF7-4794-B8E8-180FB499CEEA"_cry_guid;
 		const CryGUID kDecodeModeTypeGuid     = "14025090-A62F-4DC1-9A6E-47A9F50D5278"_cry_guid;
+		const CryGUID kCryVSVideoFileTypeGuid    = "D6FDB1DC-D3B1-4EEC-8B8F-3B599949DF4A"_cry_guid; // P1b
+		const CryGUID kCryVSMaterialFileTypeGuid = "0FCB80FA-0943-4097-B690-64C66914CE7A"_cry_guid; // P1b
 		// CryVS global functions, in ECryVSFunction order (M6c).
 		const CryGUID kCryVSFunctionGuids[eCryVS_FunctionCount] =
 		{
@@ -253,7 +255,7 @@ namespace CEVPlayer
 
 			// ======================================================================================== parameters
 			const SParam kCreateForSurfaceParams[] = { { EType::String, "SurfaceID", "Surface id: 1 to 63 of A-Z a-z 0-9 _ . : -, compared case-insensitively; UIs find the video by it", 0, "", 'in00' } };
-			const SParam kLoadParams[]        = { { EType::String, "Path", "CryPak path of a .webm video or a .cevvideo descriptor, e.g. Videos/intro.webm", 0, "", 'in00' } };
+			const SParam kLoadParams[]        = { { EType::String, "Path", "CryPak path of a .webm video or a .cevvideo descriptor, e.g. Videos/intro.webm", 0, "", 'in00', EParamKind::VideoPath } };
 			const SParam kSeekParams[]        = { { EType::Float, "Seconds", "Target time in seconds", 0, nullptr, 'in00' } };
 			const SParam kSetLoopParams[]     = { { EType::Bool, "Loop", "Restart at 0 when the end is reached", 0, nullptr, 'in00' } };
 			const SParam kSetRateParams[]     = { { EType::Float, "Rate", "Playback speed, 0.25 .. 4 (1 = normal; values outside are clamped)", 1.0, nullptr, 'in00' } };
@@ -263,7 +265,7 @@ namespace CEVPlayer
 			const SParam kSetOutputParams[]   =
 			{
 				{ EType::Int,    "Mode", "0 = Surface only (players made by CreateForSurface), 1 = Screen (fullscreen on the top layer), 2 = Material (bind to a texture slot of a material)", 0, nullptr, 'in00' },
-				{ EType::String, "Name", "Mode Material: material name (empty = the entity's own material where there is one); not used by the other modes", 0, "", 'in01' },
+				{ EType::String, "Name", "Mode Material: material name (empty = the entity's own material where there is one); not used by the other modes", 0, "", 'in01', EParamKind::MaterialName },
 				{ EType::Int,    "Slot", "Mode Material: texture slot (EEfResTextures value, 0 = diffuse)", 0, nullptr, 'in02' },
 				{ EType::Int,    "SubMaterial", "Mode Material: sub-material index, -1 = the material itself", -1.0, nullptr, 'in03' },
 				{ EType::Int,    "Fit", "Mode Screen: 0 = Fill (stretch), 1 = Fit (keep aspect, scene visible in the bars), 2 = Letterbox (keep aspect, black bars)", 2.0, nullptr, 'in04' },
@@ -500,6 +502,8 @@ namespace CEVPlayer
 			note(kVideoFileNameTypeGuid, "video file name type");
 			note(kFitTypeGuid, "video fit type");
 			note(kDecodeModeTypeGuid, "decode mode type");
+			note(kCryVSVideoFileTypeGuid, "CryVS video file type");
+			note(kCryVSMaterialFileTypeGuid, "CryVS material file type");
 			for (uint32_t i = 0; i < eCryVS_FunctionCount; ++i)
 				note(kCryVSFunctionGuids[i], "CryVS global function");
 			note(kCryVSResizedSignalGuid, "CryVS Resized signal");
@@ -560,6 +564,11 @@ namespace CEVPlayer
 						if (e.params[i].name == nullptr || e.params[i].name[0] == '\0' || e.params[i].type == EType::Void)
 						{
 							LogWarning("api table: <%s> parameter %u is malformed", e.name, i);
+							++problems;
+						}
+						if (e.params[i].kind != EParamKind::Plain && e.params[i].type != EType::String)
+						{
+							LogWarning("api table: <%s> parameter %u is a path / material name but not a String", e.name, i);
 							++problems;
 						}
 						if (e.params[i].id == 0)

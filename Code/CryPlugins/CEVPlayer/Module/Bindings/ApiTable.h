@@ -41,6 +41,10 @@ namespace CEVPlayer
 
 		constexpr uint32_t kMaxParams = 6;
 
+		//! What a String parameter holds (P1b). The script bindings give VideoPath parameters a video file picker and
+		//! MaterialName parameters the engine's material picker; the value stays a plain string (FlowGraph unchanged).
+		enum class EParamKind : uint8_t { Plain, VideoPath, MaterialName };
+
 		//! One value of any EType (arguments and results of the table functions).
 		struct SValue
 		{
@@ -74,6 +78,7 @@ namespace CEVPlayer
 			//! parameter takes an unused code. (The values of the first parameters are the former positional ids
 			//! 'in00', 'in01', ... so scripts saved before the ids existed keep working.)
 			uint32_t id;
+			EParamKind kind = EParamKind::Plain; //!< String parameters only: plain text, a video path or a material name
 		};
 
 		enum class EKind : uint8_t { Control, Query, Event };
@@ -169,6 +174,10 @@ namespace CEVPlayer
 		extern const CryGUID kVideoFileNameTypeGuid;
 		extern const CryGUID kFitTypeGuid;
 		extern const CryGUID kDecodeModeTypeGuid;
+		//! CryVS types of path parameters (P1b): the plug-in's video file type and the engine's CryVS::SMaterialFileName
+		//! (the engine does not register the latter itself).
+		extern const CryGUID kCryVSVideoFileTypeGuid;
+		extern const CryGUID kCryVSMaterialFileTypeGuid;
 
 		//! CryVS global functions (three namespaces = three drawers, Bindings/CryVSEnv.cpp). Fixed GUIDs, like the table's.
 		enum ECryVSFunction : uint32_t

@@ -37,6 +37,7 @@
 #include <CryVS/System/ComponentMemberFunction.h>
 #include <CryVS/System/GlobalFunction.h>
 #include <CryVS/System/Stack.h>
+#include <CryVS/Serialization/SerializationUtils.h>
 #include <CrySerialization/Enum.h>
 #include <CrySerialization/STL.h>
 #include <CrySerialization/Decorators/ResourceFilePath.h>
@@ -72,6 +73,24 @@ namespace CEVPlayer
 {
 	namespace CryVSBind
 	{
+		//! CryVS type of the Video inputs (P1b): a file picker limited to .webm / .cevvideo that starts in Videos (the
+		//! same decorator as the component property); a plain string everywhere else. Registered by RegisterAll. Material
+		//! inputs use the engine's CryVS::SMaterialFileName, which the engine declares but does not register.
+		struct SVideoFileName
+		{
+			inline SVideoFileName() {}
+			inline SVideoFileName(const char* szValue) : value(szValue) {}
+			inline bool operator==(const SVideoFileName& rhs) const { return value == rhs.value; }
+
+			string value;
+		};
+
+		inline bool Serialize(Serialization::IArchive& archive, SVideoFileName& value, const char* szName, const char* szLabel)
+		{
+			archive(Serialization::ResourceFilePath(value.value, "Video files (*.webm;*.cevvideo)|*.webm;*.cevvideo", "Videos"), szName, szLabel);
+			return true;
+		}
+
 		namespace
 		{
 			using Api::SValue;
@@ -143,7 +162,7 @@ namespace CEVPlayer
 			// ---------------------------------------------------------------------------------------- global functions
 			//! Port types of the global functions. Fit / Output / Decode are the registered enumerations; Entity is the
 			//! CryVS entity id.
-			enum class EPort : uint8 { Bool, Int, Float, String, Fit, Output, Decode, Entity };
+			enum class EPort : uint8 { Bool, Int, Float, String, Fit, Output, Decode, Entity, Video, Material }; // Video / Material: inputs only
 
 			struct SPort
 			{
@@ -178,7 +197,7 @@ namespace CEVPlayer
 			// ----- Video
 			const SPort kPlayOnScreenIn[] =
 			{
-				{ EPort::String, "Video", kVideoDesc, 0, "" },
+				{ EPort::Video, "Video", kVideoDesc, 0, "" },
 				{ EPort::Fit, "Fit", "How the picture is placed: Fill stretches it, Fit keeps the aspect and shows the scene in the bars, Letterbox adds black bars", 2, nullptr },
 				{ EPort::Bool, "Loop", "Restart at the beginning when the end is reached", 0, nullptr },
 				{ EPort::Bool, "Skippable", "A key, mouse or gamepad button press stops the video", 0, nullptr },
@@ -213,8 +232,8 @@ namespace CEVPlayer
 			const SPort kPlayOnMaterialIn[] =
 			{
 				{ EPort::Entity, "Entity", "Entity whose material is used when Material is empty", 0, nullptr },
-				{ EPort::String, "Video", kVideoDesc, 0, "" },
-				{ EPort::String, "Material", "Material that shows the video; empty uses the material of Entity", 0, "" },
+				{ EPort::Video, "Video", kVideoDesc, 0, "" },
+				{ EPort::Material, "Material", "Material that shows the video; empty uses the material of Entity", 0, "" },
 				{ EPort::Int, "Slot", "Texture slot of the material that gets the video (0 = diffuse)", 0, nullptr },
 				{ EPort::Int, "SubMaterial", "Sub-material index; -1 uses the material itself", -1, nullptr },
 				{ EPort::Bool, "Loop", "Restart at the beginning when the end is reached", 0, nullptr },
@@ -260,7 +279,7 @@ namespace CEVPlayer
 			// ----- CEVPlayer::UI
 			const SPort kPlayToSurfaceIn[] =
 			{
-				{ EPort::String, "Video", kVideoDesc, 0, "" },
+				{ EPort::Video, "Video", kVideoDesc, 0, "" },
 				{ EPort::String, "SurfaceID", kSurfaceDesc, 0, "" },
 				{ EPort::Bool, "Loop", "Restart at the beginning when the end is reached", 0, nullptr },
 				{ EPort::Bool, "Autoplay", "Play at once; otherwise the video is only loaded (CEVPlayer::Advanced::Play starts it)", 1, nullptr },
@@ -337,11 +356,11 @@ namespace CEVPlayer
 			// ----- CEVPlayer::Advanced
 			const SPort kOpenIn[] =
 			{
-				{ EPort::String, "Video", kVideoDesc, 0, "" },
+				{ EPort::Video, "Video", kVideoDesc, 0, "" },
 				{ EPort::Output, "Output", "Where the picture goes: Surface (a named surface for UIs), Screen (fullscreen) or Material (a texture slot)", 1, nullptr },
 				{ EPort::String, "SurfaceID", "Output Surface: the surface name UIs use", 0, "" },
 				{ EPort::Fit, "Fit", "Output Screen: Fill stretches, Fit keeps the aspect with the scene in the bars, Letterbox adds black bars", 2, nullptr },
-				{ EPort::String, "Material", "Output Material: material name", 0, "" },
+				{ EPort::Material, "Material", "Output Material: material name", 0, "" },
 				{ EPort::Int, "Slot", "Output Material: texture slot (0 = diffuse)", 0, nullptr },
 				{ EPort::Int, "SubMaterial", "Output Material: sub-material index, -1 = the material itself", -1, nullptr },
 				{ EPort::Decode, "Decode", kDecodeDesc, 0, nullptr },
@@ -502,6 +521,8 @@ namespace CEVPlayer
 						case EPort::Output: self.BindInput(i, p.name, p.description, static_cast<Api::EOutputMode>(static_cast<int>(p.defNum))); break;
 						case EPort::Decode: self.BindInput(i, p.name, p.description, static_cast<Api::EDecodeMode>(static_cast<int>(p.defNum))); break;
 						case EPort::Entity: self.BindInput(i, p.name, p.description); break;
+						case EPort::Video: self.BindInput(i, p.name, p.description, SVideoFileName(p.defStr != nullptr ? p.defStr : "")); break;
+						case EPort::Material: self.BindInput(i, p.name, p.description, CryVS::SMaterialFileName(p.defStr != nullptr ? p.defStr : "")); break;
 						default: self.BindInput(i, p.name, p.description, p.defStr != nullptr ? p.defStr : ""); break;
 						}
 					}
@@ -527,6 +548,8 @@ namespace CEVPlayer
 						case EPort::Output: { Api::EOutputMode v = Api::EOutputMode::Screen; LoadParam(inputsArchive, i, v); in[i] = I(static_cast<int>(v)); break; }
 						case EPort::Decode: { Api::EDecodeMode v = Api::EDecodeMode::Auto; LoadParam(inputsArchive, i, v); in[i] = I(static_cast<int>(v)); break; }
 						case EPort::Entity: { CryVS::ExplicitEntityId v; LoadParam(inputsArchive, i, v); in[i] = I(static_cast<int>(v.GetValue())); break; }
+						case EPort::Video: { SVideoFileName v; LoadParam(inputsArchive, i, v); in[i] = S(v.value.c_str()); break; }
+						case EPort::Material: { CryVS::SMaterialFileName v; LoadParam(inputsArchive, i, v); in[i] = S(v.value.c_str()); break; }
 						default: { const char* v = ""; LoadParam(inputsArchive, i, v); in[i] = S(v); break; }
 						}
 					}
@@ -560,6 +583,8 @@ namespace CEVPlayer
 					case EPort::Output: AddParam<Api::EOutputMode>(flags); break;
 					case EPort::Decode: AddParam<Api::EDecodeMode>(flags); break;
 					case EPort::Entity: AddParam<CryVS::ExplicitEntityId>(flags); break;
+					case EPort::Video: AddParam<SVideoFileName>(flags); break;
+					case EPort::Material: AddParam<CryVS::SMaterialFileName>(flags); break;
 					default: AddParam<const char*>(flags); break;
 					}
 				}
@@ -827,7 +852,7 @@ namespace CEVPlayer
 					if (m_hasReturn)
 						AddParamOf(entry.returnType, CryVS::ComponentMemberFunctionUtils::EParamFlags::IsReturn);
 					for (uint32_t i = 0; i < entry.paramCount; ++i)
-						AddParamOf(entry.params[i].type, CryVS::ComponentMemberFunctionUtils::EParamFlags::None);
+						AddInputParam(entry.params[i]);
 
 					CryVS::IComponentMemberFunction& self = *this; // the typed BindInput overloads live on the interface
 					self.SetAuthor("CEVPlayer");
@@ -843,7 +868,14 @@ namespace CEVPlayer
 						case Api::EType::Bool: self.BindInput(idx, p.name, p.description, p.defNum != 0.0); break;
 						case Api::EType::Int: self.BindInput(idx, p.name, p.description, static_cast<int32>(p.defNum)); break;
 						case Api::EType::Float: self.BindInput(idx, p.name, p.description, static_cast<float>(p.defNum)); break;
-						default: self.BindInput(idx, p.name, p.description, p.defStr != nullptr ? p.defStr : ""); break;
+						default:
+							if (p.kind == Api::EParamKind::VideoPath)
+								self.BindInput(idx, p.name, p.description, SVideoFileName(p.defStr != nullptr ? p.defStr : ""));
+							else if (p.kind == Api::EParamKind::MaterialName)
+								self.BindInput(idx, p.name, p.description, CryVS::SMaterialFileName(p.defStr != nullptr ? p.defStr : ""));
+							else
+								self.BindInput(idx, p.name, p.description, p.defStr != nullptr ? p.defStr : "");
+							break;
 						}
 					}
 				}
@@ -862,7 +894,11 @@ namespace CEVPlayer
 						case Api::EType::Bool: { bool v = false; LoadParam(inputsArchive, base + i, v); in[i] = SValue::FromBool(v); break; }
 						case Api::EType::Int: { int32 v = 0; LoadParam(inputsArchive, base + i, v); in[i] = SValue::FromInt(v); break; }
 						case Api::EType::Float: { float v = 0.f; LoadParam(inputsArchive, base + i, v); in[i] = SValue::FromFloat(v); break; }
-						default: { const char* v = ""; LoadParam(inputsArchive, base + i, v); in[i] = SValue::FromString(v); break; }
+						default:
+							if (m_entry.params[i].kind == Api::EParamKind::VideoPath) { SVideoFileName v; LoadParam(inputsArchive, base + i, v); in[i] = SValue::FromString(v.value.c_str()); }
+							else if (m_entry.params[i].kind == Api::EParamKind::MaterialName) { CryVS::SMaterialFileName v; LoadParam(inputsArchive, base + i, v); in[i] = SValue::FromString(v.value.c_str()); }
+							else { const char* v = ""; LoadParam(inputsArchive, base + i, v); in[i] = SValue::FromString(v); }
+							break;
 						}
 					}
 
@@ -893,6 +929,17 @@ namespace CEVPlayer
 					}
 				}
 
+				void AddInputParam(const Api::SParam& p)
+				{
+					const auto flags = CryVS::ComponentMemberFunctionUtils::EParamFlags::None;
+					if (p.type == Api::EType::String && p.kind == Api::EParamKind::VideoPath)
+						AddParam<SVideoFileName>(flags);
+					else if (p.type == Api::EType::String && p.kind == Api::EParamKind::MaterialName)
+						AddParam<CryVS::SMaterialFileName>(flags);
+					else
+						AddParamOf(p.type, flags);
+				}
+
 				const Api::SEntry& m_entry;
 				bool m_hasReturn;
 			};
@@ -908,7 +955,9 @@ namespace CEVPlayer
 			// SetPauseDecodeWhenHidden and PauseDecodeWhenHidden: 36 -> 38; A1 replaced Language by AudioTrack and added
 			// AudioTrackCount, AudioTrackName and AudioTrackLanguage: 38 -> 41).
 			constexpr uint32 kMemberFunctionCount = 41;
-			constexpr uint32 kElementCount = 3 + Api::eCryVS_FunctionCount + 1 + kMemberFunctionCount + Api::eEvent_Count + 2; // types, globals, component, members, signals
+			// Types: Output, Fit, Decode and (P1b) the video and material file types of the path inputs: 3 -> 5.
+			constexpr uint32 kTypeCount = 5;
+			constexpr uint32 kElementCount = kTypeCount + Api::eCryVS_FunctionCount + 1 + kMemberFunctionCount + Api::eEvent_Count + 2; // types, globals, component, members, signals
 
 			struct SCounts
 			{
@@ -967,6 +1016,9 @@ namespace CEVPlayer
 				addType(Api::kOutputModeTypeGuid, CryVS::MakeEnvTypeDescShared(Api::kOutputModeTypeGuid, "VideoOutput", "Where a video goes: Surface, Screen or Material", Api::EOutputMode::Screen, CryVS::EEnvTypeFlags::None));
 				addType(Api::kFitTypeGuid, CryVS::MakeEnvTypeDescShared(Api::kFitTypeGuid, "VideoFit", "How a fullscreen video is placed: Fill, Fit or Letterbox", EVideoFit::Letterbox, CryVS::EEnvTypeFlags::None));
 				addType(Api::kDecodeModeTypeGuid, CryVS::MakeEnvTypeDescShared(Api::kDecodeModeTypeGuid, "VideoDecode", "Decoder choice: Auto, GPU or CPU", Api::EDecodeMode::Auto, CryVS::EEnvTypeFlags::None));
+				// path inputs (P1b): their value fields show a file / material picker
+				addType(Api::kCryVSVideoFileTypeGuid, CryVS::MakeEnvTypeDescShared(Api::kCryVSVideoFileTypeGuid, "VideoFileName", "Video file (.webm) or runtime descriptor (.cevvideo)", SVideoFileName(), CryVS::EEnvTypeFlags::None));
+				addType(Api::kCryVSMaterialFileTypeGuid, CryVS::MakeEnvTypeDescShared(Api::kCryVSMaterialFileTypeGuid, "MaterialFileName", "Material file name", CryVS::SMaterialFileName(), CryVS::EEnvTypeFlags::None));
 
 				// global functions (three drawers)
 				for (const SGlobalFunction& desc : kGlobalFunctions)
@@ -1084,6 +1136,8 @@ namespace CEVPlayer
 					case EPort::Output: return CryVS::GetTypeInfo<Api::EOutputMode>().GetTypeId();
 					case EPort::Decode: return CryVS::GetTypeInfo<Api::EDecodeMode>().GetTypeId();
 					case EPort::Entity: return CryVS::GetTypeInfo<CryVS::ExplicitEntityId>().GetTypeId();
+					case EPort::Video: return CryVS::GetTypeInfo<SVideoFileName>().GetTypeId();
+					case EPort::Material: return CryVS::GetTypeInfo<CryVS::SMaterialFileName>().GetTypeId();
 					default: return CryVS::GetTypeInfo<CryVS::CPoolString>().GetTypeId();
 					}
 				}
@@ -1097,6 +1151,15 @@ namespace CEVPlayer
 					case Api::EType::Float: return CryVS::GetTypeInfo<float>().GetTypeId();
 					default: return CryVS::GetTypeInfo<CryVS::CPoolString>().GetTypeId();
 					}
+				}
+
+				CryVS::CAggregateTypeId TypeIdOf(const Api::SParam& p)
+				{
+					if (p.type == Api::EType::String && p.kind == Api::EParamKind::VideoPath)
+						return CryVS::GetTypeInfo<SVideoFileName>().GetTypeId();
+					if (p.type == Api::EType::String && p.kind == Api::EParamKind::MaterialName)
+						return CryVS::GetTypeInfo<CryVS::SMaterialFileName>().GetTypeId();
+					return TypeIdOf(p.type);
 				}
 
 				bool SameType(const CryVS::IAnyConstPtr& pValue, const CryVS::CAggregateTypeId& expected)
@@ -1182,7 +1245,7 @@ namespace CEVPlayer
 							bool ok = pFunction && strcmp(pFunction->GetName(), e.name) == 0 && pFunction->GetComponentGUID() == Api::kCryVSComponentGuid
 								&& pFunction->GetInputCount() == e.paramCount && pFunction->GetOutputCount() == outs;
 							for (uint32 i = 0; ok && i < e.paramCount; ++i)
-								ok = SameType(pFunction->GetInputValue(i), TypeIdOf(e.params[i].type));
+								ok = SameType(pFunction->GetInputValue(i), TypeIdOf(e.params[i]));
 							if (ok && outs != 0)
 								ok = SameType(pFunction->GetOutputValue(0), TypeIdOf(e.returnType));
 							Check(ok, "member function CEVPlayer::VideoPlayer::%s - %u in / %u out, types match", e.name, e.paramCount, outs);
@@ -1209,7 +1272,8 @@ namespace CEVPlayer
 
 					// enumeration types
 					Check(registry.GetTypeDesc(Api::kOutputModeTypeGuid) != nullptr && registry.GetTypeDesc(Api::kFitTypeGuid) != nullptr
-						&& registry.GetTypeDesc(Api::kDecodeModeTypeGuid) != nullptr, "types VideoOutput, VideoFit, VideoDecode registered");
+						&& registry.GetTypeDesc(Api::kDecodeModeTypeGuid) != nullptr && registry.GetTypeDesc(Api::kCryVSVideoFileTypeGuid) != nullptr
+						&& registry.GetTypeDesc(Api::kCryVSMaterialFileTypeGuid) != nullptr, "types VideoOutput, VideoFit, VideoDecode, VideoFileName, MaterialFileName registered");
 				}
 
 				void Start(const char* video)
