@@ -17,6 +17,8 @@
 
 #include <CrySystem/ConsoleRegistration.h>
 #include <CrySystem/File/ICryPak.h>
+#include <CrySystem/Scaleform/IFlashPlayer.h> // cev_probe_flash (S1)
+#include <CrySystem/Scaleform/IFlashUI.h>
 #include <CryCore/Platform/CryWindows.h> // GetModuleHandleA / GetProcAddress / GetLocalTime (M10a probe)
 #include <CryRenderer/IRenderer.h>
 #include <CryRenderer/ITexture.h>
@@ -1964,6 +1966,267 @@ namespace CEVPlayer
 		}
 	}
 
+	// ------------------------------------------------------------------------------------------------
+	// Development-only (S1): a surface player's engine texture inside a Scaleform movie clip through
+	// IUIElement::LoadTexIntoMc. Feasibility probe only; it keeps a list of what it loaded so that
+	// `off` can unload it again.
+	namespace FlashProbe
+	{
+		namespace
+		{
+			struct SEntry
+			{
+				std::string element;
+				std::string mc;       // full movie clip path as handed to LoadTexIntoMc
+				std::string surface;
+				int         texId = 0; // the texture id at load time
+			};
+			std::vector<SEntry> s_entries;
+
+			double Num(const SFlashVarValue& v)
+			{
+				switch (v.GetType())
+				{
+				case SFlashVarValue::eDouble: return v.GetDouble();
+				case SFlashVarValue::eFloat:  return v.GetFloat();
+				case SFlashVarValue::eInt:    return v.GetInt();
+				case SFlashVarValue::eUInt:   return v.GetUInt();
+				case SFlashVarValue::eBool:   return v.GetBool() ? 1.0 : 0.0;
+				default:                      return -1.0;
+				}
+			}
+
+			IUIElement* Element(const char* name)
+			{
+				return gEnv != nullptr && gEnv->pFlashUI != nullptr ? gEnv->pFlashUI->GetUIElement(name) : nullptr;
+			}
+
+			ITexture* SurfaceTexture(const char* surface, IVideoPlayer** ppPlayer = nullptr)
+			{
+				IVideoPlayer* const p = mEnv->pManager != nullptr ? mEnv->pManager->FindPlayerBySurface(surface) : nullptr;
+				if (ppPlayer != nullptr)
+					*ppPlayer = p;
+				return p != nullptr ? p->GetTexture() : nullptr;
+			}
+
+			void LogTex(const char* what, ITexture* pTex, IVideoPlayer* p)
+			{
+				if (pTex == nullptr)
+				{
+					LogAlways("cev_probe_flash: %s: no texture", what);
+					return;
+				}
+				LogAlways("cev_probe_flash: %s: texture id %d name <%s> %dx%d format <%s> src %d layout %s", what, pTex->GetTextureID(), pTex->GetName(), pTex->GetWidth(),
+					pTex->GetHeight(), pTex->GetFormatName(), static_cast<int>(pTex->GetTextureSrcFormat()),
+					p == nullptr ? "?" : (p->GetPixelLayout() == EVideoPixelLayout::RGBA8 ? "RGBA8" : "packed YUV"));
+			}
+
+			// The movie clip's position and size as Flash sees them (_x, _y, _width, _height, _xscale, _yscale, _visible).
+			void LogClip(IUIElement* pElement, const char* mc, const char* what)
+			{
+				std::shared_ptr<IFlashPlayer> fp = pElement->GetFlashPlayer();
+				IFlashVariableObject* pVar = nullptr;
+				if (!fp || !fp->GetVariable(mc, pVar) || pVar == nullptr)
+				{
+					LogAlways("cev_probe_flash: %s <%s>: movie clip not found", what, mc);
+					return;
+				}
+				SFlashVarValue x(0), y(0), w(0), h(0), sx(0), sy(0), vis(false);
+				pVar->GetMember("_x", x);
+				pVar->GetMember("_y", y);
+				pVar->GetMember("_width", w);
+				pVar->GetMember("_height", h);
+				pVar->GetMember("_xscale", sx);
+				pVar->GetMember("_yscale", sy);
+				pVar->GetMember("_visible", vis);
+				SFlashVarValue depth(0);
+				pVar->Invoke0("getDepth", &depth);
+				LogAlways("cev_probe_flash: %s <%s> depth %.0f display=%d _x %.1f _y %.1f _width %.1f _height %.1f _xscale %.1f _yscale %.1f _visible %.0f | movie %dx%d frame %u, element visible %d lazy %d needLazyRender %d",
+					what, mc, Num(depth), pVar->IsDisplayObject() ? 1 : 0, Num(x), Num(y), Num(w), Num(h), Num(sx), Num(sy), Num(vis), fp->GetWidth(), fp->GetHeight(), fp->GetCurrentFrame(),
+					pElement->IsVisible() ? 1 : 0, pElement->HasFlag(IUIElement::eFUI_LAZY_UPDATE) ? 1 : 0, pElement->NeedLazyRender() ? 1 : 0);
+				pVar->Release();
+			}
+
+			// "new:<name>" creates an empty movie clip _root.<name> (depth 1000 + n) and returns its path; anything else is used as it is.
+			std::string ResolveClip(IUIElement* pElement, const char* arg)
+			{
+				if (strnicmp(arg, "new:", 4) != 0)
+					return arg;
+				const std::string path = std::string("_root.") + (arg + 4);
+				std::shared_ptr<IFlashPlayer> fp = pElement->GetFlashPlayer();
+				if (!fp)
+					return path;
+				if (fp->IsAvailable(path.c_str()))
+					return path;
+				IFlashVariableObject* pRoot = nullptr;
+				IFlashVariableObject* pMc = nullptr;
+				bool ok = false;
+				if (fp->GetVariable("_root", pRoot) && pRoot != nullptr)
+				{
+					ok = pRoot->CreateEmptyMovieClip(pMc, arg + 4, 1000 + static_cast<int>(s_entries.size()));
+					if (pMc != nullptr)
+						pMc->Release();
+					pRoot->Release();
+				}
+				LogAlways("cev_probe_flash: CreateEmptyMovieClip <%s> -> %d", path.c_str(), ok ? 1 : 0);
+				return path;
+			}
+
+			void Unload(const SEntry& e)
+			{
+				IUIElement* const pElement = Element(e.element.c_str());
+				if (pElement == nullptr)
+					return;
+				ITexture* const pTex = e.texId > 0 ? gEnv->pRenderer->EF_GetTextureByID(e.texId) : nullptr;
+				if (pTex != nullptr)
+				{
+					pElement->UnloadTexFromMc(e.mc.c_str(), pTex);
+					LogAlways("cev_probe_flash: UnloadTexFromMc <%s> <%s> texture id %d", e.element.c_str(), e.mc.c_str(), e.texId);
+				}
+				else
+					LogAlways("cev_probe_flash: <%s> <%s>: texture id %d no longer exists, UnloadTexFromMc not called", e.element.c_str(), e.mc.c_str(), e.texId);
+			}
+		}
+
+		//! cev_probe_flash <element> <movie clip|new:<name>> <surface> [x y [scale %]]: shows the element, loads the surface
+		//! player's current texture into the movie clip (LoadTexIntoMc) and optionally moves / scales the clip.
+		//! off [movie clip]: UnloadTexFromMc for every entry (or the one clip); info: logs every entry and its clip;
+		//! hide <element> / show <element>: SetVisible.
+		void Cmd(IConsoleCmdArgs* args)
+		{
+			if (gEnv == nullptr || gEnv->pRenderer == nullptr || mEnv->pManager == nullptr)
+				return;
+			const int n = args != nullptr ? args->GetArgCount() : 0;
+			if (n < 2)
+			{
+				LogAlways("usage: cev_probe_flash <element> <movie clip|new:<name>> <surface> [x y [scale %%]] | off [movie clip] | info | hide <element> | show <element> | depth <element> <movie clip> <n>   (%u loaded)",
+					static_cast<unsigned>(s_entries.size()));
+				return;
+			}
+			if (gEnv->pFlashUI == nullptr)
+			{
+				LogAlways("cev_probe_flash: no IFlashUI");
+				return;
+			}
+			const char* const a1 = args->GetArg(1);
+			if (stricmp(a1, "off") == 0)
+			{
+				for (auto it = s_entries.begin(); it != s_entries.end();)
+				{
+					if (n > 2 && stricmp(it->mc.c_str(), args->GetArg(2)) != 0)
+					{
+						++it;
+						continue;
+					}
+					Unload(*it);
+					it = s_entries.erase(it);
+				}
+				LogAlways("cev_probe_flash: off, %u left", static_cast<unsigned>(s_entries.size()));
+				return;
+			}
+			if (stricmp(a1, "info") == 0)
+			{
+				for (const SEntry& e : s_entries)
+				{
+					IVideoPlayer* p = nullptr;
+					ITexture* const pTex = SurfaceTexture(e.surface.c_str(), &p);
+					LogAlways("cev_probe_flash: info <%s> <%s> surface <%s> loaded id %d, surface texture now %d", e.element.c_str(), e.mc.c_str(), e.surface.c_str(), e.texId,
+						pTex != nullptr ? pTex->GetTextureID() : 0);
+					if (IUIElement* const pElement = Element(e.element.c_str()))
+						LogClip(pElement, e.mc.c_str(), "info");
+				}
+				return;
+			}
+			if (stricmp(a1, "depth") == 0 && n > 4)
+			{
+				// depth <element> <movie clip> <n>: swapDepths(n) on the clip
+				IUIElement* const pElement = Element(args->GetArg(2));
+				std::shared_ptr<IFlashPlayer> fp = pElement != nullptr ? pElement->GetFlashPlayer() : nullptr;
+				IFlashVariableObject* pVar = nullptr;
+				bool ok = false;
+				if (fp && fp->GetVariable(args->GetArg(3), pVar) && pVar != nullptr)
+				{
+					ok = pVar->Invoke1("swapDepths", SFlashVarValue(std::atoi(args->GetArg(4))));
+					pVar->Release();
+					pElement->ForceLazyUpdate();
+				}
+				LogAlways("cev_probe_flash: swapDepths <%s> %s -> %d", args->GetArg(3), args->GetArg(4), ok ? 1 : 0);
+				if (pElement != nullptr)
+					LogClip(pElement, args->GetArg(3), "depth");
+				return;
+			}
+			if ((stricmp(a1, "hide") == 0 || stricmp(a1, "show") == 0) && n > 2)
+			{
+				IUIElement* const pElement = Element(args->GetArg(2));
+				if (pElement != nullptr)
+					pElement->SetVisible(stricmp(a1, "show") == 0);
+				LogAlways("cev_probe_flash: %s <%s> -> %s", a1, args->GetArg(2), pElement == nullptr ? "no such element" : (pElement->IsVisible() ? "visible" : "hidden"));
+				return;
+			}
+			if (n < 4)
+			{
+				LogAlways("cev_probe_flash: needs <element> <movie clip> <surface>");
+				return;
+			}
+			IUIElement* const pElement = Element(a1);
+			if (pElement == nullptr)
+			{
+				LogAlways("cev_probe_flash: no UI element <%s> (%d elements)", a1, gEnv->pFlashUI->GetUIElementCount());
+				return;
+			}
+			if (!pElement->IsVisible())
+				pElement->SetVisible(true);
+			if (!pElement->GetFlashPlayer())
+			{
+				LogAlways("cev_probe_flash: <%s> has no flash player (visible %d)", a1, pElement->IsVisible() ? 1 : 0);
+				return;
+			}
+			IVideoPlayer* p = nullptr;
+			ITexture* const pTex = SurfaceTexture(args->GetArg(3), &p);
+			LogTex("load", pTex, p);
+			if (pTex == nullptr)
+				return;
+			const std::string mc = ResolveClip(pElement, args->GetArg(2));
+			pElement->LoadTexIntoMc(mc.c_str(), pTex);
+			LogAlways("cev_probe_flash: LoadTexIntoMc <%s> <%s> img://TEXID:%d (element visible %d)", a1, mc.c_str(), pTex->GetTextureID(), pElement->IsVisible() ? 1 : 0);
+			if (n > 5)
+			{
+				std::shared_ptr<IFlashPlayer> fp = pElement->GetFlashPlayer();
+				IFlashVariableObject* pVar = nullptr;
+				if (fp && fp->GetVariable(mc.c_str(), pVar) && pVar != nullptr)
+				{
+					SFlashDisplayInfo info;
+					info.SetX(static_cast<float>(std::atof(args->GetArg(4))));
+					info.SetY(static_cast<float>(std::atof(args->GetArg(5))));
+					if (n > 6)
+					{
+						info.SetXScale(static_cast<float>(std::atof(args->GetArg(6))));
+						info.SetYScale(static_cast<float>(std::atof(args->GetArg(6))));
+					}
+					const bool ok = pVar->SetDisplayInfo(info);
+					pVar->Release();
+					pElement->ForceLazyUpdate();
+					LogAlways("cev_probe_flash: SetDisplayInfo <%s> -> %d", mc.c_str(), ok ? 1 : 0);
+				}
+			}
+			LogClip(pElement, mc.c_str(), "after load");
+			for (auto it = s_entries.begin(); it != s_entries.end(); ++it)
+			{
+				if (it->element == a1 && it->mc == mc)
+				{
+					s_entries.erase(it);
+					break;
+				}
+			}
+			SEntry e;
+			e.element = a1;
+			e.mc = mc;
+			e.surface = args->GetArg(3);
+			e.texId = pTex->GetTextureID();
+			s_entries.push_back(e);
+		}
+	}
+
 	void RegisterConsole()
 	{
 		IConsole* const pConsole = gEnv != nullptr ? gEnv->pConsole : nullptr;
@@ -1996,6 +2259,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> shows the surface's texture top left as it is (fullscreen output debug layer, sampled as RGBA: an R8 packed texture shows the planes in red); no argument = off");
 		REGISTER_COMMAND("cev_probe_xui2dl", XUI2DLProbe::Cmd, VF_NULL, "Development (L1, L2): cev_probe_xui2dl <case 1-8> [surface] | off | stats | yuv <n 1-16> [scale] | read <tag> | yuvsurface <surface> [seek seconds] sends one XUI2DL SetFrame per case (docs/tasks/L1.md; cases 2-4 draw the texture of the cev_play_surface player <surface>) and logs the result and the XUI2DL statistics; off clears the retained list; stats only logs every XUI2DLStats field; yuv shows synthetic packed YUV picture n (docs/tasks/L2.md) and writes it to <user>/xui2dl_yuv_<n>.bin/.txt; read writes the presented frame to <user>/xui2dl_read_<tag>.ppm; yuvsurface shows a surface texture 1:1 from its contract snapshot (with a time: pause and seek)");
 		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b, L3a): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|reopen:<surface>:<path>|destroy:<surface>|control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]...] registers an order-100 loading-loop callback (source=patch17; with source=xui2dl a hook in the player manager's update, without P4 / P7) that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
+		REGISTER_COMMAND("cev_probe_flash", FlashProbe::Cmd, VF_NULL, "Development (S1): cev_probe_flash <element> <movie clip|new:<name>> <surface> [x y [scale %]] shows the UI element and loads the surface player's current texture into the movie clip (IUIElement::LoadTexIntoMc; new:<name> creates an empty clip _root.<name> first); off [movie clip] calls UnloadTexFromMc; info logs the loaded entries and their clips; hide|show <element> sets the element's visibility; depth <element> <movie clip> <n> calls swapDepths(n)");
 		REGISTER_COMMAND("cev_stats_file", DevProbe::CmdStatsFile, VF_NULL, "Measurement: cev_stats_file <path>|off writes the per-second cev_stats rows as CSV (turns cev_stats on)");
 
 		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");
@@ -2023,7 +2287,7 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface", "cev_probe_xui2dl", "cev_probe_fullscreen" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface", "cev_probe_xui2dl", "cev_probe_fullscreen", "cev_probe_flash" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 		pConsole->RemoveCommand("cev_probe_loadtime");
