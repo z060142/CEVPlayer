@@ -76,3 +76,14 @@ virtual void DetachFromFlash(const char* szUIElement, int instanceId, const char
 同 L3a（社群版樹腳本不用 `quit`；每次執行都有逾時；樹忙碌檢查；只關自己啟動的行程；不碰共用樹；GameSDK 範例專案唯讀、Crytek 素材不進倉；不 `git add -A`、不 `git stash`、不推送；英文程式與提交訊息）。提交：功能一個、節點與指令一個、文件一個，訊息帶 `S2`，結尾 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。證據放 `E:/coding3/xt-bench/cev-s2/`。標「未編譯：共用樹、Sandbox 插件」「未測：lazy update 的元件、Sandbox、正式的 GameSDK 選單／HUD 元件、行程正常結束時 Scaleform 的解構」。
 
 報告（繁體中文、精簡，寫在最後訊息裡）：提交；介面與行為的實際做法（掛點存哪、何時載入／卸下）；A1～A12 的判定與證據；自測的新數字；崩潰或卡住的執行；偏離與沒做到的。
+
+## S2b 補正（2026-11-27，S2 回報後的裁決）
+
+模型：Opus。接在 `50f1b90` 之後；只在社群版樹建置（只建 `CEVPlayer`）與執行；規則同上。一個提交，訊息帶 `S2b`。
+
+1. **埠名**：節點 `CEVPlayer:AttachToFlash` 的輸入埠 `SurfaceId` 改為 `SurfaceID`，與既有節點一致。README 的節點表同步。
+2. **不建立 instance**：`AttachToFlash` 對不存在的 instance 不得讓引擎順手建立（S2 的 log 可見 instance 5 被建立）。改為以 `GetInstances` 列舉尋找；`instanceId` 0 指元件本身（元件已載入時必然存在，照 FlashUI 的語意處理——先讀碼確認 0 號的取得方式不會建立新的東西）。找不到 → false 與 log。負數照舊拒絕。
+3. **沒有 Scaleform 的訊息**：這個 fork 在沒有 helper 時 `pFlashUI` 仍存在。判斷改為：FlashUI 存在但 Scaleform 不可用（以引擎公開的方式判斷，例如 `gEnv->pScaleformHelper` 為空；先讀碼確認 5.7.1 官方與這個 fork 都有這個成員，沒有共同的公開判斷方式就維持現狀並回報）時，log 明寫 `Scaleform is not available`。
+4. **只卸一個 clip**：`cev_detach_flash <surfaceId> [<uiElement> <instanceId> <movieClip>]`——帶後三個參數時只卸那一個。
+
+驗證：A7（含不存在的 instance：log 中不得再出現該 instance 被建立）、A8（新訊息；DLL 改名後改回並核對 SHA-256）、A9 加一步「只卸 p7 的其中一個 clip，另一個照常」（像素）、A11（`cev_flowtest` 69）、自測 72／69／248、F1／F2／F6 讀回與 L7a 逐位元組相同。證據放 `E:/coding3/xt-bench/cev-s2b/`。報告同 S2 的格式，精簡。
