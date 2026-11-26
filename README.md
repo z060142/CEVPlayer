@@ -42,17 +42,20 @@ Licence: Boost Software License 1.0, see [LICENSE](LICENSE). Third-party librari
   second Media Foundation decoder handles the alpha stream; when it cannot be opened only the alpha goes through
   libvpx. The backend in use is reported (`DecodeBackend` query / node output, `cev_stats`).
 * **Outputs** (several players at a time):
-  * **Screen**: fullscreen on the top layer (`Fill`, `Fit` = keep aspect with the scene visible in the bars,
-    `Letterbox` = keep aspect with black bars), optionally skippable by a key / mouse / gamepad button.
+  * **Screen**: fullscreen above the scene and the engine's Scaleform UI (`Fill`, `Fit` = keep aspect with the scene
+    visible in the bars, `Letterbox` = keep aspect with black bars), optionally skippable by a key / mouse / gamepad
+    button. Needs a 2D stage in the renderer, see [Fullscreen output and the renderer](#fullscreen-output-and-the-renderer).
   * **Material**: a texture slot of a material (a screen in the level); empty material name = the entity's material.
   * **Surface**: a named surface for UIs. The **surface id** is chosen by the author (1 to 63 of
     `A-Z a-z 0-9 _ . : -`, case insensitive, unique; creating a second player with the same id fails). It stays the
     same when the file, audio track, variant or size changes. The engine texture is named `$cev:<id>`.
-* **Level loading screens**: on a renderer with load-time callbacks (engine patch 17 of the CE_XTUI patch set, reported
-  by the renderer's `XUI2D_Patched` export), players that output only to their texture (surface and named-texture
-  players) keep playing, with sound, while the engine's loading loop runs; contract `open` / `control` sent during the
-  load are applied there. Fullscreen and material outputs pause until the load ends. On an unpatched engine, or with
-  `cev_loadtime 0`, every player pauses during the load and continues afterwards. The loading loop is paced by the
+* **Level loading screens**: on a renderer with a loading-loop driver (the XUI2DL engine patch of this repository, or
+  engine patch 17 of the CE_XTUI patch set on an engine with XTFrame), surface players and fullscreen players keep
+  playing, with sound, while the engine's loading loop runs; contract `open` / `control` sent during the load are
+  applied there. A fullscreen player shows the picture layout it had when the load began (it is not re-laid-out, and
+  its texture is not recreated, until the load ends); one started during a load appears after it. Material outputs
+  pause until the load ends. On an unpatched engine, or with `cev_loadtime 0`, every player pauses during the load and
+  continues afterwards. Not covered: asynchronous level loading (`g_asynclevelload`) and Sandbox. The loading loop is paced by the
   display (the engine forces vsync on during it), so video updates at the display's refresh rate at most.
 * **Texture-source contract for UI consumers**: `CEVPlayer.dll` exports `CryTexSource_v1` (contract version 2,
   specified in [docs/design/M6-ui-source.md](docs/design/M6-ui-source.md) §3; no shared header - a consumer copies the C
@@ -219,7 +222,7 @@ the descriptor's folder.
 | `cev_variant` | -1 | variant for players loaded afterwards: -1 automatic, 0 main video, n = n-th `<Variant>` |
 | `cev_allowPlanar` | 1 | 0 = surfaces always stay RGBA8 even when every consumer accepts a packed planar layout |
 | `cev_hiddenStopSeconds` | 2.0 | surfaces no consumer sees stop decoding after this many seconds; 0 = never |
-| `cev_loadtime` | 1 | texture-only players keep running during level loading screens (needs a renderer with load-time callbacks); 0 = pause everything while a level loads |
+| `cev_loadtime` | 1 | surface and fullscreen players keep running during level loading screens (needs a renderer with a loading-loop driver); 0 = pause everything while a level loads |
 | `cev_cueForceFallback` | 0 | 1 = the cue route ignores the optional engine patch and follows the video clock |
 | `cev_stats` | 0 | 1 = log a statistics line per player every second (timings, uploads, layout, decoder) |
 | `cev_log` | 0 | 1 = verbose log |
@@ -267,6 +270,7 @@ the descriptor's folder.
 | `Code/SDKs/CEVPlayer/` | prebuilt third-party libraries (Win64, MSVC 2022), see [THIRD-PARTY.md](THIRD-PARTY.md) |
 | `cmake/modules/` | CMake modules for those libraries (copied into the engine's `Tools/CMake/modules/`) |
 | `patches/` | engine patch series (plug-in registration) and the optional CryAudio patch, [patches/README.md](patches/README.md) |
+| `EnginePatch/` | XUI2DL: the renderer-side 2D stage for the fullscreen output (sources, shader, `apply_xui2dl.py`); origin and licence note in `EnginePatch/Code/CryEngine/RenderDll/XUI2DL/NOTICE.md` |
 | `tools/` | sync / patch / build / test media / smoke test / packaging scripts, `tools/ffmpeg/` (minimal FFmpeg build) |
 | `docs/` | plan and decision log, design documents, task sheets, research notes, manual acceptance lists (Traditional Chinese) |
 
@@ -333,6 +337,42 @@ by hand instead (see [docs/research/06-community-baseline.md](docs/research/06-c
 as above; only the CEVPlayer targets are verified on the fork. CryVS support is compiled automatically there. Test
 projects on the fork need `sys_SchematycPlugin=0` and Sandbox needs `sys_asserts=0` (fork issues, see
 [Limitations](#limitations-and-known-issues)).
+
+### Fullscreen output and the renderer
+
+The plug-in does not draw the fullscreen output itself (and no longer uses the renderer's aux geometry). It hands a
+list of layers to a 2D stage inside the renderer, and picks the stage when it starts:
+
+| Renderer | Fullscreen output | During level loading |
+|---|---|---|
+| with XTFrame (its XUI2D pass with planar shading; `XUI2D_Patched` non-zero) | through XUI2D, as one more screen surface below the XTFrame UI | keeps playing when `XUI2D_Patched` has bit 512, below the XTFrame loading UI; otherwise pauses |
+| with the XUI2DL patch of this repository | through XUI2DL, above Scaleform | keeps playing; the screen is cleared to black when nothing else draws a loading screen |
+| neither | none: one error line in the log; sound, material and surface outputs are unaffected | - |
+
+`cev_info` prints the choice (`fullscreen backend: xui2d|xui2dl|none planar=<0|1> loop=<0|1>`). There is no fallback
+to the old aux path. Engines without XTFrame need the XUI2DL patch for any fullscreen video:
+
+```bash
+# from this repository; python 3, no dependencies
+python EnginePatch/apply_xui2dl.py /path/to/engine            # copy the files, insert the hooks
+python EnginePatch/apply_xui2dl.py /path/to/engine --check    # report what is applied
+python EnginePatch/apply_xui2dl.py /path/to/engine --remove   # take it out again (byte-identical files)
+# then re-run CMake and rebuild the renderer (CryRenderD3D11) and CEVPlayer
+```
+
+The script copies `Code/CryEngine/RenderDll/XUI2DL/` and `Engine/Shaders/HWScripts/CryFX/XUI2DL.cfx` and inserts a few
+calls into renderer files between `// XUI2DL begin` / `// XUI2DL end` markers. It finds its places by anchor text,
+writes nothing when an anchor is missing, and can be run again. On a tree that already has engine patch 17 (XTFrame) it
+leaves the loading-loop hooks out; such a tree uses XUI2D anyway. XUI2DL is a deliberately small derivative of XUI2D
+(solid, RGBA and packed YUV layers, source-over blending, viewport and scissor, loading loop, its own resources) and
+is maintained for bugs and compatibility only. Design and limits: [docs/design/M11-xui2dl.md](docs/design/M11-xui2dl.md).
+
+Verified on Direct3D 11 only (untested: Direct3D 12, Vulkan, Sandbox viewports, a Scaleform loading screen with content
+running at the same time). `XUI2DL.cfx` is a loose shader file: a release build with run-time shader compilation
+turned off needs it in the shader cache.
+
+Fullscreen players are no longer forced to RGBA8: when the stage can shade packed YUV and `cev_allowPlanar` is 1, a
+4:2:0 video with an even width is kept packed and converted on the GPU (`IVideoPlayer::GetPixelLayout` reports it).
 
 ### Use in a project
 
@@ -419,9 +459,15 @@ person; they are collected in [docs/manual-acceptance.md](docs/manual-acceptance
 ## Limitations and known issues
 
 * **Input is WebM only** at run time; other containers go through the editor's FFmpeg import.
-* **Level-loading screens**: only players that output to their texture alone keep playing during a load, and only on a
-  renderer with load-time callbacks (engine patch 17). Fullscreen and material outputs pause; on an unpatched engine
-  every player pauses during the load and continues afterwards. Listener events of the load are delivered after it.
+* **Level-loading screens**: surface and fullscreen players keep playing during a load only on a renderer with a
+  loading-loop driver (XUI2DL patch, or engine patch 17 with XTFrame; fullscreen through XTFrame also needs
+  `XUI2D_Patched` bit 512). Material outputs pause; on an unpatched engine every player pauses during the load and
+  continues afterwards. Listener events of the load are delivered after it. A fullscreen player started during a load
+  appears after it; a stream that changes its picture size during a load keeps the old picture until the load ends.
+  What the loading loop shows was checked by reading pixels back with XTFrame's XUI2D; with XUI2DL it was checked by
+  draw counters and by the picture right after the load, not yet by a person watching the screen.
+* **Fullscreen output** needs a patched renderer, see
+  [Fullscreen output and the renderer](#fullscreen-output-and-the-renderer); Direct3D 11 only is verified.
 * **Sandbox edit mode**: the engine does not tick plug-ins there, so in-level videos (screen, material, surface) do not
   advance outside game mode. The editor's own preview is not affected.
 * **Hardware decode** exists only for VP9 and needs the "VP9 Video Extensions" package; it saves CPU time but costs more
@@ -432,8 +478,8 @@ person; they are collected in [docs/manual-acceptance.md](docs/manual-acceptance
 * **UI path**: the packed planar layouts, visibility throttling, size-based variants and `open` / `control` take effect
   only with a UI consumer that implements the texture-source contract; none ships in this repository. Without one, UIs
   use the RGBA8 texture from the node outputs.
-* **Fullscreen rendering** goes through the engine's aux geometry (top layer); colour conversion for RGBA8 is done on the
-  CPU. The plug-in ships no shaders.
+* **Colour conversion** to RGBA8 (material outputs, consumers that do not accept the packed layouts) is done on the
+  CPU. The plug-in itself ships no shaders; the XUI2DL engine patch ships one.
 * **Cue route**: exact lip-sync needs the optional patch (`patches/optional/02-cryaudio-trigger-position.patch`, SDL_mixer
   implementation only); otherwise (and with Wwise / FMOD / Adx2 / PortAudio) it follows a clock. Seeking a cue video
   moves the picture only.
