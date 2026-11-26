@@ -16,6 +16,7 @@
 
 #include "Audio/AudioMixer.h"
 #include "CEVCore/DecodePool.h"
+#include "Render/RenderBridge.h"
 
 namespace CEVPlayer
 {
@@ -53,20 +54,25 @@ namespace CEVPlayer
 		void PresentFullscreenBeforeRender();
 		//! UpdateAfterRender: the same for the XUI2DL backend, which takes them here.
 		void UpdateAfterRender();
-		//! M10: the tick of the renderer's loading loop (render thread, LoadtimeUpdate of the order-100 callback). Applies
+		//! M10: the tick of the renderer's loading loop (render thread: LoadtimeUpdate of the order-100 callback with
+		//! patch 17, the XUI2DLApi::SetLoadtimeUpdate update with XUI2DL). Applies
 		//! the queued contract commands and ticks the players that run during loads (RunsDuringLoad). No listener
 		//! dispatch: events stay queued until the first UpdateBeforeRender after the load. No engine timer is read.
 		void LoadtimeTick(float dt);
 		//! M10: adds / removes the loading-loop callback depending on intent (live players or queued contract commands).
 		//! Main thread only; a call from another thread returns at once. The decision is made under the tick lock, the
-		//! engine call (Add / Remove) without any lock: it must never run while this thread holds the tick lock (the
-		//! renderer's dispatch holds its registry lock while our callback waits for the tick lock). `forceRemove`:
-		//! shutdown.
+		//! engine call (Add / Remove, or XUI2DLApi::SetLoadtimeUpdate) without any lock: it must never run while this
+		//! thread holds the tick lock (the renderer's dispatch holds its registry lock while our callback waits for the
+		//! tick lock). The call goes to RenderBridge::LoadtimeSource() (L3a); removal goes to the source registered
+		//! with. `forceRemove`: shutdown.
 		void UpdateLoadtimeRegistration(bool forceRemove = false);
 		//! M10: players that output only to their texture keep running during level loads (cev_loadtime, callback
 		//! registered).
 		bool LoadModeActive() const;
 		bool LoadtimeRegistered() const { return m_loadtimeRegistered; }
+		//! L3a, development only (cev_probe_loadtime): with the XUI2DL source (one registrant) the probe cannot register
+		//! its own update, so the manager's XUI2DL update calls `pHook(dt)` after LoadtimeTick. nullptr removes it.
+		static void SetLoadtimeProbeHook(void (*pHook)(float dt));
 		//! M10: the lock every tick entry holds (main thread entries and the loading-loop tick never run at once). Take
 		//! it through CTickLock so the registration step can tell that this thread holds it.
 		std::recursive_mutex& TickMutex() { return m_tickMutex; }
@@ -127,6 +133,8 @@ namespace CEVPlayer
 		class CConsoleListener;
 		class CLevelListener;
 		class CLoadtimeCallback;
+		//! L3a: the update registered with XUI2DLApi::SetLoadtimeUpdate (`pUser` = this manager).
+		static void XUI2DLLoadtimeUpdate(void* pUser, float dt);
 
 		CVideoPlayerImpl* Find(const IVideoPlayer* pPlayer) const;
 		void ReapZombies(bool force);
@@ -171,6 +179,7 @@ namespace CEVPlayer
 		std::recursive_mutex m_tickMutex;
 		std::unique_ptr<CLoadtimeCallback> m_loadtimeCallback; // only with CEV_HAVE_LOADTIME_CALLBACKS
 		std::atomic<bool> m_loadtimeRegistered{ false }; // written by the main thread, read by LoadModeActive() on any thread
+		RenderBridge::ELoadtimeSource m_loadtimeSource = RenderBridge::ELoadtimeSource::None; // main thread: where it is registered
 		bool m_inLoadTick = false;   // set while LoadtimeTick runs (renderer calls are allowed then)
 	};
 }

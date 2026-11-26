@@ -5,6 +5,8 @@
 #include <CryCore/Platform/CryWindows.h> // GetModuleHandleA / GetProcAddress
 #include <CryRenderer/IRenderer.h>
 
+#include <cstddef> // offsetof
+
 namespace CEVPlayer
 {
 	namespace XUI2DLClient
@@ -13,6 +15,8 @@ namespace CEVPlayer
 		{
 			bool s_probed = false;
 			const XUI2DLApi* s_pApi = nullptr;
+			// The table as the first renderers had it (up to GetStats); later members are checked by `size` (L3a).
+			constexpr uint32_t kBaseSize = static_cast<uint32_t>(offsetof(XUI2DLApi, SetLoadtimeUpdate));
 
 			const char* RendererModuleName(IRenderer* pRenderer)
 			{
@@ -42,7 +46,7 @@ namespace CEVPlayer
 					if (const PFN_GetApi pGetApi = reinterpret_cast<PFN_GetApi>(::GetProcAddress(hModule, "XUI2DL_GetApi")))
 					{
 						const XUI2DLApi* const pApi = pGetApi(XUI2DL_API_VERSION);
-						if (pApi != nullptr && pApi->size >= sizeof(XUI2DLApi) && pApi->version == XUI2DL_API_VERSION)
+						if (pApi != nullptr && pApi->size >= kBaseSize && pApi->version == XUI2DL_API_VERSION)
 							s_pApi = pApi;
 					}
 				}
@@ -53,6 +57,15 @@ namespace CEVPlayer
 			else
 				LogAlways("renderer probe: XUI2DL_GetApi not found or version %d refused (no XUI2DL stage)", XUI2DL_API_VERSION);
 			return s_pApi;
+		}
+
+		SetLoadtimeUpdateFn LoadtimeUpdateEntry()
+		{
+			const XUI2DLApi* const pApi = Get();
+			if (pApi == nullptr || pApi->size < offsetof(XUI2DLApi, SetLoadtimeUpdate) + sizeof(pApi->SetLoadtimeUpdate)
+				|| (pApi->caps & XUI2DL_CAP_LOADTIME) == 0)
+				return nullptr;
+			return pApi->SetLoadtimeUpdate;
 		}
 	}
 }

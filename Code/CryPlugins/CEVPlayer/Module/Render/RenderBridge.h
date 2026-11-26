@@ -18,9 +18,20 @@ namespace CEVPlayer
 		//! Probes the renderer module for the optional "CEVPlayer_Patched" export once and logs the result once
 		//! ("stage 1" without it). Cheap after the first call.
 		void ProbeOnce();
-		//! M10: the renderer offers loading-loop callbacks (IRenderer::AddLoadtimeCallback, engine patch 17). Always
-		//! false without CEV_HAVE_LOADTIME_CALLBACKS; otherwise read once from the renderer module's export
-		//! `extern "C" int XUI2D_Patched()` (bit 7 = 128) and cached.
+		//! Where the renderer's loading-loop callbacks come from (M10, L3a).
+		enum class ELoadtimeSource : uint8_t
+		{
+			None,    //!< no loading-loop callbacks: clocks pause while a level loads
+			Patch17, //!< IRenderer::AddLoadtimeCallback (CE_XTUI patch 17)
+			XUI2DL,  //!< XUI2DLApi::SetLoadtimeUpdate (the XUI2DL engine patch on an engine without patch 17)
+		};
+		//! The source, read once a renderer exists and cached. Patch17 needs CEV_HAVE_LOADTIME_CALLBACKS and bit 7 (128) of
+		//! the renderer module's export `extern "C" int XUI2D_Patched()`; XUI2DL needs XUI2DLClient::LoadtimeUpdateEntry().
+		//! With both, Patch17.
+		ELoadtimeSource LoadtimeSource();
+		//! "patch17", "xui2dl" or "none".
+		const char* LoadtimeSourceName(ELoadtimeSource source);
+		//! M10: LoadtimeSource() != None.
 		bool LoadtimeAvailable();
 		//! 1 = stock renderer (CPU conversion), 2 = patched renderer found. M1: always 1.
 		int Stage();

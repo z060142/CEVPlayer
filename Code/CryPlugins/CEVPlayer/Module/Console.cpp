@@ -573,11 +573,14 @@ namespace CEVPlayer
 		}
 	}
 
-#if CEV_HAVE_LOADTIME_CALLBACKS
 	// ------------------------------------------------------------------------------------------------
 	// M10a: probe of the renderer's loading loop (engine patch 17, IRenderer::AddLoadtimeCallback). Measurement only:
 	// it never goes through a player except reading the P6 surface player's clock. All logging is LogAlways with the
 	// prefix "cev_probe_loadtime".
+	// L3a: also with the XUI2DL source (XUI2DLApi::SetLoadtimeUpdate). That source has one registrant, the player
+	// manager, so the probe's update runs through CPlayerManager::SetLoadtimeProbeHook after the players' tick and
+	// adds no registration of its own; P4 (drawing / read-back in the loop) and P7 (a second callback) are not
+	// available there.
 	namespace LoadtimeProbe
 	{
 		namespace
@@ -590,6 +593,7 @@ namespace CEVPlayer
 			constexpr float kNewLoopGap = 0.25f;           // seconds without a call: the next call starts a new loop
 
 			bool s_on = false;
+			RenderBridge::ELoadtimeSource s_source = RenderBridge::ELoadtimeSource::None; // while s_on
 			int s_texId = 0;
 			std::vector<uint32> s_texBuf;
 			int s_stallMs = 0;
@@ -921,7 +925,7 @@ namespace CEVPlayer
 							PLog("cev_probe_loadtime: control %s %g sent at iteration %u, result %d", step.verbName.c_str(), step.value, s_iterations, r);
 						}
 					}
-					if (s_iterations == 60)
+					if (s_iterations == 60 && s_source != RenderBridge::ELoadtimeSource::XUI2DL)
 						ReadBack(s_drawMode == 1 ? "render" : (s_drawMode == 2 ? "update" : "nodraw"));
 
 					if (s_p6Player != nullptr && (s_iterations % 10) == 1)
@@ -949,6 +953,12 @@ namespace CEVPlayer
 				}
 			};
 			SCallback s_callback;
+
+			//! L3a: the probe's update with the XUI2DL source (called by the player manager's update).
+			void XUI2DLProbeUpdate(float dt)
+			{
+				s_callback.LoadtimeUpdate(dt);
+			}
 
 			struct SListener final : public ISystemEventListener
 			{
@@ -1027,6 +1037,12 @@ namespace CEVPlayer
 							mEnv->pManager->ConsolePlaySurface(s_destroySurface.c_str(), nullptr, false);
 							PLog("G: destroyed; players %u, loading-loop callback registered %d", mEnv->pManager->GetPlayerCount(), mEnv->pManager->LoadtimeRegistered() ? 1 : 0);
 						}
+						if (!s_p7Done && s_source == RenderBridge::ELoadtimeSource::XUI2DL)
+						{
+							s_p7Done = true;
+							PLog("P7: not available with source=xui2dl (one registrant)");
+						}
+#if CEV_HAVE_LOADTIME_CALLBACKS
 						if (!s_p7Done)
 						{
 							s_p7Done = true;
@@ -1042,6 +1058,7 @@ namespace CEVPlayer
 							PLog("P7: AddLoadtimeCallback(dummy, 150) returned in %.3f ms; dummy called %u times in 200 ms; RemoveLoadtimeCallback returned in %.3f ms (calls at remove %u)",
 								addMs, before, removeMs, s_dummy.calls.load());
 						}
+#endif
 						if (s_stallMs > 0)
 						{
 							PLog("stall: main thread sleeps %d ms (simulated long load)", s_stallMs);
@@ -1051,7 +1068,7 @@ namespace CEVPlayer
 					}
 					if (event == ESYSTEM_EVENT_LEVEL_LOAD_END || event == ESYSTEM_EVENT_LEVEL_GAMEPLAY_START || event == ESYSTEM_EVENT_LEVEL_POST_UNLOAD)
 					{
-						if (s_p7Done)
+						if (s_p7Done && s_source != RenderBridge::ELoadtimeSource::XUI2DL)
 							PLog("P7 check: dummy calls %u, calls after remove %u", s_dummy.calls.load(), s_dummy.callsAfterRemove.load());
 						LogP6(name);
 						LogSnapshot(name, s_p6Surface);
@@ -1065,7 +1082,13 @@ namespace CEVPlayer
 			{
 				if (!s_on)
 					return;
-				gEnv->pRenderer->RemoveLoadtimeCallback(&s_callback);
+				if (s_source == RenderBridge::ELoadtimeSource::XUI2DL)
+					CPlayerManager::SetLoadtimeProbeHook(nullptr);
+#if CEV_HAVE_LOADTIME_CALLBACKS
+				else
+					gEnv->pRenderer->RemoveLoadtimeCallback(&s_callback);
+#endif
+				s_source = RenderBridge::ELoadtimeSource::None;
 				gEnv->pSystem->GetISystemEventDispatcher()->RemoveListener(&s_listener);
 				{
 					std::lock_guard<std::mutex> lock(s_mutex);
@@ -1090,7 +1113,7 @@ namespace CEVPlayer
 				s_controlSurface.clear();
 				s_controlSteps.clear();
 				s_on = false;
-				PLog("off: callback removed, texture released");
+				PLog("off: callback / hook removed, texture released");
 			}
 		}
 
@@ -1113,8 +1136,9 @@ namespace CEVPlayer
 					return;
 				}
 			}
-			const bool available = RenderBridge::LoadtimeAvailable();
-			PLog("P1: load-time callbacks (XUI2D_Patched bit 7) %s", available ? "SET" : "not set");
+			const RenderBridge::ELoadtimeSource source = RenderBridge::LoadtimeSource();
+			const bool available = source != RenderBridge::ELoadtimeSource::None;
+			PLog("P1: load-time callbacks %s, source=%s", available ? "SET" : "not set", RenderBridge::LoadtimeSourceName(source));
 			if (args == nullptr || args->GetArgCount() < 2 || std::atoi(args->GetArg(1)) == 0)
 			{
 				Off();
@@ -1129,6 +1153,12 @@ namespace CEVPlayer
 				Off();
 			s_stallMs = args->GetArgCount() > 2 ? std::atoi(args->GetArg(2)) : 0;
 			s_drawMode = args->GetArgCount() > 3 ? std::atoi(args->GetArg(3)) : 1;
+			if (source == RenderBridge::ELoadtimeSource::XUI2DL)
+			{
+				if (s_drawMode != 0)
+					PLog("P4: not available with source=xui2dl (no drawing inside the loading loop); draw mode %d ignored", s_drawMode);
+				s_drawMode = 0;
+			}
 			s_p6Surface = args->GetArgCount() > 4 && std::strcmp(args->GetArg(4), "-") != 0 ? args->GetArg(4) : "";
 			s_readbackDir = args->GetArgCount() > 5 && std::strcmp(args->GetArg(5), "-") != 0 ? args->GetArg(5) : "";
 			if (args->GetArgCount() > 6)
@@ -1169,12 +1199,18 @@ namespace CEVPlayer
 			}
 			s_p7Done = false;
 			gEnv->pSystem->GetISystemEventDispatcher()->RegisterListener(&s_listener, "CEVPlayerLoadtimeProbe");
-			gEnv->pRenderer->AddLoadtimeCallback(&s_callback, 100);
+			s_source = source;
+			if (source == RenderBridge::ELoadtimeSource::XUI2DL)
+				CPlayerManager::SetLoadtimeProbeHook(&XUI2DLProbeUpdate);
+#if CEV_HAVE_LOADTIME_CALLBACKS
+			else
+				gEnv->pRenderer->AddLoadtimeCallback(&s_callback, 100);
+#endif
 			s_on = true;
 			char desc[256];
 			TexState(desc, sizeof(desc));
-			PLog("on: callback registered (order 100), stall %d ms, draw mode %d, P6 surface <%s>, open <%s> <%s>, destroy <%s>, texture %s", s_stallMs, s_drawMode, s_p6Surface.c_str(),
-				s_openSurface.c_str(), s_openSrc.c_str(), s_destroySurface.c_str(), desc);
+			PLog("on: %s, stall %d ms, draw mode %d, P6 surface <%s>, open <%s> <%s>, destroy <%s>, texture %s", source == RenderBridge::ELoadtimeSource::XUI2DL ? "hook in the player manager's XUI2DL update (no own registration)" : "callback registered (order 100)",
+				s_stallMs, s_drawMode, s_p6Surface.c_str(), s_openSurface.c_str(), s_openSrc.c_str(), s_destroySurface.c_str(), desc);
 		}
 
 		void Shutdown()
@@ -1191,7 +1227,6 @@ namespace CEVPlayer
 			return requested && s_on && s_texId > 0;
 		}
 	}
-#endif
 
 	// ------------------------------------------------------------------------------------------------
 	// Development-only (L1, L2): cev_probe_xui2dl <case> [surface] | off | stats | yuv | read | yuvsurface sends one XUI2DLApi::SetFrame per case (three for
@@ -1673,20 +1708,16 @@ namespace CEVPlayer
 	void DevProbesDebugLayers(const FullscreenOutput::SDebugLayer*& pLayers, size_t& count)
 	{
 		DevProbe::BuildDebugLayers();
-#if CEV_HAVE_LOADTIME_CALLBACKS
 		int loadtimeTex = 0;
 		if (LoadtimeProbe::TakeDebugLayer(loadtimeTex))
 			DevProbe::AddDebugTexture(loadtimeTex, 20.f, 20.f, 300.f, 300.f);
-#endif
 		pLayers = DevProbe::s_debug;
 		count = DevProbe::s_debugCount;
 	}
 	void DevProbesShutdown()
 	{
 		DevProbe::Shutdown();
-#if CEV_HAVE_LOADTIME_CALLBACKS
-		LoadtimeProbe::Shutdown(); // removes the probe's loading-loop callback (main thread) before the renderer goes
-#endif
+		LoadtimeProbe::Shutdown(); // removes the probe's loading-loop callback / hook (main thread) before the renderer goes
 	}
 
 	namespace
@@ -1854,8 +1885,9 @@ namespace CEVPlayer
 		//! M10: one line on the loading-loop state (cev_info, cev_surfaces).
 		void LogLoadtimeState(const char* cmd)
 		{
-			LogAlways("%s: loadtime: available=%d registered=%d cev_loadtime=%d", cmd, RenderBridge::LoadtimeAvailable() ? 1 : 0,
-				mEnv->pManager != nullptr && mEnv->pManager->LoadtimeRegistered() ? 1 : 0, mEnv->m_cevLoadtime);
+			const RenderBridge::ELoadtimeSource source = RenderBridge::LoadtimeSource();
+			LogAlways("%s: loadtime: available=%d registered=%d cev_loadtime=%d source=%s", cmd, source != RenderBridge::ELoadtimeSource::None ? 1 : 0,
+				mEnv->pManager != nullptr && mEnv->pManager->LoadtimeRegistered() ? 1 : 0, mEnv->m_cevLoadtime, RenderBridge::LoadtimeSourceName(source));
 		}
 
 		//! L4: the fullscreen output backend (cev_info, cev_surfaces).
@@ -1953,9 +1985,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_bench_hint", DevProbe::CmdBenchHint, VF_NULL, "Measurement (M8): cev_bench_hint <surface> <acceptLayouts> sends a visible consumer hint for the surface every frame (no arguments = release)");
 		REGISTER_COMMAND("cev_show_surface", DevProbe::CmdShowSurface, VF_NULL, "Measurement (M8): cev_show_surface <surface> shows the surface's texture top left as it is (fullscreen output debug layer, sampled as RGBA: an R8 packed texture shows the planes in red); no argument = off");
 		REGISTER_COMMAND("cev_probe_xui2dl", XUI2DLProbe::Cmd, VF_NULL, "Development (L1, L2): cev_probe_xui2dl <case 1-8> [surface] | off | stats | yuv <n 1-16> [scale] | read <tag> | yuvsurface <surface> [seek seconds] sends one XUI2DL SetFrame per case (docs/tasks/L1.md; cases 2-4 draw the texture of the cev_play_surface player <surface>) and logs the result and the XUI2DL statistics; off clears the retained list; stats only logs every XUI2DLStats field; yuv shows synthetic packed YUV picture n (docs/tasks/L2.md) and writes it to <user>/xui2dl_yuv_<n>.bin/.txt; read writes the presented frame to <user>/xui2dl_read_<tag>.ppm; yuvsurface shows a surface texture 1:1 from its contract snapshot (with a time: pause and seek)");
-#if CEV_HAVE_LOADTIME_CALLBACKS
-		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>|control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]...] registers an order-100 loading-loop callback that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
-#endif
+		REGISTER_COMMAND("cev_probe_loadtime", LoadtimeProbe::Cmd, VF_NULL, "Measurement (M10a/M10b, L3a): cev_probe_loadtime 1 [stall ms] [draw 0|1 render|2 update] [P6 surface|-] [read-back dir|-] [open:<surface>:<path>|destroy:<surface>|control:<surface>:<verb>:<value>:<iteration>[+<verb>:<value>:<iteration>]...] registers an order-100 loading-loop callback (source=patch17; with source=xui2dl a hook in the player manager's update, without P4 / P7) that updates and draws a 256x256 texture and logs P1-P8; cev_probe_loadtime 0 removes it");
 		REGISTER_COMMAND("cev_stats_file", DevProbe::CmdStatsFile, VF_NULL, "Measurement: cev_stats_file <path>|off writes the per-second cev_stats rows as CSV (turns cev_stats on)");
 
 		REGISTER_CVAR2("cev_stats", &mEnv->m_cevStats, 0, VF_NULL, "1 = log a stats line per player every second (decode / convert ms, uploads, dropped, allocs)");
@@ -1985,9 +2015,7 @@ namespace CEVPlayer
 		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface", "cev_probe_xui2dl", "cev_probe_fullscreen" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
-#if CEV_HAVE_LOADTIME_CALLBACKS
 		pConsole->RemoveCommand("cev_probe_loadtime");
-#endif
 
 		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_decodeMode", "cev_decodeAutoMinHeight", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds", "cev_allowPlanar", "cev_loadtime" };
 		for (const char* name : variables)

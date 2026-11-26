@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "PluginEnv.h"
 #include "RenderBridge.h"
+#include "XUI2DLClient.h"
 
 #include <CryCore/Platform/CryWindows.h> // GetModuleHandleA / GetProcAddress
 #include <CryRenderer/IRenderer.h>
@@ -83,29 +84,46 @@ namespace CEVPlayer
 				LogAlways("renderer probe: CEVPlayer_Patched not found, stage 1 (CPU conversion)");
 		}
 
-		bool LoadtimeAvailable()
+		ELoadtimeSource LoadtimeSource()
 		{
-#if CEV_HAVE_LOADTIME_CALLBACKS && CRY_PLATFORM_WINDOWS
-			static int s_cached = -1; // -1 not read yet, 0 no, 1 yes
+			static int s_cached = -1; // -1 not read yet, otherwise an ELoadtimeSource
 			if (s_cached >= 0)
-				return s_cached != 0;
+				return static_cast<ELoadtimeSource>(s_cached);
 			if (!Available())
-				return false; // no renderer yet: not cached, read again once there is one
-			s_cached = 0;
+				return ELoadtimeSource::None; // no renderer yet: not cached, read again once there is one
+			bool patch17 = false;
+#if CEV_HAVE_LOADTIME_CALLBACKS && CRY_PLATFORM_WINDOWS
 			if (const char* moduleName = RendererModuleName(gEnv->pRenderer))
 			{
 				if (HMODULE hModule = ::GetModuleHandleA(moduleName))
 				{
 					using PFN_XUI2DPatched = int (*)();
 					if (const PFN_XUI2DPatched pPatched = reinterpret_cast<PFN_XUI2DPatched>(::GetProcAddress(hModule, "XUI2D_Patched")))
-						s_cached = (pPatched() & 128) != 0 ? 1 : 0;
+						patch17 = (pPatched() & 128) != 0;
 				}
 			}
-			LogAlways("renderer probe: load-time callbacks %s (XUI2D_Patched bit 7)", s_cached != 0 ? "available" : "not available");
-			return s_cached != 0;
-#else
-			return false;
 #endif
+			const bool xui2dl = XUI2DLClient::LoadtimeUpdateEntry() != nullptr;
+			const ELoadtimeSource source = patch17 ? ELoadtimeSource::Patch17 : (xui2dl ? ELoadtimeSource::XUI2DL : ELoadtimeSource::None);
+			s_cached = static_cast<int>(source);
+			LogAlways("renderer probe: load-time callbacks %s (source=%s; XUI2D_Patched bit 7 %d, XUI2DL_CAP_LOADTIME %d)",
+				source != ELoadtimeSource::None ? "available" : "not available", LoadtimeSourceName(source), patch17 ? 1 : 0, xui2dl ? 1 : 0);
+			return source;
+		}
+
+		const char* LoadtimeSourceName(ELoadtimeSource source)
+		{
+			switch (source)
+			{
+			case ELoadtimeSource::Patch17: return "patch17";
+			case ELoadtimeSource::XUI2DL:  return "xui2dl";
+			default:                       return "none";
+			}
+		}
+
+		bool LoadtimeAvailable()
+		{
+			return LoadtimeSource() != ELoadtimeSource::None;
 		}
 
 		int Stage()

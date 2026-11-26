@@ -16,6 +16,7 @@
 #include "Player/VideoPlayerImpl.h"
 #include "Render/FullscreenOutput.h"
 #include "Render/RenderBridge.h"
+#include "Render/XUI2DLClient.h"
 
 // measurement (S0): process / GPU memory in the stats CSV
 #include <CryCore/Platform/CryWindows.h>
@@ -371,15 +372,31 @@ namespace CEVPlayer
 
 	int CPlayerManager::CTickLock::HeldByThisThread() { return t_tickLockDepth; }
 
+	namespace
+	{
+		std::atomic<void (*)(float)> s_loadtimeProbeHook{ nullptr }; // cev_probe_loadtime with the XUI2DL source
+	}
+
+	void CPlayerManager::SetLoadtimeProbeHook(void (*pHook)(float dt))
+	{
+		s_loadtimeProbeHook.store(pHook, std::memory_order_release);
+	}
+
+	void CPlayerManager::XUI2DLLoadtimeUpdate(void* pUser, float dt)
+	{
+		static_cast<CPlayerManager*>(pUser)->LoadtimeTick(dt);
+		if (void (*const pHook)(float) = s_loadtimeProbeHook.load(std::memory_order_acquire))
+			pHook(dt);
+	}
+
 	void CPlayerManager::UpdateLoadtimeRegistration(bool forceRemove)
 	{
-#if CEV_HAVE_LOADTIME_CALLBACKS
 		if (!IsMainThread())
 			return;
 		if (CTickLock::HeldByThisThread() > 0)
 		{
-			// Add / Remove wait for the renderer's registry lock, which its dispatch holds while our callback waits for
-			// the tick lock: never call them under it.
+			// Add / Remove (and SetLoadtimeUpdate) wait for the renderer's registry lock, which its dispatch holds while
+			// our callback waits for the tick lock: never call them under it.
 			static bool s_reported = false;
 			if (!s_reported)
 			{
@@ -397,13 +414,40 @@ namespace CEVPlayer
 		// engine call without any lock held
 		if (want == m_loadtimeRegistered.load() || gEnv == nullptr || gEnv->pRenderer == nullptr)
 			return;
-		if (want)
-			gEnv->pRenderer->AddLoadtimeCallback(m_loadtimeCallback.get(), 100);
-		else
-			gEnv->pRenderer->RemoveLoadtimeCallback(m_loadtimeCallback.get());
-		m_loadtimeRegistered = want;
-		LogDebug("loading-loop callback %s", want ? "registered (order 100)" : "removed");
+		const RenderBridge::ELoadtimeSource source = want ? RenderBridge::LoadtimeSource() : m_loadtimeSource;
+		bool done = false;
+		switch (source)
+		{
+		case RenderBridge::ELoadtimeSource::Patch17:
+#if CEV_HAVE_LOADTIME_CALLBACKS
+			if (want)
+				gEnv->pRenderer->AddLoadtimeCallback(m_loadtimeCallback.get(), 100);
+			else
+				gEnv->pRenderer->RemoveLoadtimeCallback(m_loadtimeCallback.get());
+			done = true;
 #endif
+			break;
+		case RenderBridge::ELoadtimeSource::XUI2DL:
+			if (const XUI2DLClient::SetLoadtimeUpdateFn pSet = XUI2DLClient::LoadtimeUpdateEntry())
+				done = want ? pSet(&CPlayerManager::XUI2DLLoadtimeUpdate, this) == 1 : pSet(nullptr, nullptr) == 1;
+			break;
+		default:
+			break;
+		}
+		if (!done)
+		{
+			static bool s_refused = false;
+			if (!s_refused)
+			{
+				s_refused = true;
+				LogError("defect: loading-loop %s through source=%s refused", want ? "registration" : "removal", RenderBridge::LoadtimeSourceName(source));
+			}
+			return;
+		}
+		m_loadtimeRegistered = want;
+		m_loadtimeSource = want ? source : RenderBridge::ELoadtimeSource::None;
+		LogDebug("loading-loop callback %s (source=%s)", !want ? "removed" : (source == RenderBridge::ELoadtimeSource::Patch17 ? "registered (order 100)" : "registered"),
+			RenderBridge::LoadtimeSourceName(source));
 	}
 
 	void CPlayerManager::LoadtimeTick(float dt)
