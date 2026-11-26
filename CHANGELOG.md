@@ -46,6 +46,9 @@ The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3
 * `cev_stats` is no longer drawn on screen; it only writes the log (and the `cev_stats_file` CSV).
 * C++ interface `IVideoPlugin` / `IVideoPlayer`, interface version 5 (`CreatePlayerForSurface`, `FindPlayerBySurface`,
   `GetSurfaceId`, `GetPixelLayout`, `GetDecodeBackend`).
+* Flash UI output: a surface player shown in a movie clip of a Scaleform UI element (`AttachToFlash` / `DetachFromFlash`,
+  node `CEVPlayer:AttachToFlash`, `cev_attach_flash` / `cev_detach_flash`); RGBA8 while attached, a compatibility option.
+* C++ interface version 6: `IVideoPlayer::AttachToFlash` / `DetachFromFlash` appended.
 
 ### UI integration
 

@@ -49,6 +49,9 @@ Licence: Boost Software License 1.0, see [LICENSE](LICENSE). Third-party librari
   * **Surface**: a named surface for UIs. The **surface id** is chosen by the author (1 to 63 of
     `A-Z a-z 0-9 _ . : -`, case insensitive, unique; creating a second player with the same id fails). It stays the
     same when the file, audio track, variant or size changes. The engine texture is named `$cev:<id>`.
+  * **Flash UI**: a surface shown in a movie clip of a Flash UI (Scaleform) element (`IVideoPlayer::AttachToFlash`, node
+    `CEVPlayer:AttachToFlash`). A compatibility option for projects that still use Scaleform: it plays and is controlled
+    like any surface, nothing more (RGBA8 converted on the CPU, no tuning).
 * **Level loading screens**: on a renderer with a loading-loop driver (the XUI2DL engine patch of this repository, or
   engine patch 17 of the CE_XTUI patch set on an engine with XTFrame), surface players and fullscreen players keep
   playing, with sound, while the engine's loading loop runs; contract `open` / `control` sent during the load are
@@ -89,7 +92,7 @@ Licence: Boost Software License 1.0, see [LICENSE](LICENSE). Third-party librari
   start from the output size or the consumers' size hints; `cev_variant` overrides).
 * **Script bindings** generated from one table (`Module/Bindings/ApiTable.cpp`: 19 controls, 25 queries, 8 events):
   FlowGraph nodes, a Schematyc component and, on the community engine, CryVS functions (see [Node sets](#node-sets)).
-* **C++ API**: `Interface/CEVPlayer/IVideoPlugin.h`, `IVideoPlayer.h` (interface version 5) for game code that links
+* **C++ API**: `Interface/CEVPlayer/IVideoPlugin.h`, `IVideoPlayer.h` (interface version 6) for game code that links
   CEVPlayer directly. Other plug-ins use the texture-source contract instead.
 
 ### Editor (`Code/Sandbox/Plugins/EditorCEVPlayer`)
@@ -124,14 +127,16 @@ Licence: Boost Software License 1.0, see [LICENSE](LICENSE). Third-party librari
 
 ### FlowGraph
 
-One drawer `CEVPlayer` with two ready-to-use nodes and the sub-drawers `UI` and `Advanced` (10 node classes). Enum
-ports are drop-downs: `Fit` = Fill / Fit / Letterbox, `Decode` = Auto / GPU / CPU, `Output` = Surface / Screen /
-Material. The ready-to-use and UI nodes own their player (Stop or the end of the graph destroys it).
+One drawer `CEVPlayer` with two ready-to-use nodes, the Flash UI node and the sub-drawers `UI` and `Advanced` (11 node
+classes). Enum ports are drop-downs: `Fit` = Fill / Fit / Letterbox, `Decode` = Auto / GPU / CPU, `Output` = Surface /
+Screen / Material. The ready-to-use and UI nodes own their player (Stop or the end of the graph destroys it);
+`AttachToFlash` owns none, it shows an existing surface.
 
 | Node | Inputs | Outputs |
 |---|---|---|
 | `CEVPlayer:PlayOnScreen` | Play, Stop, Video, Fit, Loop, Skippable, Decode | Started, Ended, Skipped, Error, ErrorCode, ErrorMessage |
 | `CEVPlayer:PlayOnMaterial` | Play, Stop, Video, Material (empty = the entity's), Slot, SubMaterial, Loop, Autoplay, Decode | Started, Ended, Error, ErrorCode, ErrorMessage |
+| `CEVPlayer:AttachToFlash` | Attach, Detach (empty UIElement = every clip of the surface), SurfaceId, UIElement, InstanceId (default 0), MovieClip | Done, Failed |
 | `CEVPlayer:UI:PlayToSurface` | Play, Stop, Video, SurfaceID, Loop, Autoplay, Decode, PauseDecodeWhenHidden | Ready, TextureId, Width, Height, Duration, HasAlpha, Ended, Error, ErrorCode, ErrorMessage |
 | `CEVPlayer:UI:SurfaceInfo` | Get, SurfaceID | Exists, TextureId, Width, Height, PixelLayout, Premultiplied, HasAlpha, FrameSerial, State |
 | `CEVPlayer:UI:SurfaceEvents` | SurfaceID | Ready, NewFrame, FrameSerial, Resized, TextureId, Width, Height, Closed |
@@ -141,7 +146,9 @@ Material. The ready-to-use and UI nodes own their player (Stop or the end of the
 | `CEVPlayer:Advanced:Info` | Get, Handle, EveryFrame | State, Time, Duration, Width, Height, HasAlpha, AudioTrack, Variant, DecodeBackend, FrameSerial, SurfaceId, Error |
 | `CEVPlayer:Advanced:Events` | Handle (0 = stop listening) | Ready, Started, NewFrame, NewFrameSerial, Marker, MarkerName, MarkerTime, Looped, Ended, Skipped, Error, ErrorCode, ErrorMessage |
 
-Frame serials are strings (no 2^31 wrap).
+Frame serials are strings (no 2^31 wrap). The Flash UI output has no Schematyc or CryVS counterpart: use the
+FlowGraph node or C++ (`IVideoPlayer::AttachToFlash` / `DetachFromFlash`); play, pause, seek and volume go through the
+usual nodes, functions and methods of the surface.
 
 ### Schematyc component
 
@@ -211,7 +218,7 @@ the descriptor's folder.
 | `cev_audiotrack <handle\|surface> [name]` | | choose the audio track of a player (script handle or surface id); without a name: list the tracks and the one in use |
 | `cev_list` | | all players with state, time and upload count |
 | `cev_surfaces` | | surfaces of the texture-source contract with their snapshot and aggregated consumer hints |
-| `cev_info` | | interface version, capability bits, contract version, surfaces, players, API table size |
+| `cev_info` | | interface version, capability bits, contract version, surfaces, players, API table size, Flash clips per player |
 | `cev_volume` | 1.0 | master volume of all videos (multiplied with the player volume) |
 | `cev_audio_enable` | 1 | 0 = no audio output (audio is not even decoded for players created afterwards) |
 | `cev_muteOnFocusLoss` | 1 | mute video audio while the game window has no focus |
@@ -235,6 +242,8 @@ the descriptor's folder.
 | `cev_flowtest [pathA] [pathB]` | self test of every FlowGraph node class in an in-memory graph |
 | `cev_contract_selftest [pathA] [pathB]` | self test of the texture-source contract through the `CryTexSource_v1` export |
 | `cev_cryvstest` | self test of the CryVS registrations and calls (community engine only) |
+| `cev_attach_flash <surfaceId> <uiElement> <instanceId> <movieClip>` | show a surface in an existing movie clip of a Flash UI element (`AttachToFlash`) |
+| `cev_detach_flash <surfaceId>` | take the surface out of all its movie clips (`DetachFromFlash`) |
 | `cev_run_script <file>` | runs console lines one per frame, immediately (`wait <seconds>`, `#` comments); use it instead of `exec` for test scripts |
 | `cev_stats_file <path>\|off` | write the per-second `cev_stats` rows as CSV |
 | `cev_hidden_bench`, `cev_bench_play`, `cev_bench_stop`, `cev_bench_hint`, `cev_show_surface`, `cev_probe_r8`, `cev_probe_sync` | measurement probes used for the design documents |
@@ -478,6 +487,13 @@ person; they are collected in [docs/manual-acceptance.md](docs/manual-acceptance
 * **UI path**: the packed planar layouts, visibility throttling, size-based variants and `open` / `control` take effect
   only with a UI consumer that implements the texture-source contract; none ships in this repository. Without one, UIs
   use the RGBA8 texture from the node outputs.
+* **Flash UI output** (`AttachToFlash`): needs the Scaleform runtime (`CryScaleformHelper.dll`; without it the call is
+  refused). The surface is RGBA8 converted on the CPU while attached. The picture has the texture's size - scale the
+  movie clip yourself. Semi-transparent edges come out darker (Scaleform blends straight alpha, the texture is
+  premultiplied). The clip must exist and lie inside the element's stage (a clip entirely outside is culled). After the
+  element is reloaded (UI reload; a level change unloads elements without `force_no_unload`) call `AttachToFlash`
+  again. At most 4 clips per surface. Not tested with elements that use lazy update, in Sandbox, or with the GameSDK
+  menus / HUD.
 * **Colour conversion** to RGBA8 (material outputs, consumers that do not accept the packed layouts) is done on the
   CPU. The plug-in itself ships no shaders; the XUI2DL engine patch ships one.
 * **Cue route**: exact lip-sync needs the optional patch (`patches/optional/02-cryaudio-trigger-position.patch`, SDL_mixer
