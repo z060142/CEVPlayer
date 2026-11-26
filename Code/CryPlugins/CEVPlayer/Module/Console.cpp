@@ -1257,9 +1257,10 @@ namespace CEVPlayer
 				std::memset(&s, 0, sizeof(s));
 				s.size = sizeof(s);
 				api->GetStats(&s);
-				LogAlways("cev_probe_xui2dl: stats %s: resourcesReady %u shaderReady %u layersHeld %u output %ux%u framesDrawn %llu drawsExecuted %llu drawsSkipped %llu", when,
+				LogAlways("cev_probe_xui2dl: stats %s: resourcesReady %u shaderReady %u layersHeld %u output %ux%u framesDrawn %llu drawsExecuted %llu drawsSkipped %llu loopFramesDrawn %llu", when,
 					s.resourcesReady, s.shaderReady, s.layersHeld, s.outputWidth, s.outputHeight, static_cast<unsigned long long>(s.framesDrawn),
-					static_cast<unsigned long long>(s.drawsExecuted), static_cast<unsigned long long>(s.drawsSkipped));
+					static_cast<unsigned long long>(s.drawsExecuted), static_cast<unsigned long long>(s.drawsSkipped),
+					static_cast<unsigned long long>(s.loopFramesDrawn)); // 0 from a renderer without the member (it writes only its own size)
 			}
 
 			// The stage's output size (its last executed frame), else the renderer's.

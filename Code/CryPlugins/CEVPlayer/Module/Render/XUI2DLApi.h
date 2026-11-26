@@ -53,6 +53,7 @@ typedef struct XUI2DLStats
     uint64_t framesDrawn;      /* render-thread executions that drew at least one layer */
     uint64_t drawsExecuted;
     uint64_t drawsSkipped;     /* pipeline state not ready, texture gone, unsupported kind */
+    uint64_t loopFramesDrawn;  /* loading-loop iterations that drew at least one layer (not in framesDrawn) */
 } XUI2DLStats;
 
 typedef struct XUI2DLApi
