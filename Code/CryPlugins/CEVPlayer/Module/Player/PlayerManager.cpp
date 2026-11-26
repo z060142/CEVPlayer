@@ -625,6 +625,8 @@ namespace CEVPlayer
 			m_players.erase(it);
 			if (owned->LoadFrozen())
 				m_zombies.push_back(std::move(owned)); // L3c: frozen fullscreen player in the loading loop: kept until after the load
+			else if (owned->FlashLoaded() && !IsMainThread())
+				m_zombies.push_back(std::move(owned)); // S2: the Flash clips are unloaded on the main thread before the release
 			else if (owned->HasRenderResources())
 			{
 				if (RenderCallsAllowed())
@@ -1019,6 +1021,15 @@ namespace CEVPlayer
 				continue;
 			p->ListState(line, sizeof(line));
 			LogAlways("  %s", line);
+		}
+	}
+
+	void CPlayerManager::LogFlashClips(const char* cmd) const
+	{
+		for (const std::unique_ptr<CVideoPlayerImpl>& p : m_players)
+		{
+			if (!p->IsDestroyed() && p->FlashClipCount() > 0)
+				LogAlways("%s: player %u surface <%s> flash: %u clip(s)", cmd, p->Id(), p->GetSurfaceId(), p->FlashClipCount());
 		}
 	}
 

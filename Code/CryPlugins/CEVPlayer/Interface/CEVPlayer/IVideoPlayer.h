@@ -1,4 +1,4 @@
-// CEVPlayer public player API (interface version 5).
+// CEVPlayer public player API (interface version 6).
 //
 // This header is for game code that links CEVPlayer directly. Other plug-ins connect through the texture source
 // contract of docs/design/M6-ui-source.md section 3 (exported function CryTexSource_v1) instead of this header.
@@ -52,7 +52,8 @@ namespace CEVPlayer
 	//!    GetPixelLayout / GetDecodeBackend. M6b (same version, never released before): the legacy IVideoPlugin
 	//!    virtuals were removed. A1 (same version, never released before): SetLanguage / GetLanguage became
 	//!    SetAudioTrack / GetAudioTrack (audio tracks are chosen by name; a language is only an optional tag).
-	constexpr uint32_t kVideoPlayerInterfaceVersion = 5;
+	//! 6: IVideoPlayer::AttachToFlash / DetachFromFlash (S2: a surface player's texture in a Scaleform movie clip).
+	constexpr uint32_t kVideoPlayerInterfaceVersion = 6;
 
 	//! IVideoPlayer::GetPixelLayout(). Values match the CTS_LAYOUT_* values of the texture source contract.
 	enum class EVideoPixelLayout : uint32_t
@@ -233,5 +234,16 @@ namespace CEVPlayer
 		virtual uint32_t GetGeneration() const = 0;
 		virtual EVideoPixelLayout GetPixelLayout() const = 0;     //!< layout of the texture right now (RGBA8 unless negotiated)
 		virtual EVideoDecodeBackend GetDecodeBackend() const = 0; //!< backend in use (Cpu before Ready; may turn Cpu once if the GPU fails)
+
+		// ---- appended in version 6 (Flash UI / Scaleform) ----
+		//! Shows this player's texture in a movie clip of a Flash UI element (Scaleform). The player must have a surface
+		//! (CreatePlayerForSurface); while attached it outputs RGBA8. movieClip is the instance path inside the element
+		//! (it must exist). Returns false when Scaleform / the element / the clip is not available. Main thread.
+		//! The picture has the texture's size (scale the clip yourself); at most 4 clips per player; attaching the same
+		//! clip again is a success without a reload. The texture follows size changes by itself. After the UI element is
+		//! reloaded (UI reload, level change) call AttachToFlash again: a reloaded element is not detected.
+		virtual bool AttachToFlash(const char* szUIElement, int instanceId, const char* szMovieClip) = 0;
+		//! Removes the texture from that clip (all clips of this player when szUIElement is null). Main thread.
+		virtual void DetachFromFlash(const char* szUIElement, int instanceId, const char* szMovieClip) = 0;
 	};
 }

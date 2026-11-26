@@ -7,6 +7,9 @@
 #include <initializer_list>
 #include <string>
 
+#include <CrySystem/ICryPluginManager.h>
+#include <CEVPlayer/IVideoPlugin.h>
+
 #include "Bindings/ApiPlayers.h"
 #include "Bindings/ApiTable.h"
 #include "Player/VideoDescriptor.h"
@@ -174,6 +177,12 @@ namespace CEVPlayer
 			t.Check(FindByName("Create")->paramCount == 0, "Create has no TextureName parameter");
 			t.Check(FindByName("SetPauseDecodeWhenHidden") != nullptr && FindByName("PauseDecodeWhenHidden") != nullptr, "SetPauseDecodeWhenHidden / PauseDecodeWhenHidden exist (M7)");
 			t.Check(Events()[eEvent_NewFrame].params[0].type == EType::String, "NewFrame Serial is a string");
+			{
+				// S2: interface version 6 (AttachToFlash / DetachFromFlash appended), as the plug-in binary reports it
+				IVideoPlugin* const pPlugin = gEnv->pSystem->GetIPluginManager()->QueryPlugin<IVideoPlugin>();
+				const uint32_t version = pPlugin != nullptr ? pPlugin->GetVideoPlayerInterfaceVersion() : 0u;
+				t.Check(kVideoPlayerInterfaceVersion == 6 && version == 6, "player interface version 6 (plug-in reports " + std::to_string(version) + ")");
+			}
 			// A1: audio tracks are tracks; SetLanguage / Language are retired and their GUIDs never come back
 			t.Check(FindByName("SetLanguage") == nullptr && FindByName("Language") == nullptr, "SetLanguage and Language are retired (A1)");
 			t.Check(FindByName("SetAudioTrack") != nullptr && FindByName("AudioTrack") != nullptr && FindByName("AudioTrackCount") != nullptr
@@ -283,6 +292,11 @@ namespace CEVPlayer
 			t.Check(t.Query("IsPremultiplied").b == !expectPacked, expectPacked ? "IsPremultiplied false (packed fullscreen)" : "IsPremultiplied");
 			// queries added in M6b
 			t.Check(t.Query("SurfaceId").s.empty(), "SurfaceId of a Create player is empty");
+			{
+				// S2: AttachToFlash needs a surface player (refused with a log line before Scaleform is even looked at)
+				IVideoPlayer* const pPlayer = mEnv->pApi->Find(t.handle, false);
+				t.Check(pPlayer != nullptr && !pPlayer->AttachToFlash("Crosshair", 0, "_root.cev"), "AttachToFlash on a player without surface id is refused");
+			}
 			t.Check(t.Query("Generation").i == 0, "Generation of a player without surface id stays 0 (only surface players count, " + std::to_string(t.Query("Generation").i) + ")");
 			t.Check(t.Query("PixelLayout").i == expectLayout && t.Query("DecodeBackend").i == 0, std::string("PixelLayout ") + expectLayoutName + ", DecodeBackend CPU (SetDecode(CPU) before Load)");
 			const std::string serial = t.Query("FrameSerial").s;

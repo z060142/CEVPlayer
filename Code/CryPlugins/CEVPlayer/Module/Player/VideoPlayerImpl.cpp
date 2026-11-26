@@ -12,6 +12,8 @@
 #include <CryRenderer/IRenderer.h>
 #include <CryRenderer/IShader.h>
 #include <Cry3DEngine/IMaterial.h>
+#include <CrySystem/Scaleform/IFlashPlayer.h> // S2: AttachToFlash
+#include <CrySystem/Scaleform/IFlashUI.h>
 
 #include "Audio/AudioMixer.h"
 #include "Contract/TexSource.h"
@@ -74,6 +76,33 @@ namespace CEVPlayer
 			ICVar* const pVar = gEnv != nullptr && gEnv->pConsole != nullptr ? gEnv->pConsole->GetCVar(name) : nullptr;
 			const char* const value = pVar != nullptr ? pVar->GetString() : nullptr;
 			return value != nullptr ? value : "";
+		}
+
+		//! S2: an existing instance of a Flash UI element, without creating one (IUIElement::GetInstance creates missing
+		//! instances). nullptr when Scaleform, the element or the instance does not exist.
+		IUIElement* FindFlashInstance(const char* element, int instance)
+		{
+			if (gEnv == nullptr || gEnv->pFlashUI == nullptr || element == nullptr || instance < 0)
+				return nullptr;
+			IUIElement* const pBase = gEnv->pFlashUI->GetUIElement(element);
+			if (pBase == nullptr)
+				return nullptr;
+			IUIElementIteratorPtr instances = pBase->GetInstances();
+			while (IUIElement* const pInstance = instances->Next())
+			{
+				if (pInstance->GetInstanceID() == static_cast<uint>(instance))
+					return pInstance;
+			}
+			return nullptr;
+		}
+
+		//! S2: the movie clip instance path exists in the element's movie.
+		bool FlashClipExists(IUIElement* pElement, const char* clip)
+		{
+			if (pElement == nullptr || clip == nullptr || clip[0] == '\0')
+				return false;
+			const std::shared_ptr<IFlashPlayer> fp = pElement->GetFlashPlayer();
+			return fp && fp->IsAvailable(clip);
 		}
 	}
 
@@ -1081,6 +1110,7 @@ namespace CEVPlayer
 		m_pTexture = pTexture;
 		m_textureId = pTexture->GetTextureID();
 		m_textureChanged = true;
+		++m_textureSerial; // S2: Flash clips reload at the next main-thread tick (UpdateFlashClips)
 		LogDebug("player %u: texture <%s> id %d %dx%d %s", m_id, m_textureName.c_str(), m_textureId, texWidth, texHeight, LayoutName());
 		m_textureWidth = texWidth;
 		m_textureHeight = texHeight;
@@ -1100,6 +1130,18 @@ namespace CEVPlayer
 			if (!keepBindings)
 				m_releasePending = true;
 			return;
+		}
+		if (!keepBindings && m_pTexture != nullptr && FlashLoaded())
+		{
+			// S2: the texture leaves the player (Unload, destroy, shutdown): take it out of the Flash clips first, on the
+			// main thread; inside the loading-loop tick the release waits for the first main-thread tick after the load.
+			if (!IsMainThread())
+			{
+				m_releasePending = true;
+				return;
+			}
+			for (SFlashClip& c : m_flash)
+				UnloadFlashClip(c);
 		}
 		RemoveAppliedBindings();
 		if (!keepBindings)
@@ -1306,6 +1348,167 @@ namespace CEVPlayer
 		}
 	}
 
+	// ------------------------------------------------------------------------------------------------ Flash UI clips (S2)
+	// docs/design/M12-scaleform-attach.md: the RGBA8 texture is loaded into a movie clip with IUIElement::LoadTexIntoMc;
+	// Scaleform keeps sampling it in place, so only a new texture (size / layout change, Unload) needs a FlashUI call.
+	bool CVideoPlayerImpl::FlashCallsAllowed()
+	{
+		return IsMainThread() && gEnv != nullptr && gEnv->pFlashUI != nullptr;
+	}
+
+	bool CVideoPlayerImpl::FlashLoaded() const
+	{
+		for (const SFlashClip& c : m_flash)
+		{
+			if (c.loaded)
+				return true;
+		}
+		return false;
+	}
+
+	bool CVideoPlayerImpl::AttachToFlash(const char* szUIElement, int instanceId, const char* szMovieClip)
+	{
+		const char* const element = szUIElement != nullptr ? szUIElement : "";
+		const char* const clip = szMovieClip != nullptr ? szMovieClip : "";
+		if (m_destroyed)
+			return false;
+		if (!IsMainThread())
+		{
+			LogWarning("player %u: AttachToFlash <%s> %d <%s> refused: not called on the main thread", m_id, element, instanceId, clip);
+			return false;
+		}
+		if (m_surfaceId.empty())
+		{
+			LogWarning("player %u: AttachToFlash <%s> %d <%s> refused: the player has no surface (use CreatePlayerForSurface)", m_id, element, instanceId, clip);
+			return false;
+		}
+		if (gEnv == nullptr || gEnv->pFlashUI == nullptr)
+		{
+			LogWarning("player %u: AttachToFlash <%s> %d <%s> refused: Scaleform / Flash UI is not available (no IFlashUI)", m_id, element, instanceId, clip);
+			return false;
+		}
+		IUIElement* const pBase = gEnv->pFlashUI->GetUIElement(element);
+		if (pBase == nullptr)
+		{
+			LogWarning("player %u: AttachToFlash <%s> %d <%s> refused: no UI element <%s>", m_id, element, instanceId, clip, element);
+			return false;
+		}
+		IUIElement* const pInstance = instanceId >= 0 ? pBase->GetInstance(static_cast<uint>(instanceId)) : nullptr;
+		if (pInstance == nullptr)
+		{
+			LogWarning("player %u: AttachToFlash <%s> %d <%s> refused: UI element <%s> has no instance %d", m_id, element, instanceId, clip, element, instanceId);
+			return false;
+		}
+		if (!pInstance->IsInit())
+		{
+			LogWarning("player %u: AttachToFlash <%s> %d <%s> refused: UI element <%s> instance %d is not initialised (not loaded / shown yet)", m_id, element, instanceId, clip, element, instanceId);
+			return false;
+		}
+		if (!FlashClipExists(pInstance, clip))
+		{
+			LogWarning("player %u: AttachToFlash <%s> %d <%s> refused: movie clip <%s> does not exist in the element", m_id, element, instanceId, clip, clip);
+			return false;
+		}
+		for (const SFlashClip& c : m_flash)
+		{
+			if (c.instance == instanceId && stricmp(c.element.c_str(), element) == 0 && c.clip == clip)
+				return true; // already attached: no second load
+		}
+		if (m_flash.size() >= kMaxFlashClips)
+		{
+			LogWarning("player %u: AttachToFlash <%s> %d <%s> refused: the player is already attached to %u movie clips (the maximum)", m_id, element, instanceId, clip,
+				static_cast<unsigned>(kMaxFlashClips));
+			return false;
+		}
+		SFlashClip c;
+		c.element = element;
+		c.instance = instanceId;
+		c.clip = clip;
+		m_flash.push_back(c);
+		Log("player %u: attached to Flash <%s> instance %d clip <%s> (%u clip(s))", m_id, element, instanceId, clip, FlashClipCount());
+		// A packed texture goes back to RGBA8 first (DesiredLayout forces it now; the existing switch path), then the load.
+		if (m_textureR8 && m_pTexture != nullptr && m_phase == EPhase::Ready && m_info.hasVideo && !m_manager.IsLevelLoading())
+			UpdateLayout();
+		UpdateFlashClips(); // loads at once when the RGBA8 texture exists, otherwise a main-thread tick does it later
+		return true;
+	}
+
+	void CVideoPlayerImpl::DetachFromFlash(const char* szUIElement, int instanceId, const char* szMovieClip)
+	{
+		if (!IsMainThread())
+		{
+			LogWarning("player %u: DetachFromFlash ignored: not called on the main thread", m_id);
+			return;
+		}
+		const char* const clip = szMovieClip != nullptr ? szMovieClip : "";
+		for (std::vector<SFlashClip>::iterator it = m_flash.begin(); it != m_flash.end();)
+		{
+			const bool match = szUIElement == nullptr || (it->instance == instanceId && stricmp(it->element.c_str(), szUIElement) == 0 && it->clip == clip);
+			if (!match)
+			{
+				++it;
+				continue;
+			}
+			UnloadFlashClip(*it);
+			Log("player %u: detached from Flash <%s> instance %d clip <%s>", m_id, it->element.c_str(), it->instance, it->clip.c_str());
+			it = m_flash.erase(it);
+		}
+	}
+
+	void CVideoPlayerImpl::UnloadFlashClip(SFlashClip& c)
+	{
+		if (!c.loaded)
+			return;
+		const uint64_t serial = c.loadedSerial;
+		const int textureId = c.loadedTextureId;
+		c.loaded = false;
+		c.loadedSerial = 0;
+		c.loadedTextureId = 0;
+		if (!FlashCallsAllowed())
+			return;
+		IUIElement* const pElement = FindFlashInstance(c.element.c_str(), c.instance);
+		if (pElement == nullptr || !pElement->IsInit() || !FlashClipExists(pElement, c.clip.c_str()))
+			return; // the element (or the clip) was unloaded: nothing to take out
+		// the texture that was loaded: ours while it is still current, otherwise the old one if the renderer still has it
+		ITexture* const pTexture = serial == m_textureSerial && m_pTexture != nullptr ? m_pTexture
+			: (textureId > 0 && gEnv->pRenderer != nullptr ? gEnv->pRenderer->EF_GetTextureByID(textureId) : nullptr);
+		if (pTexture == nullptr)
+			return;
+		pElement->UnloadTexFromMc(c.clip.c_str(), pTexture);
+	}
+
+	void CVideoPlayerImpl::UpdateFlashClips()
+	{
+		if (m_flash.empty() || m_pTexture == nullptr || m_textureR8 || !FlashCallsAllowed())
+			return;
+		for (SFlashClip& c : m_flash)
+		{
+			if (c.handledSerial == m_textureSerial)
+				continue;
+			c.handledSerial = m_textureSerial; // one attempt per texture (a missing element is not retried every frame)
+			const bool reload = c.loaded;
+			const int oldId = c.loadedTextureId;
+			UnloadFlashClip(c);
+			IUIElement* const pElement = FindFlashInstance(c.element.c_str(), c.instance);
+			if (pElement == nullptr || !pElement->IsInit() || !FlashClipExists(pElement, c.clip.c_str()))
+			{
+				Log("player %u: Flash <%s> instance %d clip <%s> no longer exists, texture not loaded (call AttachToFlash again after the element was reloaded)",
+					m_id, c.element.c_str(), c.instance, c.clip.c_str());
+				continue;
+			}
+			pElement->LoadTexIntoMc(c.clip.c_str(), m_pTexture);
+			c.loaded = true;
+			c.loadedSerial = m_textureSerial;
+			c.loadedTextureId = m_textureId;
+			if (reload)
+				Log("player %u: Flash <%s> instance %d clip <%s>: texture reloaded (id %d -> %d, %dx%d)", m_id, c.element.c_str(), c.instance, c.clip.c_str(), oldId, m_textureId,
+					m_textureWidth, m_textureHeight);
+			else
+				Log("player %u: Flash <%s> instance %d clip <%s>: texture loaded (id %d, %dx%d)", m_id, c.element.c_str(), c.instance, c.clip.c_str(), m_textureId, m_textureWidth,
+					m_textureHeight);
+		}
+	}
+
 	// ------------------------------------------------------------------------------------------------ outputs
 	void CVideoPlayerImpl::SetFullscreen(bool enable, EVideoFit fit)
 	{
@@ -1437,8 +1640,8 @@ namespace CEVPlayer
 					visible = hints.visible; // nobody hinted: visible
 			}
 		}
-		if (!m_surfaceRegistered || m_fullscreen || !m_bindings.empty() || !m_pauseDecodeWhenHidden)
-			visible = true; // fullscreen / material outputs and players without a surface id are always visible
+		if (!m_surfaceRegistered || m_fullscreen || !m_bindings.empty() || !m_flash.empty() || !m_pauseDecodeWhenHidden)
+			visible = true; // fullscreen / material / Flash (S2) outputs and players without a surface id are always visible
 		m_core->SetHiddenStopSeconds(static_cast<double>(mEnv->m_cevHiddenStopSeconds));
 		m_core->SetVisible(visible, static_cast<double>(dt));
 		const uint8_t now = static_cast<uint8_t>(m_core->GetVisibility());
@@ -1454,6 +1657,9 @@ namespace CEVPlayer
 	{
 		if (m_releasePending && HasRenderResources())
 			ReleaseTexture(false);
+		// S2: Flash clips get the texture made (or rebuilt) since the previous main-thread tick; never in the loading loop
+		if (!m_flash.empty() && FlashCallsAllowed())
+			UpdateFlashClips();
 
 		if (m_phase == EPhase::Loading)
 		{
@@ -1570,8 +1776,9 @@ namespace CEVPlayer
 	EVideoPixelLayout CVideoPlayerImpl::DesiredLayout(bool& consumerDriven) const
 	{
 		consumerDriven = false;
-		// Forced RGBA8: a material output, planar off, a stream that cannot be packed, no surface and not fullscreen.
-		if (!m_bindings.empty() || mEnv->m_cevAllowPlanar == 0 || !m_info.packedLayout)
+		// Forced RGBA8: a material output, a Flash clip (S2: Scaleform samples one RGBA texture only, whatever the contract
+		// consumers accept), planar off, a stream that cannot be packed, no surface and not fullscreen.
+		if (!m_bindings.empty() || !m_flash.empty() || mEnv->m_cevAllowPlanar == 0 || !m_info.packedLayout)
 			return EVideoPixelLayout::RGBA8;
 		if (!m_surfaceRegistered && !m_fullscreen)
 			return EVideoPixelLayout::RGBA8;

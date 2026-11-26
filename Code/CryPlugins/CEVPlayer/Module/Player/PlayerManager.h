@@ -116,6 +116,8 @@ namespace CEVPlayer
 
 		// ---- console ----
 		void ListPlayers() const;
+		//! S2: "<cmd>: player <n> surface <id>: flash: <k> clip(s)" for every player attached to Flash movie clips.
+		void LogFlashClips(const char* cmd) const;
 		void ConsolePlay(const char* path, bool loop);
 		void ConsoleStop();
 		void ConsolePause();

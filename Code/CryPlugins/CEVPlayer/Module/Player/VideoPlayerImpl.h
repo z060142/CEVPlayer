@@ -75,8 +75,14 @@ namespace CEVPlayer
 		uint32_t GetGeneration() const override { return m_generation; }
 		EVideoPixelLayout GetPixelLayout() const override { return m_layout; }
 		EVideoDecodeBackend GetDecodeBackend() const override;
+		bool AttachToFlash(const char* szUIElement, int instanceId, const char* szMovieClip) override;
+		void DetachFromFlash(const char* szUIElement, int instanceId, const char* szMovieClip) override;
 
 		// ---- manager side (main thread) ----
+		//! S2: number of Flash movie clips this player is attached to (cev_info / cev_surfaces).
+		uint32_t FlashClipCount() const { return static_cast<uint32_t>(m_flash.size()); }
+		//! S2: the texture is loaded into a movie clip, so releasing it needs the main thread (unload first).
+		bool FlashLoaded() const;
 		uint32_t Id() const { return m_id; }
 		//! One frame step: load completion, core Update, texture upload, event generation, and at its end the
 		//! contract snapshot of a surface player. Only called while renderer calls are allowed. `dt` = seconds since
@@ -261,6 +267,25 @@ namespace CEVPlayer
 		int VariantTargetHeight() const;
 		//! Surface players: writes the snapshot that CryTexSource query returns (end of Tick; no engine call).
 		void PublishSnapshot();
+		// ---- S2: Flash UI movie clips (docs/design/M12-scaleform-attach.md)
+		struct SFlashClip
+		{
+			std::string element;          // UI element name
+			int instance = 0;             // instance id
+			std::string clip;             // movie clip instance path
+			uint64_t handledSerial = 0;   // m_textureSerial the last load attempt was made for (0 = none yet)
+			bool loaded = false;          // a texture of this player is loaded into the clip
+			uint64_t loadedSerial = 0;    // m_textureSerial of that texture
+			int loadedTextureId = 0;      // its texture id (for the unload of a texture that was replaced)
+		};
+		static constexpr size_t kMaxFlashClips = 4;
+		//! FlashUI may be called: main thread (never the loading-loop tick) and Scaleform present.
+		static bool FlashCallsAllowed();
+		//! Main-thread tick: loads the current RGBA8 texture into every clip that does not show it yet (attached before
+		//! the texture existed, or the texture was rebuilt: unload with the old texture when it still exists, then load).
+		void UpdateFlashClips();
+		//! UnloadTexFromMc for one clip that has a texture loaded (skipped when the element is gone).
+		void UnloadFlashClip(SFlashClip& c);
 
 		CPlayerManager& m_manager;
 		// Order matters: the clock is referenced by the cores, so it is declared first (destroyed last); the
@@ -361,6 +386,8 @@ namespace CEVPlayer
 		bool m_fullscreenHidden = false; // set by Stop(), cleared by Play()
 		EVideoFit m_fit = EVideoFit::Letterbox;
 		std::vector<SBinding> m_bindings;
+		std::vector<SFlashClip> m_flash; // S2: attached Flash movie clips (at most kMaxFlashClips)
+		uint64_t m_textureSerial = 0;    // S2: +1 per texture EnsureTexture made (identity even when the id is reused)
 		int m_voice = -1;
 
 		std::vector<IVideoPlayerListener*> m_listeners;
