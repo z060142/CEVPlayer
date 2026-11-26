@@ -1914,20 +1914,28 @@ namespace CEVPlayer
 				pPlayer->GetTextureId());
 		}
 
-		//! S2: cev_detach_flash <surfaceId> -> IVideoPlayer::DetachFromFlash for all clips of the player.
+		//! S2: cev_detach_flash <surfaceId> [<uiElement> <instanceId> <movieClip>] -> IVideoPlayer::DetachFromFlash for all clips of
+		//! the player, or (S2b) for the one clip given.
 		void CmdDetachFlash(IConsoleCmdArgs* args)
 		{
 			if (args == nullptr || mEnv->pManager == nullptr)
 				return;
 			if (args->GetArgCount() < 2)
 			{
-				LogAlways("usage: cev_detach_flash <surfaceId>   (all movie clips of that surface player)");
+				LogAlways("usage: cev_detach_flash <surfaceId> [<uiElement> <instanceId> <movieClip>]   (without the clip: all movie clips of that surface player)");
 				return;
 			}
 			IVideoPlayer* const pPlayer = mEnv->pManager->FindPlayerBySurface(args->GetArg(1));
 			if (pPlayer == nullptr)
 			{
 				LogAlways("cev_detach_flash: no surface player <%s>", args->GetArg(1));
+				return;
+			}
+			if (args->GetArgCount() >= 5)
+			{
+				pPlayer->DetachFromFlash(args->GetArg(2), std::atoi(args->GetArg(3)), args->GetArg(4));
+				LogAlways("cev_detach_flash: <%s> detached from <%s> %s <%s> (%u clip(s) left)", args->GetArg(1), args->GetArg(2), args->GetArg(3), args->GetArg(4),
+					static_cast<CVideoPlayerImpl*>(pPlayer)->FlashClipCount());
 				return;
 			}
 			pPlayer->DetachFromFlash(nullptr, 0, nullptr);
@@ -2293,7 +2301,7 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_flowtest", CmdFlowTest, VF_NULL, "Self test of the FlowGraph nodes: builds a flow graph in memory with every node class, drives it and checks the outputs. cev_flowtest [pathA] [pathB] (pathB: another size), logs PASS / FAIL");
 		REGISTER_COMMAND("cev_run_script", CmdRunScript, VF_NULL, "Development: cev_run_script <file> runs a list of console commands, one per frame, immediately (not through the deferred queue); wait <seconds>, # comments");
 		REGISTER_COMMAND("cev_attach_flash", CmdAttachFlash, VF_NULL, "Test (S2): cev_attach_flash <surfaceId> <uiElement> <instanceId> <movieClip> shows the surface player's texture in an existing movie clip of a Flash UI element (IVideoPlayer::AttachToFlash)");
-		REGISTER_COMMAND("cev_detach_flash", CmdDetachFlash, VF_NULL, "Test (S2): cev_detach_flash <surfaceId> takes the surface player's texture out of all its Flash movie clips (IVideoPlayer::DetachFromFlash)");
+		REGISTER_COMMAND("cev_detach_flash", CmdDetachFlash, VF_NULL, "Test (S2): cev_detach_flash <surfaceId> [<uiElement> <instanceId> <movieClip>] takes the surface player's texture out of all its Flash movie clips, or out of the one clip given (IVideoPlayer::DetachFromFlash)");
 		REGISTER_COMMAND("cev_contract_selftest", CmdContractSelfTest, VF_NULL, "Self test of the texture source contract through the CryTexSource_v1 export. cev_contract_selftest [pathA] [pathB] (two videos of different sizes), logs PASS / FAIL");
 		// development-only measurement commands (S0)
 		REGISTER_COMMAND("cev_probe_r8", DevProbe::CmdProbeR8, VF_NULL, "Measurement: cev_probe_r8 <w> <h> [rgba] creates an eTF_R8 (or RGBA8) dynamic texture, updates it every frame, draws it top left and logs the process memory it costs (no arguments = off)");

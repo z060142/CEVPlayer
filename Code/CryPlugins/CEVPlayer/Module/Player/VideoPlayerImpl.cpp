@@ -1393,7 +1393,8 @@ namespace CEVPlayer
 			LogWarning("player %u: AttachToFlash <%s> %d <%s> refused: no UI element <%s>", m_id, element, instanceId, clip, element);
 			return false;
 		}
-		IUIElement* const pInstance = instanceId >= 0 ? pBase->GetInstance(static_cast<uint>(instanceId)) : nullptr;
+		// S2b: an existing instance only (IUIElement::GetInstance would create a missing one); 0 is the element itself
+		IUIElement* const pInstance = FindFlashInstance(element, instanceId);
 		if (pInstance == nullptr)
 		{
 			LogWarning("player %u: AttachToFlash <%s> %d <%s> refused: UI element <%s> has no instance %d", m_id, element, instanceId, clip, element, instanceId);

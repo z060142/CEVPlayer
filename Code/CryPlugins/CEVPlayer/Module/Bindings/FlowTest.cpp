@@ -273,7 +273,7 @@ namespace CEVPlayer
 				AddNode(t, "CEVPlayer:Advanced:Events", { "Handle" }, { "Ready", "Started", "NewFrame", "NewFrameSerial", "Marker", "Looped", "Ended", "Skipped", "Error" });
 				AddNode(t, "CEVPlayer:PlayOnScreen", { "Play", "Stop", "Video", "Fit", "Loop", "Skippable", "Decode" }, { "Started", "Ended", "Skipped", "Error", "ErrorCode", "ErrorMessage" });
 				AddNode(t, "CEVPlayer:PlayOnMaterial", { "Play", "Stop", "Video", "Material", "Slot" }, { "Started", "Ended", "Error", "ErrorCode", "ErrorMessage" });
-				AddNode(t, "CEVPlayer:AttachToFlash", { "Attach", "Detach", "SurfaceId", "UIElement", "InstanceId", "MovieClip" }, { "Done", "Failed" });
+				AddNode(t, "CEVPlayer:AttachToFlash", { "Attach", "Detach", "SurfaceID", "UIElement", "InstanceId", "MovieClip" }, { "Done", "Failed" });
 			}
 		}
 
@@ -464,7 +464,7 @@ namespace CEVPlayer
 
 				// S2: AttachToFlash (no UI element of the test project is assumed: an unknown element fails, Detach succeeds)
 				STestNode* const fl = N(eN_Flash);
-				Set(t, fl, "SurfaceId", string("flowtest_a"));
+				Set(t, fl, "SurfaceID", string("flowtest_a"));
 				Set(t, fl, "UIElement", string("cev_flowtest_no_such_element"));
 				Set(t, fl, "InstanceId", 0);
 				Set(t, fl, "MovieClip", string("_root.cev_flowtest"));
@@ -475,7 +475,7 @@ namespace CEVPlayer
 				Trigger(t, fl, "Detach");
 				Update(t);
 				t.Check(Count(fl, "Done") == 1 && Count(fl, "Failed") == 1, "AttachToFlash Detach (empty UIElement: every clip) -> Done");
-				Set(t, fl, "SurfaceId", string("flowtest_none"));
+				Set(t, fl, "SurfaceID", string("flowtest_none"));
 				Trigger(t, fl, "Attach");
 				Update(t);
 				t.Check(Count(fl, "Failed") == 2 && Count(fl, "Done") == 1, "AttachToFlash Attach of an unknown surface -> Failed");

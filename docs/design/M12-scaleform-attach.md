@@ -18,7 +18,7 @@
 
 ## 3. 行為
 
-- **可用性**：`gEnv->pFlashUI` 為空、找不到元件（`GetUIElement(name)` 後取 `GetInstance(instanceId)`）、元件未初始化、或 clip 不存在 → 回傳 false 並記一行 log（說明哪一步）。不建立 clip。播放器必須有 surface（`CreatePlayerForSurface`），否則回傳 false。
+- **可用性**：`gEnv->pFlashUI` 為空、找不到元件或 instance（`GetUIElement(name)` 後以 `GetInstances` 列舉既有的 instance，0 號是元件本身；S2b：不用會順手建立 instance 的 `GetInstance`）、元件未初始化、或 clip 不存在 → 回傳 false 並記一行 log（說明哪一步）。不建立 clip。播放器必須有 surface（`CreatePlayerForSurface`），否則回傳 false。
 - **掛上**：記錄（元件名、instance、clip 路徑）於播放器；有貼圖時立刻 `LoadTexIntoMc`，還沒有貼圖時等貼圖建立後由主執行緒的 tick 補做。同一個（元件、instance、clip）重複掛上視為成功、不重複載入。一個播放器最多 4 個掛點，超過回傳 false。
 - **排列**：有任何掛點的播放器，`DesiredLayout` 一律回 RGBA8（不論其他消費端的 `acceptLayouts`）。掛上時若目前是打包排列，照既有的排列切換路徑切回 RGBA8，之後才載入。
   - 契約的確認（`M6-ui-source.md` §3，讀文件）：契約沒有一句明文「消費端必須接受排列 0」，但 RGBA8 是無條件的退路——規則 7「其他內容由來源轉換或以 RGBA8 提供」、規則 5「**所有**活著的消費端都接受某個平面排列時才用它」（否則 RGBA8）、`acceptLayouts` 的「0 means RGBA8 only」，以及 M8 規定非 4:2:0／奇數寬只能輸出 RGBA8。契約不存在「沒有可用排列」的狀態，所以消費端實際上必須能取樣 RGBA8。據此照任務單實作；若主模型認為需要明文，契約 §3 應補一句。
@@ -37,10 +37,10 @@
 - **排列**：`DesiredLayout` 的「強制 RGBA8」條件加上 `!m_flash.empty()`（不是消費端驅動的切換，不受 30 tick 的保持限制）。`AttachToFlash` 在目前是打包貼圖、且不在關卡讀取中時直接呼叫既有的 `UpdateLayout()`，然後載入。
 - **可見**：`ApplyVisibility` 把有掛點的播放器當成可見（與材質輸出相同）。
 - **讀取迴圈**：有掛點的播放器照樣在讀取迴圈中 tick（`RunsDuringLoad` 不變）；FlashUI 只在主執行緒呼叫（`FlashCallsAllowed()` = 主執行緒且 `gEnv->pFlashUI` 存在），而主執行緒在讀取中不 tick 播放器。
-- **主控台與節點**：`cev_attach_flash <surfaceId> <uiElement> <instanceId> <movieClip>`、`cev_detach_flash <surfaceId>`（卸下該播放器所有掛點）；`cev_info`／`cev_surfaces` 對有掛點的播放器印 `flash: <n> clip(s)`。FlowGraph 節點 `CEVPlayer:AttachToFlash` 以 `IVideoPlugin::FindPlayerBySurface` 找播放器（唯一不經 API 表的節點），`Detach` 在 `UIElement` 為空時卸下全部。S1 的 `cev_probe_flash` 保留原樣（獨立的探測清單，不經掛點介面）。
+- **主控台與節點**：`cev_attach_flash <surfaceId> <uiElement> <instanceId> <movieClip>`、`cev_detach_flash <surfaceId> [<uiElement> <instanceId> <movieClip>]`（不帶後三個參數時卸下該播放器所有掛點，帶了只卸那一個；S2b）；`cev_info`／`cev_surfaces` 對有掛點的播放器印 `flash: <n> clip(s)`。FlowGraph 節點 `CEVPlayer:AttachToFlash`（輸入埠 `SurfaceID`，與既有節點一致；S2b）以 `IVideoPlugin::FindPlayerBySurface` 找播放器（唯一不經 API 表的節點），`Detach` 在 `UIElement` 為空時卸下全部。S1 的 `cev_probe_flash` 保留原樣（獨立的探測清單，不經掛點介面）。
 
 ## 5. 已知限制
 
-需要 Scaleform 執行時；掛著時固定 RGBA8、CPU 轉換；尺寸＝貼圖尺寸，由作者自行縮放 clip；半透明邊緣偏暗；clip 必須在舞台範圍內；元件重載後需重新掛上；每個播放器最多 4 個 clip。重建後到重新載入之間（貼圖重建的那一幀到下一次 tick）Flash 仍以舊的圖像資訊取樣新貼圖，可能有一兩幀尺寸不對；重新載入的那一幀 clip 可能空白一幀（S2 讀回所見）。
+需要 Scaleform 執行時（沒有 `CryScaleformHelper.dll` 時，5.7.1 官方與這個 fork 都會在 `gEnv->pScaleformHelper` 放一個空實作 `CNullScaleformHelper`，沒有公開的「Scaleform 是否可用」判斷，所以拒絕的 log 寫的是元件未初始化）；掛著時固定 RGBA8、CPU 轉換；尺寸＝貼圖尺寸，由作者自行縮放 clip；半透明邊緣偏暗；clip 必須在舞台範圍內；元件重載後需重新掛上；每個播放器最多 4 個 clip。重建後到重新載入之間（貼圖重建的那一幀到下一次 tick）Flash 仍以舊的圖像資訊取樣新貼圖，可能有一兩幀尺寸不對；重新載入的那一幀 clip 可能空白一幀（S2 讀回所見）。
 
 未測：lazy update 的元件、Sandbox、正式的 GameSDK 選單／HUD 元件、行程正常結束時 Scaleform 的解構（社群版樹的 `quit` 本身會崩潰）。未編譯：共用樹、Sandbox 插件。

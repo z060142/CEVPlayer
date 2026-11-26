@@ -1090,7 +1090,7 @@ namespace CEVPlayer
 					{
 						InputPortConfig_Void("Attach", _HELP("Shows the surface's video in MovieClip of the Flash UI element (the clip must exist; the picture has the video's size).")),
 						InputPortConfig_Void("Detach", _HELP("Takes the video out of MovieClip; with an empty UIElement out of every clip of the surface.")),
-						InputPortConfig<string>("SurfaceId", string(), _HELP("Surface whose video is shown (made by PlayToSurface, a Video Player component or C++).")),
+						InputPortConfig<string>("SurfaceID", string(), _HELP("Surface whose video is shown (made by PlayToSurface, a Video Player component or C++).")),
 						InputPortConfig<string>("UIElement", string(), _HELP("Name of the Flash UI element (it must be loaded, e.g. shown once).")),
 						InputPortConfig<int>("InstanceId", 0, _HELP("Instance of the UI element (0 = the first one).")),
 						InputPortConfig<string>("MovieClip", string(), _HELP("Instance path of the movie clip inside the element, for example _root.screen.")),

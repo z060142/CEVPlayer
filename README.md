@@ -136,7 +136,7 @@ Screen / Material. The ready-to-use and UI nodes own their player (Stop or the e
 |---|---|---|
 | `CEVPlayer:PlayOnScreen` | Play, Stop, Video, Fit, Loop, Skippable, Decode | Started, Ended, Skipped, Error, ErrorCode, ErrorMessage |
 | `CEVPlayer:PlayOnMaterial` | Play, Stop, Video, Material (empty = the entity's), Slot, SubMaterial, Loop, Autoplay, Decode | Started, Ended, Error, ErrorCode, ErrorMessage |
-| `CEVPlayer:AttachToFlash` | Attach, Detach (empty UIElement = every clip of the surface), SurfaceId, UIElement, InstanceId (default 0), MovieClip | Done, Failed |
+| `CEVPlayer:AttachToFlash` | Attach, Detach (empty UIElement = every clip of the surface), SurfaceID, UIElement, InstanceId (default 0), MovieClip | Done, Failed |
 | `CEVPlayer:UI:PlayToSurface` | Play, Stop, Video, SurfaceID, Loop, Autoplay, Decode, PauseDecodeWhenHidden | Ready, TextureId, Width, Height, Duration, HasAlpha, Ended, Error, ErrorCode, ErrorMessage |
 | `CEVPlayer:UI:SurfaceInfo` | Get, SurfaceID | Exists, TextureId, Width, Height, PixelLayout, Premultiplied, HasAlpha, FrameSerial, State |
 | `CEVPlayer:UI:SurfaceEvents` | SurfaceID | Ready, NewFrame, FrameSerial, Resized, TextureId, Width, Height, Closed |
@@ -243,7 +243,7 @@ the descriptor's folder.
 | `cev_contract_selftest [pathA] [pathB]` | self test of the texture-source contract through the `CryTexSource_v1` export |
 | `cev_cryvstest` | self test of the CryVS registrations and calls (community engine only) |
 | `cev_attach_flash <surfaceId> <uiElement> <instanceId> <movieClip>` | show a surface in an existing movie clip of a Flash UI element (`AttachToFlash`) |
-| `cev_detach_flash <surfaceId>` | take the surface out of all its movie clips (`DetachFromFlash`) |
+| `cev_detach_flash <surfaceId> [<uiElement> <instanceId> <movieClip>]` | take the surface out of all its movie clips, or out of the one clip given (`DetachFromFlash`) |
 | `cev_run_script <file>` | runs console lines one per frame, immediately (`wait <seconds>`, `#` comments); use it instead of `exec` for test scripts |
 | `cev_stats_file <path>\|off` | write the per-second `cev_stats` rows as CSV |
 | `cev_hidden_bench`, `cev_bench_play`, `cev_bench_stop`, `cev_bench_hint`, `cev_show_surface`, `cev_probe_r8`, `cev_probe_sync` | measurement probes used for the design documents |
