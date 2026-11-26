@@ -33,3 +33,19 @@
 同 L5／L6（共用樹的啟動方式；樹忙碌檢查；只關自己啟動的行程；每次執行有逾時，卡住或崩潰的保留並列出）。不提交任何東西（這張單沒有程式變更）。證據放 `E:/coding3/xt-bench/cev-v1/`。
 
 報告（繁體中文、精簡，寫在最後訊息裡）：套用腳本的完整結果與每個插入點相對於 XTFrame 改動的位置；建置結果；V1～V7 的判定與證據（註明像素、計數或讀碼）；XTFrame 三組自測的數字；還原的逐項核對與殘留清單；任何異常；沒做到的。
+
+## V1b · 最終版插件在共用樹的編譯與回歸（2026-11-27）
+
+模型：Opus。V1 已通過且共用樹已還原。這一步只做：把倉 `xui2dl` 的 HEAD 的插件原始碼同步到共用樹（逐檔 `cmp`）、只建 `CEVPlayer`（Profile）、換 `CEVPlayer.dll`（備份現有的 3000ba2e… 到 `E:/coding3/xt-bench/cev-v1b/backup/`）。不改倉、不提交、不碰 XTFrame 的任何檔與成品（三個 DLL 的 SHA-256 前後核對，同 V1）。共用樹沒有 Scaleform 執行時，Flash 掛點只驗「被拒且不崩潰」。
+
+| 項目 | 判定 |
+|---|---|
+| W1 編譯 | 0 錯誤；警告照實列（含 `CEV_HAVE_XUI2D` 路徑與 S2 的 Flash 掛點程式） |
+| W2 後端 | `cev_info`：`fullscreen backend: xui2d planar=1 loop=1` |
+| W3 自測 | `cev_apitest` 72、`cev_flowtest` 69、`cev_contract_selftest` 248；`sys_asserts 1` 下斷言逐一列出（已知 `DriverD3D.cpp:3267`、`ResFile.cpp:508`） |
+| W4 全螢幕與讀取 | L7b 的 H1、H3；L5 的 X3、X4 暫停幀與 L7b 逐位元組相同 |
+| W5 XTFrame 自測 | planar 26／0、source 197／0、分層 24／0（跑法同 V1；數字不同只記不修） |
+| W6 Flash 掛點 | `cev_attach_flash` 在沒有 Scaleform 的這棵樹上被拒、有 log、不崩潰；之後播放正常 |
+| W7 Surface 經 XTFrame UI | L5a 的做法取一項：一支 4:2:0 影片經 UI 顯示為打包排列、畫面正確（像素） |
+
+證據放 `E:/coding3/xt-bench/cev-v1b/`。報告繁體中文、精簡，寫在最後訊息裡：W1～W7 的判定與證據、最終 `CEVPlayer.dll` 的 SHA-256、任何異常。共用樹結束時留著新的 `CEVPlayer.dll` 與同步後的插件原始碼（這是預期的最終狀態）。
