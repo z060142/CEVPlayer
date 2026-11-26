@@ -140,7 +140,11 @@ typedef struct XUI2DLApi
 - `GetLoadFrame` 在主執行緒建表面時取得；`End` 在讀取後第一次主執行緒 `Present` 的開頭（迴圈已停），之後回到每幀 `Submit`。
 - 全螢幕播放器在讀取中執行（`RunsDuringLoad`）的條件加上這個後端（`LoopDrawAvailable()`、來源 `patch17`、`cev_loadtime 1`、沒有材質綁定）；迴圈內凍結貼圖身分沿用 L3c 的同一套程式。讀取期間 `Age` 不執行（主執行緒不 `Present`），凍結幀用到的貼圖不會在讀取中釋放；讀取後第一次 `Present` 先取回仍在用的貼圖再 `Age`。
 - 規則出處（XTFrame CE-117，`XUI2D_Patched` bit 9 = 512；CE_XTUI 倉 `docs/10-loading-time.md` §10.8、`docs/08` CE-117／CE-118、共用樹 `IXUIRenderer.h` 的 `IXUILoadFrame::ClearOutput` 註解）：①迴圈中不重播，Update 階段 `Begin`＋`Submit`、Render 階段 `Execute`；②同一圈只有第一個 `Execute` 的 screen surface 入口的 `ClearOutput` 生效；③疊放由回呼 order 決定，小的在下，`SetSurfaceOrder` 在迴圈中無作用；④回呼內不呼叫 `IXUIRenderer::Submit`、不 Add／Remove 回呼，`CreateScreenSurface`／`SetSurfaceOrder`／`WrapEngineTexture`／`GetLoadFrame` 在讀取前於主執行緒做完，`End` 在主執行緒；⑤包裝的貼圖每次繪製以引擎 id 重新解析，原地更新直接反映。
-- 實測（L6，待裁決）：關卡已載入時再讀取（換關卡），XUI2D 在迴圈開始後約 2 ms 釋放並重建資源、世代改變，凍結幀的句柄此後被 `Begin` 拒絕（`eLoadFrame_Generation`），該次讀取只畫最初幾圈；依規則④迴圈中不能重新包裝。
+- 實測（L6）：關卡已載入時再讀取（換關卡），XUI2D 在迴圈開始後約 2 ms 釋放並重建資源、世代改變，凍結幀的句柄此後被 `Begin` 拒絕（`eLoadFrame_Generation`），該次讀取只畫最初幾圈。L7b 依下述規則修正。
+- **讀取迴圈中的資源世代（L7b）**。規則出處：XTFrame 主線讀碼所得（未實測，經 `docs/tasks/L7b.md` 轉達）：⑥已有關卡時再載入，卸關卡使世代 +2，同一個 `map` 指令內；之後到讀取結束不再變（例外：有人呼叫 `IXUIRenderer::ReleaseResources`）。⑦世代改變後所有貼圖句柄失效（含 `WrapEngineTexture` 的，舊句柄取樣為白）；screen surface id、order／viewport、`IXUILoadFrame*` 仍有效。⑧`Begin` 只比對世代、不檢查幀內句柄（新世代帶舊句柄會畫白）。⑨`GetResourceGeneration()` 任何執行緒可呼叫；`WrapEngineTexture` 可在迴圈回呼內呼叫——**取代規則④中「迴圈中不 wrap」的部分，僅限世代改變後的重新 wrap**。
+  - 做法（對方的做法 A）：凍結幀另存每個繪製的引擎貼圖 id 與當時解析到的 `ITexture*`。`CLoopDraw::LoadtimeUpdate` 每圈讀世代；與目前送出的句柄世代不同時（只在改變的那一圈）`Rebuild`：每個 id 重新 `WrapEngineTexture` 一次，以原幾何、參數、順序重建要送的繪製，之後以新世代 `Begin`。引擎 id 已不解析到同一張貼圖（`IRenderer::EF_GetTextureByID`；XUI2D 的 wrap 不檢查 id）或 wrap 回 0 的繪製，在該世代下不畫，每次讀取記一行 log；全部被略過時該圈不 `Begin`。
+  - 句柄交接：選「交回主執行緒那份表」。讀取後第一次 `Present` 先 `EndLoop`（把迴圈 wrap 的句柄移出），照 L5 的世代路徑把表內句柄歸零，再 `AdoptLoopHandles`：世代仍相同者成為該貼圖項目的句柄，之後由 `Age`／`Shutdown` 銷毀；其餘同世代的直接銷毀，舊世代的本已失效不處理。理由：不必再 wrap 一次；主執行緒隨即以這些句柄送幀，成為「最後使用的入口」（`IXUILoadFrame` 註解：句柄由最後使用它的入口銷毀），不會重複釋放或外洩。
+  - 實測與規則⑥不符（L7b，待對方確認）：這棵樹上 `LEVEL_LOAD_START_LOADINGSCREEN`（補丁 17 在此啟動迴圈）早於卸關卡；log 順序是 `loading loop started` → `LEVEL_LOAD_PREPARE` → `[XUI2D] render resources released (generation 2)` → `created (generation 3)`，前後約 3 ms，所以迴圈的最初幾圈以舊世代畫（L6 報告的「3 begun」即此），之後才看到 +2。做法 A 每圈比對世代，這個順序下照樣成立；未觀察到迴圈看見中間的偶數世代。
 
 ## 8. 階段
 
