@@ -36,6 +36,13 @@ The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3
 * With XTFrame's XUI2D and `XUI2D_Patched` bit 512, fullscreen players also keep playing during level loading screens: an
   order-150 loading-loop callback draws the last fullscreen frame composed before the load (below the XTFrame loading
   UI); `cev_info` reports `loop=0|1`.
+* XUI2DL brings its own loading-loop driver for engines without XTFrame: surface and fullscreen players keep playing
+  during level loading screens there too, the retained fullscreen layers are drawn inside the loop and survive a level
+  unload. During a load a fullscreen player keeps its texture and layout; changes are applied after the load.
+* Fullscreen players are no longer forced to RGBA8: packed YUV is kept and converted on the GPU when the 2D stage
+  supports it (`GetPixelLayout` reports the packed layout).
+* Fix: releasing a player texture and creating one with the same name in the same step could race with the render
+  thread (rare crash in `CTexture::RT_CreateDeviceTexture`); pending render commands are now flushed before the release.
 * `cev_stats` is no longer drawn on screen; it only writes the log (and the `cev_stats_file` CSV).
 * C++ interface `IVideoPlugin` / `IVideoPlayer`, interface version 5 (`CreatePlayerForSurface`, `FindPlayerBySurface`,
   `GetSurfaceId`, `GetPixelLayout`, `GetDecodeBackend`).

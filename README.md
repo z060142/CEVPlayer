@@ -356,7 +356,7 @@ to the old aux path. Engines without XTFrame need the XUI2DL patch for any fulls
 # from this repository; python 3, no dependencies
 python EnginePatch/apply_xui2dl.py /path/to/engine            # copy the files, insert the hooks
 python EnginePatch/apply_xui2dl.py /path/to/engine --check    # report what is applied
-python EnginePatch/apply_xui2dl.py /path/to/engine --remove   # take it out again (byte-identical files)
+python EnginePatch/apply_xui2dl.py /path/to/engine --remove   # remove the hooks (engine files byte-identical again; the copied files stay)
 # then re-run CMake and rebuild the renderer (CryRenderD3D11) and CEVPlayer
 ```
 
