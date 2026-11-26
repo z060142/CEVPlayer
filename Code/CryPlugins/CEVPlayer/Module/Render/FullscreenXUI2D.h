@@ -24,7 +24,9 @@ namespace CEVPlayer
 		//! LoadtimeRender: Execute when this iteration submitted. Registered / removed by the player manager (main
 		//! thread, never under its tick lock). The object always exists, so it can be removed after the conditions
 		//! changed. The main thread gives the surface back (IXUILoadFrame::End) at the start of the first Present after a
-		//! loop began its entry: the main thread presents only after the load, when the loop has stopped.
+		//! loop began its entry: the main thread presents only after the load, when the loop has stopped. L7b: when the
+		//! XUI2D resource generation changes during the loop, LoadtimeUpdate wraps the frozen engine texture ids again
+		//! and submits under the new generation; the main thread adopts those handles after the load.
 		ILoadtimeCallback* LoopCallback();
 		//! XUI2D_Patched is non-zero and IRenderer::GetIXUIRenderer() returns an object (checked in that order: the
 		//! IRenderer slot only exists on a patched renderer).

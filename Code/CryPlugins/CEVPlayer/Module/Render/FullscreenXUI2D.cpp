@@ -48,22 +48,44 @@ namespace CEVPlayer
 			std::vector<SVertex> s_vertices;   // scratch of Present (kept across frames)
 			std::vector<uint32> s_indices;
 			std::vector<SDrawCmd> s_cmds;
+			std::vector<int> s_cmdTextureIds;       // per s_cmds entry: the engine texture id, 0 for a solid quad
+			std::vector<ITexture*> s_cmdTextures;   // per s_cmds entry: that engine texture (referenced by s_textures)
 			std::vector<float> s_params;
 
 			// L6: the frame the loading loop draws. Present (main thread) replaces it with every frame it composes, empty
 			// or not; the main thread does not present while a level loads, so the loop draws the last frame composed
-			// before the load, unchanged for the whole loop. The texture handles in it were made on the main thread under
-			// `generation`; the engine textures stay referenced by s_textures (Age does not run during the load).
+			// before the load. The texture handles in it were made on the main thread under `generation`; the engine
+			// textures stay referenced by s_textures (Age does not run during the load).
+			// L7b: when the XUI2D resource generation is no longer the one the drawn handles were made under (a level
+			// unload while a level is loaded releases and recreates the XUI2D resources), the loop wraps the frozen engine
+			// texture ids again and rebuilds the draws it submits (same geometry and parameters, new handles), once per
+			// generation change; a draw whose engine texture is gone or whose wrap fails is left out for that generation.
+			// The handles the loop wraps are handed to the main thread's table (s_textures) by the first Present after the
+			// load (AdoptLoopHandles).
+			struct SLoopHandle
+			{
+				int            textureId = 0;
+				TTextureHandle handle = 0;
+			};
 			struct SFrozen
 			{
 				std::vector<SVertex> vertices;
 				std::vector<uint32> indices;
-				std::vector<SDrawCmd> cmds;
+				std::vector<SDrawCmd> cmds;        // as composed on the main thread (handles of `generation`)
+				std::vector<int> textureIds;       // per cmds entry: engine texture id, 0 for a solid quad
+				std::vector<ITexture*> textures;   // per cmds entry: the engine texture the id resolved to (identity check)
 				std::vector<float> params;
 				int width = 0, height = 0;   // SFrame::targetWidth / targetHeight
 				uint32 generation = 0;
 				uint32 mainFrame = 0;        // gEnv->nMainFrameID of the Present that composed it (log only)
-				IXUILoadFrame* pFrame = nullptr;   // the surface's loading-loop entry (GetLoadFrame, main thread)
+				IXUILoadFrame* pFrame = nullptr;     // the surface's loading-loop entry (GetLoadFrame, main thread)
+				IXUIRenderer* pRenderer = nullptr;   // the renderer the frame was composed for
+				// Loop thread (L7b): the draws submitted, the generation of their handles, the handles the loop wrapped under
+				// drawGeneration (handed to the main thread after the load), whether this load logged a left-out draw.
+				std::vector<SDrawCmd> drawCmds;
+				uint32 drawGeneration = 0;
+				std::vector<SLoopHandle> loopHandles;
+				bool skipLogged = false;
 			};
 			std::mutex s_frozenMutex;   // main thread writes in Present, the loop reads in LoadtimeUpdate (short copies)
 			SFrozen s_frozen;
@@ -73,6 +95,11 @@ namespace CEVPlayer
 			IXUILoadFrame* s_pLoopFrame = nullptr;   // loop thread: the entry submitted in this iteration's update
 			std::atomic<bool> s_loopBegun{ false };  // a Begin succeeded since the last End
 			std::atomic<uint32> s_loopIterations{ 0 }, s_loopEmpty{ 0 }, s_loopBegins{ 0 }, s_loopRefused{ 0 }, s_loopExecuted{ 0 }, s_loopExecuteFailed{ 0 };
+			std::atomic<uint32> s_loopRebuilds{ 0 };   // L7b: generation changes the loop rebuilt the frozen frame for
+			// L7b, main thread: the handles a finished loop wrapped (moved out of s_frozen by EndLoop) and their
+			// generation; AdoptLoopHandles puts them into s_textures.
+			std::vector<SLoopHandle> s_adoptHandles;
+			uint32 s_adoptGeneration = 0;
 
 			void ClearFrozen()
 			{
@@ -80,8 +107,12 @@ namespace CEVPlayer
 				s_frozen.vertices.clear();
 				s_frozen.indices.clear();
 				s_frozen.cmds.clear();
+				s_frozen.textureIds.clear();
+				s_frozen.textures.clear();
 				s_frozen.params.clear();
 				s_frozen.pFrame = nullptr;
+				s_frozen.drawCmds.clear();
+				s_frozen.loopHandles.clear(); // a finished loop's handles were moved out by EndLoop before this
 			}
 
 			const char* RendererModuleName(IRenderer* pRenderer)
@@ -227,7 +258,18 @@ namespace CEVPlayer
 				const uint32 refused = s_loopRefused.exchange(0);
 				const uint32 executed = s_loopExecuted.exchange(0);
 				const uint32 executeFailed = s_loopExecuteFailed.exchange(0);
+				const uint32 rebuilds = s_loopRebuilds.exchange(0);
 				const bool begun = s_loopBegun.exchange(false);
+				{
+					// L7b: the loop has stopped; the handles it wrapped go to the main thread's table (AdoptLoopHandles).
+					std::lock_guard<std::mutex> lock(s_frozenMutex);
+					if (!s_frozen.loopHandles.empty())
+					{
+						s_adoptHandles.insert(s_adoptHandles.end(), s_frozen.loopHandles.begin(), s_frozen.loopHandles.end());
+						s_adoptGeneration = s_frozen.drawGeneration;
+						s_frozen.loopHandles.clear();
+					}
+				}
 				if (iterations == 0 && !begun)
 					return;
 				SLoadFrameStats stats;
@@ -242,11 +284,45 @@ namespace CEVPlayer
 					frozenCmds = static_cast<uint32>(s_frozen.cmds.size());
 				}
 				LogAlways("fullscreen output: loading loop (XUI2D surface %u, %s): %u iteration(s), %u without a frame, %u begun, %u refused (last refusal %u), "
-				          "%u executed, %u execute(s) refused; End %s; frozen frame of main frame %u (%u draw(s)), main frame now %u; entry stats executed %u draws %u "
-				          "skipped %u clears %u white %u dropped %u output %ux%u",
-					s_surface, why, iterations, empty, begins, refused, stats.lastRefusal, executed, executeFailed, begun ? "called" : "not needed", frozenFrame, frozenCmds,
+				          "%u executed, %u execute(s) refused, %u rebuild(s); End %s; frozen frame of main frame %u (%u draw(s)), main frame now %u; entry stats executed %u "
+				          "draws %u skipped %u clears %u white %u dropped %u output %ux%u",
+					s_surface, why, iterations, empty, begins, refused, stats.lastRefusal, executed, executeFailed, rebuilds, begun ? "called" : "not needed", frozenFrame, frozenCmds,
 					gEnv->nMainFrameID, stats.executed, stats.draws, stats.drawsSkipped, stats.clears, stats.whiteFallbacks, stats.droppedFrames, stats.outputWidth,
 					stats.outputHeight);
+			}
+
+			//! Main thread, after the generation check of Present (`adopt` true) or at Shutdown (false). L7b: a handle a
+			//! finished loop wrapped becomes the handle of its s_textures entry when it was made under the current
+			//! generation and the entry has no valid handle; the main thread is then the entry that uses it last
+			//! (IXUILoadFrame: a handle is destroyed through the entry that last uses it) and Age / Shutdown destroy it.
+			//! Any other handle of the current generation is destroyed here; a handle of another generation is invalid
+			//! already (Destroy* is a no-op for it, IXUIRenderer::GetResourceGeneration).
+			void AdoptLoopHandles(IXUIRenderer* pRenderer, uint32 generation, bool adopt)
+			{
+				if (s_adoptHandles.empty())
+					return;
+				uint32 adopted = 0, destroyed = 0;
+				for (const SLoopHandle& h : s_adoptHandles)
+				{
+					if (s_adoptGeneration != generation || pRenderer == nullptr)
+						continue;
+					auto it = s_textures.find(h.textureId);
+					if (adopt && it != s_textures.end() && (it->second.handle == 0 || it->second.generation != generation))
+					{
+						it->second.handle = h.handle;
+						it->second.generation = generation;
+						++adopted;
+					}
+					else
+					{
+						pRenderer->DestroyTexture(h.handle);
+						++destroyed;
+					}
+				}
+				const uint32 count = static_cast<uint32>(s_adoptHandles.size());
+				LogAlways("fullscreen output: %u texture handle(s) wrapped in the loading loop (generation %u, now %u): %u adopted, %u destroyed, %u stale", count,
+					s_adoptGeneration, generation, adopted, destroyed, count - adopted - destroyed);
+				s_adoptHandles.clear();
 			}
 
 			void DestroySurface(IXUIRenderer* pRenderer, const char* why)
@@ -281,7 +357,16 @@ namespace CEVPlayer
 						s_loopEmpty.fetch_add(1, std::memory_order_relaxed);
 						return; // nothing composed before the load: no Begin in this iteration
 					}
-					if (!s_frozen.pFrame->Begin(s_frozen.generation))
+					// L7b: GetResourceGeneration may be called from any thread; a changed value invalidates every handle.
+					const uint32 generation = s_frozen.pRenderer != nullptr ? s_frozen.pRenderer->GetResourceGeneration() : s_frozen.drawGeneration;
+					if (generation != s_frozen.drawGeneration)
+						Rebuild(generation);
+					if (s_frozen.drawCmds.empty())
+					{
+						s_loopEmpty.fetch_add(1, std::memory_order_relaxed);
+						return; // every draw is left out under this generation: no Begin
+					}
+					if (!s_frozen.pFrame->Begin(s_frozen.drawGeneration))
 					{
 						s_loopRefused.fetch_add(1, std::memory_order_relaxed);
 						return;
@@ -293,14 +378,14 @@ namespace CEVPlayer
 					std::memset(&pass, 0, sizeof(pass));
 					pass.target = kSurfaceTarget;
 					pass.firstCmd = 0;
-					pass.cmdCount = static_cast<uint32>(s_frozen.cmds.size());
+					pass.cmdCount = static_cast<uint32>(s_frozen.drawCmds.size());
 					SFrame f = {};
 					f.vertices = s_frozen.vertices.data();
 					f.vertexCount = static_cast<uint32>(s_frozen.vertices.size());
 					f.indices = s_frozen.indices.data();
 					f.indexCount = static_cast<uint32>(s_frozen.indices.size());
-					f.cmds = s_frozen.cmds.data();
-					f.cmdCount = static_cast<uint32>(s_frozen.cmds.size());
+					f.cmds = s_frozen.drawCmds.data();
+					f.cmdCount = static_cast<uint32>(s_frozen.drawCmds.size());
 					f.passes = &pass;
 					f.passCount = 1;
 					f.params = s_frozen.params.empty() ? nullptr : s_frozen.params.data();
@@ -322,6 +407,66 @@ namespace CEVPlayer
 					else
 						s_loopExecuteFailed.fetch_add(1, std::memory_order_relaxed);
 					return true;
+				}
+
+			private:
+				//! Loop thread, s_frozenMutex held. L7b: wraps the frozen engine texture ids again under `generation` (each id
+				//! once) and rebuilds drawCmds from cmds with the new handles; geometry, parameters and order stay. A draw
+				//! whose engine id no longer resolves to the texture the main thread used (the engine's id lookup,
+				//! IRenderer::EF_GetTextureByID: XUI2D's WrapEngineTexture does not check the id) or whose wrap returns 0 is
+				//! left out under this generation, with one log line per load.
+				static void Rebuild(uint32 generation)
+				{
+					const uint32 previous = s_frozen.drawGeneration;
+					s_frozen.drawCmds.clear();
+					s_frozen.loopHandles.clear(); // made under another generation: invalid now (Destroy* would be a no-op)
+					s_frozen.drawGeneration = generation;
+					uint32 wrapped = 0, skipped = 0;
+					for (size_t i = 0; i < s_frozen.cmds.size(); ++i)
+					{
+						SDrawCmd cmd = s_frozen.cmds[i];
+						const int id = i < s_frozen.textureIds.size() ? s_frozen.textureIds[i] : 0;
+						if (id > 0)
+						{
+							const char* why = nullptr;
+							TTextureHandle handle = 0;
+							for (const SLoopHandle& h : s_frozen.loopHandles)
+							{
+								if (h.textureId == id)
+									handle = h.handle;
+							}
+							if (handle == 0)
+							{
+								ITexture* const pNow = gEnv->pRenderer != nullptr ? gEnv->pRenderer->EF_GetTextureByID(id) : nullptr;
+								if (pNow == nullptr || pNow != s_frozen.textures[i])
+									why = "engine texture id no longer valid";
+								else if ((handle = s_frozen.pRenderer->WrapEngineTexture(id)) == 0)
+									why = "WrapEngineTexture failed";
+								else
+								{
+									s_frozen.loopHandles.push_back(SLoopHandle{ id, handle });
+									++wrapped;
+								}
+							}
+							if (why != nullptr)
+							{
+								++skipped;
+								if (!s_frozen.skipLogged)
+								{
+									s_frozen.skipLogged = true;
+									LogAlways("fullscreen output: loading loop: draw %u (engine texture %d) left out under XUI2D resource generation %u (%s)",
+										static_cast<uint32>(i), id, generation, why);
+								}
+								continue;
+							}
+							cmd.texture = handle;
+						}
+						s_frozen.drawCmds.push_back(cmd);
+					}
+					s_loopRebuilds.fetch_add(1, std::memory_order_relaxed);
+					LogAlways("fullscreen output: loading loop: XUI2D resource generation %u -> %u, frozen frame rebuilt (%u of %u draw(s), %u texture(s) wrapped again, "
+					          "%u left out)",
+						previous, generation, static_cast<uint32>(s_frozen.drawCmds.size()), static_cast<uint32>(s_frozen.cmds.size()), wrapped, skipped);
 				}
 			};
 			CLoopDraw s_loopDraw;
@@ -373,6 +518,7 @@ namespace CEVPlayer
 				for (auto& kv : s_textures)
 					kv.second.handle = 0;
 			}
+			AdoptLoopHandles(pRenderer, generation, true); // L7b: the handles a finished loop wrapped (none without one)
 			if (pRenderer == nullptr || generation == 0)
 			{
 				ClearFrozen();
@@ -383,6 +529,8 @@ namespace CEVPlayer
 			s_vertices.clear();
 			s_indices.clear();
 			s_cmds.clear();
+			s_cmdTextureIds.clear();
+			s_cmdTextures.clear();
 			s_params.clear();
 			for (const SQuad& q : quads)
 			{
@@ -397,6 +545,8 @@ namespace CEVPlayer
 				cmd.kind = EDrawKind::Triangles;
 				// clipX/Y/W/H stay 0: no scissor (XUI2DPass.cpp, bWantScissor = clipW > 0 && clipH > 0).
 				uint32 rgba = 0xFFFFFFFFu;
+				int textureId = 0;
+				ITexture* pEngineTexture = nullptr;
 				if (q.kind == EQuadKind::Solid)
 				{
 					cmd.shading = EShading::Solid;
@@ -408,6 +558,8 @@ namespace CEVPlayer
 					if (pTex == nullptr)
 						continue;
 					cmd.texture = pTex->handle;
+					textureId = q.textureId;
+					pEngineTexture = pTex->pTexture.get();
 					if (q.kind == EQuadKind::RgbaPremult)
 					{
 						cmd.shading = EShading::Texture;
@@ -437,6 +589,8 @@ namespace CEVPlayer
 				static const uint32 kIndices[6] = { 0, 1, 2, 0, 2, 3 };
 				s_indices.insert(s_indices.end(), kIndices, kIndices + 6);
 				s_cmds.push_back(cmd);
+				s_cmdTextureIds.push_back(textureId);
+				s_cmdTextures.push_back(pEngineTexture);
 			}
 
 			if (!s_cmds.empty())
@@ -491,11 +645,19 @@ namespace CEVPlayer
 				s_frozen.indices.assign(s_indices.begin(), submitted ? s_indices.end() : s_indices.begin());
 				s_frozen.cmds.assign(s_cmds.begin(), submitted ? s_cmds.end() : s_cmds.begin());
 				s_frozen.params.assign(s_params.begin(), submitted ? s_params.end() : s_params.begin());
+				s_frozen.textureIds.assign(s_cmdTextureIds.begin(), submitted ? s_cmdTextureIds.end() : s_cmdTextureIds.begin());
+				s_frozen.textures.assign(s_cmdTextures.begin(), submitted ? s_cmdTextures.end() : s_cmdTextures.begin());
 				s_frozen.width = outputW;
 				s_frozen.height = outputH;
 				s_frozen.generation = generation;
 				s_frozen.mainFrame = frame;
 				s_frozen.pFrame = submitted ? s_pLoadFrame : nullptr;
+				s_frozen.pRenderer = pRenderer;
+				// L7b: a loop starts from the main thread's handles (EndLoop moved any loop-made handles out already).
+				s_frozen.drawCmds = s_frozen.cmds;
+				s_frozen.drawGeneration = generation;
+				s_frozen.loopHandles.clear();
+				s_frozen.skipLogged = false;
 			}
 			// The textures of the frozen frame are among those just used: Age does not run while a level loads (no
 			// Present), so none of them is released during the loop.
@@ -516,6 +678,7 @@ namespace CEVPlayer
 			IXUIRenderer* const pRenderer = Renderer();
 			const uint32 generation = pRenderer != nullptr ? pRenderer->GetResourceGeneration() : 0;
 			DestroySurface(pRenderer, "shutdown");
+			AdoptLoopHandles(pRenderer, generation, false); // L7b: loop handles not adopted yet are destroyed
 			for (auto& kv : s_textures)
 			{
 				if (pRenderer != nullptr && kv.second.handle != 0 && kv.second.generation == generation)
