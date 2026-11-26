@@ -40,6 +40,7 @@
 #include <CrySerialization/Enum.h>
 #include <CrySerialization/STL.h>
 #include <CrySerialization/Decorators/ResourceFilePath.h>
+#include <CrySerialization/Decorators/Resources.h>
 #include <Cry3DEngine/IMaterial.h>
 #include <CryEntitySystem/IEntitySystem.h>
 #include <CrySystem/ConsoleRegistration.h>
@@ -587,7 +588,7 @@ namespace CEVPlayer
 					archive(Serialization::ResourceFilePath(video, "Video files (*.webm;*.cevvideo)|*.webm;*.cevvideo", "Videos"), "video", "Video");
 					archive(outputMode, "outputMode", "Output");
 					archive(surfaceId, "surfaceId", "SurfaceID");
-					archive(material, "material", "Material");
+					archive(Serialization::MaterialPicker(material), "material", "Material"); // engine material picker; stored as a plain string
 					archive(slot, "slot", "Slot");
 					archive(fit, "fit", "Screen Fit");
 					archive(audioTrack, "audioTrack", "Audio Track");

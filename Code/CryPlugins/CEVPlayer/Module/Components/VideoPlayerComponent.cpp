@@ -290,7 +290,7 @@ namespace CEVPlayer
 		desc.AddMember(&CVideoPlayerComponent::m_video, 'vide', "video", "Video", "Video file (.webm) or runtime descriptor (.cevvideo)", VideoFileName(""));
 		desc.AddMember(&CVideoPlayerComponent::m_outputMode, 'omod', "outputmode", "Output", "Surface = a named surface UIs show by its SurfaceID, Screen = fullscreen on the top layer, Material = texture slot of a material", Api::EOutputMode::Screen);
 		desc.AddMember(&CVideoPlayerComponent::m_surfaceId, 'surf', "surfaceid", "SurfaceID", "Output Surface: the surface id UIs use (1 to 63 of A-Z a-z 0-9 _ . : -, unique)", Schematyc::CSharedString());
-		desc.AddMember(&CVideoPlayerComponent::m_material, 'mtl_', "material", "Material", "Output Material: material name (empty = the material of this entity)", Schematyc::CSharedString());
+		desc.AddMember(&CVideoPlayerComponent::m_material, 'mtl_', "material", "Material", "Output Material: material name (empty = the material of this entity)", Schematyc::MaterialFileName(""));
 		desc.AddMember(&CVideoPlayerComponent::m_slot, 'slot', "slot", "Slot", "Output Material: texture slot of the material (0 = diffuse)", 0);
 		desc.AddMember(&CVideoPlayerComponent::m_fit, 'fit_', "fit", "Screen Fit", "Screen mode: how the picture is placed", EVideoFit::Letterbox);
 		desc.AddMember(&CVideoPlayerComponent::m_audioTrack, 'atrk', "audiotrack", "Audio Track", "Audio track name of the .cevvideo descriptor (empty = automatic choice)", Schematyc::CSharedString());
@@ -385,7 +385,7 @@ namespace CEVPlayer
 		const SValue pauseHidden[1] = { SValue::FromBool(m_pauseDecodeWhenHidden) };
 		const SValue output[5] =
 		{
-			SValue::FromInt(static_cast<int>(m_outputMode)), SValue::FromString(m_material.c_str()), SValue::FromInt(m_slot),
+			SValue::FromInt(static_cast<int>(m_outputMode)), SValue::FromString(m_material.value.c_str()), SValue::FromInt(m_slot),
 			SValue::FromInt(-1), SValue::FromInt(static_cast<int>(m_fit))
 		};
 		Call(*FindByName("SetDecode"), m_handle, decode, 1, nullptr);

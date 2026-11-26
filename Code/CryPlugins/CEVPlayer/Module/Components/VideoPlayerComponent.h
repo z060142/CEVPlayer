@@ -62,7 +62,7 @@ namespace CEVPlayer
 		VideoFileName            m_video;
 		Api::EOutputMode         m_outputMode = Api::EOutputMode::Screen;
 		Schematyc::CSharedString m_surfaceId;  // Surface: the surface id UIs use
-		Schematyc::CSharedString m_material;   // Material: material name (empty = this entity's material)
+		Schematyc::MaterialFileName m_material; // Material: material name, engine material picker (empty = this entity's material)
 		int32                    m_slot = 0;   // Material: texture slot (0 = diffuse)
 		EVideoFit                m_fit = EVideoFit::Letterbox; // Screen
 		Schematyc::CSharedString m_audioTrack;

@@ -129,7 +129,8 @@ Licence: Boost Software License 1.0, see [LICENSE](LICENSE). Third-party librari
 
 One drawer `CEVPlayer` with two ready-to-use nodes, the Flash UI node and the sub-drawers `UI` and `Advanced` (11 node
 classes). Enum ports are drop-downs: `Fit` = Fill / Fit / Letterbox, `Decode` = Auto / GPU / CPU, `Output` = Surface /
-Screen / Material. The ready-to-use and UI nodes own their player (Stop or the end of the graph destroys it);
+Screen / Material. `Video` ports have a file browse button (the editor's generic file dialog, all file types) and
+`Material` ports the editor's material browse buttons; both still take typed text. The ready-to-use and UI nodes own their player (Stop or the end of the graph destroys it);
 `AttachToFlash` owns none, it shows an existing surface.
 
 | Node | Inputs | Outputs |
@@ -154,6 +155,8 @@ usual nodes, functions and methods of the surface.
 
 Component **Video Player** (category *Video*). Properties: Video, Output (Surface / Screen / Material), SurfaceID,
 Material, Slot, Screen Fit, Audio Track (empty = automatic), Loop, Autoplay, Skippable, Decode, PauseDecodeWhenHidden.
+Video has a file picker (.webm / .cevvideo) and Material the engine's material picker (the CryVS `VideoPlayer`
+component too).
 Functions: one per entry of the API table (controls and queries, e.g. `Play`, `Pause`, `Seek`, `SetAudioTrack`,
 `SetDecode`, `Time`, `AudioTrackName`, `DecodeBackend`). Signals: Ready, Started, NewFrame (serial), Marker (name,
 time), Looped, Ended, Skipped, Error (code, message).
