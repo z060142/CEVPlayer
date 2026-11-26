@@ -17,9 +17,12 @@ namespace XUI2DL
 //! Render thread, end of CD3D9Renderer::RT_CreateRenderResources: shader, vertex format, buffers,
 //! primitives; requests the shader instances (prewarm, never waited for).
 void RT_CreateResources();
-//! Render thread, the FRR_SYSTEM_RESOURCES branch of CD3D9Renderer::RT_ReleaseRenderResources:
-//! releases the device objects and drops the retained list.
+//! Render thread, the FRR_SYSTEM_RESOURCES branch of CD3D9Renderer::RT_ReleaseRenderResources (also every level
+//! unload): releases the device objects. The retained list stays (it is the caller's state).
 void RT_ReleaseResources();
+//! Render thread, the FRR_TEXTURES branch of CD3D9Renderer::RT_ReleaseRenderResources (renderer shutdown), before
+//! CTexture::ShutDown: drops the retained list and with it the texture references.
+void RT_ReleaseRetained();
 //! Main thread, CD3D9Renderer::EndFrame: queues the draw of the retained list (nothing when it is empty).
 void EndFrame(const SDisplayContextKey& key);
 
@@ -35,7 +38,8 @@ void RT_LoadtimeUpdate(float dtSeconds);
 void RT_LoadtimeRender();
 //! Main thread, system event LEVEL_LOAD_START_LOADINGSCREEN: starts the loading loop when an update is
 //! registered and no loop runs (not in the editor, only with a render thread, not for asynchronous loads).
-//! With a non-empty retained list it first has the resources created and the shader prewarmed (at most 2 s).
+//! With a non-empty retained list it first has the resources created, the shader prewarmed and every layer's primitive
+//! compiled (at most 2 s); on timeout that loop draws nothing.
 void LoadtimeAutoStart();
 //! Main thread, system events LEVEL_LOAD_END / LEVEL_LOAD_ERROR / FAST_SHUTDOWN: stops the loop
 //! LoadtimeAutoStart started, unless a StartLoadtimeFlashPlayback caller joined it (that caller stops it).

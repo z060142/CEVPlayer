@@ -93,6 +93,18 @@ def loc_thread_release(lines):
     return sf + 2
 
 
+def loc_thread_release_retained(lines):
+    # First line inside the FRR_TEXTURES branch (renderer shutdown), before the display contexts and CTexture::ShutDown.
+    start = find_one(lines, r"^void\s+CD3D9Renderer::RT_ReleaseRenderResources\s*\(", what="RT_ReleaseRenderResources")
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].rstrip("\r\n") == "}"), None)
+    if end is None:
+        raise AnchorError("RT_ReleaseRenderResources: no closing brace")
+    branch = find_one(lines, r"^\s*if\s*\(\s*nFlags\s*&\s*FRR_TEXTURES\s*\)", start, end, what="FRR_TEXTURES branch")
+    if branch + 1 >= end or lines[branch + 1].strip() != "{":
+        raise AnchorError("FRR_TEXTURES branch: the next line is not '{'")
+    return branch + 2
+
+
 def loc_cmake(lines):
     return find_one(lines, r"^end_sources\(\)", what="CMakeLists.txt end_sources() anchor")
 
@@ -176,6 +188,7 @@ HOOKS = [
     (RD + "D3DRenderThread.cpp", [
         ("include", "//", ['#include "../XUI2DL/XUI2DL.h"'], loc_thread_include, None),
         ("RT_ReleaseResources", "//", ["XUI2DL::RT_ReleaseResources();"], loc_thread_release, "\t\t"),
+        ("RT_ReleaseRetained", "//", ["XUI2DL::RT_ReleaseRetained();"], loc_thread_release_retained, "\t\t"),
         ("RT_CreateResources", "//", ["XUI2DL::RT_CreateResources();"], loc_thread_create, "\t"),
     ]),
     (RD + "CMakeLists.txt", [

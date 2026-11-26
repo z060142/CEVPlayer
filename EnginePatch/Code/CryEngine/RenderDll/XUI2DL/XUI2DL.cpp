@@ -85,6 +85,10 @@ std::atomic<uint64> s_framesDrawn{ 0 };
 std::atomic<uint64> s_drawsExecuted{ 0 };
 std::atomic<uint64> s_drawsSkipped{ 0 };
 std::atomic<uint64> s_loopFramesDrawn{ 0 };   //!< loading-loop iterations that drew at least one layer
+// The loading-loop prewarm (LoadtimePrewarm / RT_PrepareForLoop).
+std::atomic<bool>   s_loopReady{ false };       //!< every layer of the current snapshot compiled its primitive
+std::atomic<bool>   s_loopNoDraw{ false };      //!< the prewarm timed out: this loading loop does not draw
+std::atomic<bool>   s_loopFailLogged{ false };  //!< a failed draw in this loading loop was logged once
 
 //////////////////////////////////////////////////////////////////////////
 // Render-thread resources (XUI2DResources.h / .cpp, reduced)
@@ -330,6 +334,38 @@ bool ResourcesUsable(const SResources& r)
 	return ShaderValid(r) && r.pPass && r.pPassCB && r.bSlotCBs && r.vb != ~0u && r.ib != ~0u;
 }
 
+//! Sets up the primitive of `slot` for one layer and compiles it against the open pass instance. Shared by the draw
+//! (RT_DrawLayers) and the loading-loop prewarm (RT_CompileSnapshot), so both make the same pipeline state request.
+//! `pTex` is the texture to bind (s_ptexWhite for solid layers), `key` its identity (0 for the white texture).
+//! Returns true when the primitive compiled (CRenderPrimitive::Compile left nothing dirty).
+bool PreparePrimitive(SResources& r, SSlot& slot, ETechnique technique, const XUI2DLLayer& l, CTexture* pTex, uint64 key, uint32 n)
+{
+	CRenderPrimitive& prim = slot.prim;
+	// Blend states of XUI2DPass.cpp:59-67 (premultiplied sources).
+	const uint64 renderState = GS_NODEPTHTEST | (l.blend == XUI2DL_BLEND_SRCOVER ? uint64(GS_BLSRC_ONE | GS_BLDST_ONEMINUSSRCALPHA) : 0);
+	prim.SetFlags(CRenderPrimitive::eFlags_None);
+	prim.SetTechnique(r.pShader, r.techniques[technique], 0);
+	prim.SetRenderState(renderState);
+	prim.SetStencilState(0, 0, 0xFF, 0xFF);
+	prim.SetCullMode(eCULL_None);
+	prim.SetEnableDepthClip(true);
+	prim.SetInlineConstantBuffer(eConstantBufferShaderSlot_PerDraw, r.pPassCB, EShaderStage_Vertex | EShaderStage_Pixel);
+	prim.SetInlineConstantBuffer(eConstantBufferShaderSlot_PerMaterial, slot.pPlanarCB, kPlanarCBStages);
+	if (slot.boundKey != key)
+	{
+		// A different texture may sit at the address bound last time: make the resource set see a change.
+		prim.SetTexture(0, CRendererResources::s_ptexWhite, EDefaultResourceViews::Default, EShaderStage_Pixel);
+		slot.boundKey = key;
+	}
+	prim.SetTexture(0, pTex, EDefaultResourceViews::Default, EShaderStage_Pixel);
+	prim.SetSampler(0, SamplerStateHandle(EDefaultSamplerStates::LinearClamp), EShaderStage_Pixel);
+	prim.SetPrimitiveType(CRenderPrimitive::ePrim_Custom);
+	prim.SetCustomVertexStream(r.vb, r.vertexFormat, sizeof(SVertex));
+	prim.SetCustomIndexStream(r.ib, RenderIndexType::Index32);
+	prim.SetDrawInfo(eptTriangleList, 0, n * 6, 6);
+	return prim.Compile(*r.pPass) == CRenderPrimitive::eDirty_None;
+}
+
 //! Draws the snapshot onto the output of `key`; returns the number of layer draws executed. Shared by the main
 //! path (RT_Draw) and the loading loop (RT_LoadtimeRender); `bClearFirst` clears the output to opaque black first.
 uint64 RT_DrawLayers(SResources& r, const SSnapshot& snap, const SDisplayContextKey& key, bool bClearFirst)
@@ -481,35 +517,13 @@ uint64 RT_DrawLayers(SResources& r, const SSnapshot& snap, const SDisplayContext
 
 			SSlot&            slot = r.pSlots[n];
 			CRenderPrimitive& prim = slot.prim;
-			// Blend states of XUI2DPass.cpp:59-67 (premultiplied sources).
-			const uint64 renderState = GS_NODEPTHTEST | (l.blend == XUI2DL_BLEND_SRCOVER ? uint64(GS_BLSRC_ONE | GS_BLDST_ONEMINUSSRCALPHA) : 0);
-			prim.SetFlags(CRenderPrimitive::eFlags_None);
-			prim.SetTechnique(r.pShader, r.techniques[item.technique], 0);
-			prim.SetRenderState(renderState);
-			prim.SetStencilState(0, 0, 0xFF, 0xFF);
-			prim.SetCullMode(eCULL_None);
-			prim.SetEnableDepthClip(true);
-			prim.SetInlineConstantBuffer(eConstantBufferShaderSlot_PerDraw, r.pPassCB, EShaderStage_Vertex | EShaderStage_Pixel);
 			if (item.technique == eTech_Planar && (!slot.bHasPlanar || memcmp(&slot.lastPlanar, &item.planar, sizeof(item.planar)) != 0))
 			{
 				slot.pPlanarCB->UpdateBuffer(&item.planar, sizeof(item.planar));
 				slot.lastPlanar = item.planar;
 				slot.bHasPlanar = true;
 			}
-			prim.SetInlineConstantBuffer(eConstantBufferShaderSlot_PerMaterial, slot.pPlanarCB, kPlanarCBStages);
-			if (slot.boundKey != key)
-			{
-				// A different texture may sit at the address bound last time: make the resource set see a change.
-				prim.SetTexture(0, CRendererResources::s_ptexWhite, EDefaultResourceViews::Default, EShaderStage_Pixel);
-				slot.boundKey = key;
-			}
-			prim.SetTexture(0, pTex, EDefaultResourceViews::Default, EShaderStage_Pixel);
-			prim.SetSampler(0, SamplerStateHandle(EDefaultSamplerStates::LinearClamp), EShaderStage_Pixel);
-			prim.SetPrimitiveType(CRenderPrimitive::ePrim_Custom);
-			prim.SetCustomVertexStream(r.vb, r.vertexFormat, sizeof(SVertex));
-			prim.SetCustomIndexStream(r.ib, RenderIndexType::Index32);
-			prim.SetDrawInfo(eptTriangleList, 0, n * 6, 6);
-			prim.Compile(*r.pPass);
+			PreparePrimitive(r, slot, item.technique, l, pTex, key, n);
 			if (r.pPass->AddPrimitive(&prim))
 				++executed;
 			else
@@ -528,6 +542,43 @@ uint64 RT_DrawLayers(SResources& r, const SSnapshot& snap, const SDisplayContext
 		r.skippedSinceLog = 0;
 	}
 	return executed;
+}
+
+//! Render thread, the loading-loop prewarm: for every layer of `snap` that RT_DrawLayers would draw, sets up and compiles
+//! its slot's primitive against the active output with the same call the draw uses (PreparePrimitive), without drawing.
+//! True when every compile succeeded (the pipeline states the loop needs are valid).
+bool RT_CompileSnapshot(SResources& r, const SSnapshot& snap)
+{
+	SRenderViewport outputVp;
+	CTexture* const pColor = ResolveOutput(SDisplayContextKey{}, outputVp);
+	if (!pColor || outputVp.width <= 0 || outputVp.height <= 0)
+		return false;
+	const D3DRectangle noRect = { 0, 0, 0, 0 };
+	OpenInstance(r, pColor, outputVp, false, noRect);
+	bool   all = true;
+	uint32 n = 0;
+	for (uint32 i = 0; i < snap.count; ++i)
+	{
+		const SHeldLayer&  held = snap.layers[i];
+		const XUI2DLLayer& l = held.desc;
+		CTexture*          pTex = held.pTexture;
+		ETechnique         technique = eTech_Solid;
+		if (l.kind == XUI2DL_KIND_SOLID)
+			pTex = nullptr;
+		else if (!pTex || !pTex->GetDevTexture())
+			continue;   // texture gone: RT_DrawLayers skips this layer too
+		else if (l.kind == XUI2DL_KIND_RGBA_PREMULT)
+			technique = eTech_Texture;
+		else if (l.kind == XUI2DL_KIND_RGBA_STRAIGHT)
+			technique = eTech_TextureStraight;
+		else
+			technique = eTech_Planar;
+		const uint64 key = pTex ? ((1ull << 40) | uint64(uint32(pTex->GetID()))) : 0;
+		all = PreparePrimitive(r, r.pSlots[n], technique, l, pTex ? pTex : CRendererResources::s_ptexWhite, key, n) && all;
+		++n;
+	}
+	r.open = false;   // nothing was added; the next OpenInstance begins the pass again
+	return all;
 }
 
 void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
@@ -729,16 +780,42 @@ void RT_EnsureResources()
 	             bShader ? "ok" : "MISSING", found, int(eTech_Count), ready, bBuffers ? "ok" : "FAILED");
 }
 
-//! Render thread, before the loading loop starts (LoadtimePrewarm): creates the resources when missing and
-//! polls the shader prewarm. The loop itself never creates resources or requests shader instances.
+//! Render thread, before the loading loop starts (LoadtimePrewarm): creates the resources when missing, polls the
+//! shader prewarm and, once the shader instances are ready, compiles the primitives of the current snapshot
+//! (RT_CompileSnapshot). A pipeline state created while its shaders were still compiling stays invalid in the device
+//! object factory until CDeviceObjectFactory::UpdatePipelineStates re-initialises it; the engine calls that only in
+//! RT_BeginFrame, which does not run inside the loading loop, so a failed compile calls it here and compiles again.
+//! Sets s_loopReady. The loop itself never creates resources or requests shader instances.
 void RT_PrepareForLoop()
 {
+	s_loopReady.store(false, std::memory_order_release);
 	if (!s_deviceAvailable.load(std::memory_order_acquire))
 		return;
 	if (!s_pRes)
 		RT_EnsureResources();   // ends with a PrewarmPoll
 	else if (ShaderValid(*s_pRes))
 		PrewarmPoll(*s_pRes);
+	SResources* const pRes = s_pRes;
+	if (!pRes || !ResourcesUsable(*pRes) || !s_resourcesReady.load(std::memory_order_acquire) || !pRes->prewarmDone)
+		return;
+	SSnapshot* pSnap = nullptr;
+	{
+		CryAutoCriticalSection lock(s_currentLock);
+		pSnap = s_pCurrent;
+		if (pSnap)
+			SnapshotAddRef(pSnap);
+	}
+	if (!pSnap)
+		return;
+	bool ok = RT_CompileSnapshot(*pRes, *pSnap);
+	if (!ok)
+	{
+		GetDeviceObjectFactory().UpdatePipelineStates();
+		ok = RT_CompileSnapshot(*pRes, *pSnap);
+		CryLogAlways("[XUI2DL] loading-loop prewarm: primitives %s after re-initialising the pending pipeline states", ok ? "compiled" : "still not compiled");
+	}
+	RT_Free(pSnap);   // the render thread, not the loading thread: the loop has not started
+	s_loopReady.store(ok, std::memory_order_release);
 }
 
 bool ReadyForLoop()
@@ -747,15 +824,18 @@ bool ReadyForLoop()
 }
 
 //! Main thread, LoadtimeAutoStart before it enters the loop: with a non-empty retained list, have the resources
-//! created and the shader prewarmed on the render thread, waiting at most 2 s; on timeout the loop does not draw.
+//! created, the shader prewarmed and every layer's primitive compiled on the render thread (RT_PrepareForLoop), polling
+//! every 10 ms for at most 2 s; on timeout this loading loop does not draw (s_loopNoDraw).
 void LoadtimePrewarm()
 {
+	s_loopNoDraw.store(false, std::memory_order_release);
+	s_loopFailLogged.store(false, std::memory_order_release);
 	bool bHaveLayers = false;
 	{
 		CryAutoCriticalSection lock(s_currentLock);
 		bHaveLayers = s_pCurrent != nullptr;
 	}
-	if (!bHaveLayers || !s_deviceAvailable.load(std::memory_order_acquire) || ReadyForLoop())
+	if (!bHaveLayers || !s_deviceAvailable.load(std::memory_order_acquire))
 		return;
 	const CTimeValue start = gEnv->pTimer->GetAsyncTime();
 	for (;;)
@@ -763,7 +843,7 @@ void LoadtimePrewarm()
 		gRenDev->ExecuteRenderThreadCommand([]() { RT_PrepareForLoop(); }, ERenderCommandFlags::None);
 		gcpRendD3D->FlushRTCommands(true, true, true);
 		const float waited = (gEnv->pTimer->GetAsyncTime() - start).GetSeconds();
-		if (ReadyForLoop())
+		if (s_loopReady.load(std::memory_order_acquire))
 		{
 			CryLogAlways("[XUI2DL] render resources ready for the loading loop after %.3f s", waited);
 			return;
@@ -771,6 +851,7 @@ void LoadtimePrewarm()
 		if (waited >= 2.0f)
 		{
 			CryLogAlways("[XUI2DL] render resources or shader not ready 2 s before the loading loop; the loop will not draw the retained layers");
+			s_loopNoDraw.store(true, std::memory_order_release);
 			return;
 		}
 		CrySleep(10);
@@ -790,15 +871,10 @@ void RT_CreateResources()
 
 void RT_ReleaseResources()
 {
+	// Only the render resources: the retained snapshot is the caller's state and survives a level unload
+	// (FRR_SYSTEM_RESOURCES); RT_ReleaseRetained drops it when the renderer shuts down.
 	s_deviceAvailable.store(false, std::memory_order_release);
-	SSnapshot* pDropped = nullptr;
-	{
-		CryAutoCriticalSection lock(s_currentLock);
-		pDropped = s_pCurrent;
-		s_pCurrent = nullptr;
-		s_layersHeld.store(0, std::memory_order_relaxed);
-	}
-	SnapshotRelease(pDropped);   // render thread (resource release): the textures go at once
+	s_loopReady.store(false, std::memory_order_release);
 
 	SResources* const pRes = s_pRes;
 	if (!pRes)
@@ -817,6 +893,21 @@ void RT_ReleaseResources()
 	SAFE_RELEASE(pRes->pShader);
 	delete pRes;
 	CryLogAlways("[XUI2DL] render resources released");
+}
+
+void RT_ReleaseRetained()
+{
+	SSnapshot* pDropped = nullptr;
+	{
+		CryAutoCriticalSection lock(s_currentLock);
+		pDropped = s_pCurrent;
+		s_pCurrent = nullptr;
+		s_layersHeld.store(0, std::memory_order_relaxed);
+	}
+	if (!pDropped)
+		return;
+	SnapshotRelease(pDropped);   // render thread, before CTexture::ShutDown: the textures go at once
+	CryLogAlways("[XUI2DL] retained layers dropped (renderer shutdown)");
 }
 
 void EndFrame(const SDisplayContextKey& key)
@@ -857,6 +948,9 @@ void RT_LoadtimeUpdate(float dtSeconds)
 
 void RT_LoadtimeRender()
 {
+	// The prewarm timed out: this loop does not draw (and counts nothing).
+	if (s_loopNoDraw.load(std::memory_order_acquire))
+		return;
 	// Nothing to draw, or not prepared: never create resources or compile shaders inside the loop (L0 survey C.2).
 	if (!s_deviceAvailable.load(std::memory_order_acquire) || !ReadyForLoop())
 		return;
@@ -877,8 +971,13 @@ void RT_LoadtimeRender()
 	const ILoadtimeCallback* const pCallback = gRenDev->m_pRT->m_pLoadtimeCallback;
 	const bool bClear = !pCallback || pCallback == &s_stopMarker;
 	// The display context's own key is not known here: the default key resolves to the active display context.
+	const uint64 skippedBefore = s_drawsSkipped.load(std::memory_order_relaxed);
 	if (RT_DrawLayers(*pRes, *pSnap, SDisplayContextKey{}, bClear) > 0)
 		s_loopFramesDrawn.fetch_add(1, std::memory_order_relaxed);
+	const uint64 skipped = s_drawsSkipped.load(std::memory_order_relaxed) - skippedBefore;
+	if (skipped > 0 && !s_loopFailLogged.exchange(true, std::memory_order_acq_rel))
+		CryLogAlways("[XUI2DL] a loading-loop draw failed after the prewarm (%llu layer draw(s) skipped); further failures in this loop are only counted in drawsSkipped",
+		             (unsigned long long)skipped);
 	RT_Free(pSnap);   // never drops the last reference on the render loading thread
 }
 
@@ -886,6 +985,7 @@ void LoadtimeAutoStart()
 {
 	// The conditions of CFlashUI::StartRenderThread (minus gfx_loadtimethread, which is FlashUI's own
 	// switch): never in the editor, only with a render thread, not for asynchronous level loads.
+	s_loopNoDraw.store(false, std::memory_order_release);   // a flag left by a loop someone else stopped
 	if (gEnv->IsEditor() || !s_loadtimeRegistered.load(std::memory_order_acquire) || s_loadtimeAutoOwned)
 		return;
 	SRenderThread* const pRT = gRenDev->m_pRT;
@@ -920,6 +1020,7 @@ void LoadtimeAutoRelease()
 		return;
 	gcpRendD3D->StopLoadtimeFlashPlayback();
 	gEnv->pCryPak->LockReadIO(false);
+	s_loopNoDraw.store(false, std::memory_order_release);   // the loop has stopped
 	CryLogAlways("[XUI2DL] loading loop for the registered loading-loop update released");
 }
 
