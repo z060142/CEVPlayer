@@ -372,7 +372,9 @@ python EnginePatch/apply_xui2dl.py /path/to/engine --remove   # remove the hooks
 The script copies `Code/CryEngine/RenderDll/XUI2DL/` and `Engine/Shaders/HWScripts/CryFX/XUI2DL.cfx` and inserts a few
 calls into renderer files between `// XUI2DL begin` / `// XUI2DL end` markers. It finds its places by anchor text,
 writes nothing when an anchor is missing, and can be run again. On a tree that already has engine patch 17 (XTFrame) it
-leaves the loading-loop hooks out; such a tree uses XUI2D anyway. XUI2DL is a deliberately small derivative of XUI2D
+leaves the loading-loop hooks out; such a tree uses XUI2D anyway. The two do not depend on each other: either works
+alone, and both can be in one renderer (apply the XTFrame patches first, then this script); the plug-in then uses XUI2D
+and XUI2DL creates no render resources. XUI2DL is a deliberately small derivative of XUI2D
 (solid, RGBA and packed YUV layers, source-over blending, viewport and scissor, loading loop, its own resources) and
 is maintained for bugs and compatibility only. Design and limits: [docs/design/M11-xui2dl.md](docs/design/M11-xui2dl.md).
 
