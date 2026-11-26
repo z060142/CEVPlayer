@@ -45,3 +45,20 @@
 不 `git add -A`、不 `git stash`；提交訊息英文，前綴 `feat:`，結尾 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。證據放 `E:/coding3/xt-bench/cev-p1/`。GameSDK 範例專案唯讀。
 
 報告（繁體中文、精簡，寫在最後訊息裡）：每一列改成什麼寫法與依據（引擎原始碼的檔名行號）；清查第 5 列找到的欄位清單與各自的處理；舊圖／舊存檔是否相容；建置與自測結果；哪些只有讀碼沒有畫面驗證；提交雜湊。
+
+## P1b · 節點函式的路徑參數（2026-11-26）
+
+模型：Opus。P1 已完成（`1003bd1`）。使用者說明：沒有已存的圖要保護，「弄好就對了」——相容性不是限制，每個填路徑的地方都要有選擇器。P1 留下兩處：
+
+| # | 位置 | 要求 |
+|---|---|---|
+| 1 | CryVS 全域函式（`CryVSEnv.cpp`：`PlayOnScreen`、`PlayOnMaterial`、`UI::PlayToSurface`、`Advanced::Open`）的 `Video` 與 `Material` 輸入 | `Material` 用引擎的 `CryVS::SMaterialFileName`；`Video` 註冊一個本插件的 CryVS 檔案型別（選擇器限 `.webm;.cevvideo`，起始資料夾 `Videos`，做法比照元件屬性已用的 `Serialization::ResourceFilePath`），節點上未接線時的預設值欄位要出現選擇器 |
+| 2 | Schematyc：由 `ApiTable` 產生的函式中接影片路徑或材質名稱的參數（如 Load／Open 類） | 參數型別改用既有的 `VideoFileName` 與 `Schematyc::MaterialFileName` |
+| 3 | CryVS 元件的成員函式若有同類參數 | 同 1 |
+
+- 綁定表（`ApiTable`）若需要新的參數種類（例如「影片路徑」「材質名稱」）就加，FlowGraph 那邊的行為不變。介面版號不動。
+- 自測數字若因型別註冊而改變，更新期望值並在報告寫明前後數字與原因。
+- 建置、啟動、提交規則與 P1 相同（社群版樹；共用樹不碰；不推送）。畫面沒看過就寫「只有讀碼」。
+- README／CHANGELOG 同步一句。
+
+報告：每一處的改法與引擎依據（檔名行號）、自測前後數字、只有讀碼的部分、提交雜湊、仍然沒有選擇器的路徑欄位（若有，逐一列出原因）。
