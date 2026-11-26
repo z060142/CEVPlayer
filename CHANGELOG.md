@@ -33,6 +33,9 @@ The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3
   surface outputs are unaffected).
 * On an engine with XTFrame (its XUI2D 2D pass with planar shading), the fullscreen output goes through that XUI2D
   instead, as one more screen surface drawn below the XTFrame UI; XUI2DL is not used there.
+* With XTFrame's XUI2D and `XUI2D_Patched` bit 512, fullscreen players also keep playing during level loading screens: an
+  order-150 loading-loop callback draws the last fullscreen frame composed before the load (below the XTFrame loading
+  UI); `cev_info` reports `loop=0|1`.
 * `cev_stats` is no longer drawn on screen; it only writes the log (and the `cev_stats_file` CSV).
 * C++ interface `IVideoPlugin` / `IVideoPlayer`, interface version 5 (`CreatePlayerForSurface`, `FindPlayerBySurface`,
   `GetSurfaceId`, `GetPixelLayout`, `GetDecodeBackend`).

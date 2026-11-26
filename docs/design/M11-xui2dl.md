@@ -131,6 +131,17 @@ typedef struct XUI2DLApi
 - 有補丁 17 的引擎：沿用它的回呼與自動進出，XUI2DL 只加繪製掛點。
 - 待與 XTFrame 主線確認：兩者並存時後緩衝由誰清、XTFrame 的讀取畫面清除輸出時影片是否被擦掉。
 
+### 7.1 XUI2D 後端的讀取迴圈（L6）
+
+有 XTFrame 的引擎（全螢幕走 XUI2D，§8 的 L5）在讀取迴圈中也畫全螢幕影片。條件（`FullscreenOutput::LoopDrawAvailable()`，`cev_info` 的 `loop=`）：後端 `XUI2D`、`XUI2D_Patched & 512`、讀取來源 `patch17`；隱藏 cvar `cev_debug_noLoopDraw 1` 視 512 為不存在（只供測試）。不成立時維持 L5 的行為（迴圈中不畫、全螢幕播放器在讀取中暫停）。
+
+- 第二個 loadtime 回呼（`FullscreenXUI2D` 的 `CLoopDraw`），order **150**，與 M10 的播放器 tick 回呼（order 100）分開。登記／註銷在 `CPlayerManager::UpdateLoadtimeRegistration()`：有全螢幕播放器、`cev_loadtime 1`、迴圈繪製可用時登記，否則註銷；照 M10 的規則決定在鎖內、呼叫在鎖外，不在回呼內登記。
+- `LoadtimeUpdate`：取「讀取開始前最後一次主執行緒 `Present` 組好的幀」（凍結的那一份：黑邊、目的矩形、平面參數、句柄、世代；每次 `Present` 覆寫，讀取期間主執行緒不 `Present`，所以迴圈中不變），非空時對我方表面的 `IXUILoadFrame` 做 `Begin(世代)`＋`ClearOutput(0,0,0,1)`＋`Submit`；空的就不 `Begin`。`LoadtimeRender`：該圈有 `Submit` 才 `Execute`。
+- `GetLoadFrame` 在主執行緒建表面時取得；`End` 在讀取後第一次主執行緒 `Present` 的開頭（迴圈已停），之後回到每幀 `Submit`。
+- 全螢幕播放器在讀取中執行（`RunsDuringLoad`）的條件加上這個後端（`LoopDrawAvailable()`、來源 `patch17`、`cev_loadtime 1`、沒有材質綁定）；迴圈內凍結貼圖身分沿用 L3c 的同一套程式。讀取期間 `Age` 不執行（主執行緒不 `Present`），凍結幀用到的貼圖不會在讀取中釋放；讀取後第一次 `Present` 先取回仍在用的貼圖再 `Age`。
+- 規則出處（XTFrame CE-117，`XUI2D_Patched` bit 9 = 512；CE_XTUI 倉 `docs/10-loading-time.md` §10.8、`docs/08` CE-117／CE-118、共用樹 `IXUIRenderer.h` 的 `IXUILoadFrame::ClearOutput` 註解）：①迴圈中不重播，Update 階段 `Begin`＋`Submit`、Render 階段 `Execute`；②同一圈只有第一個 `Execute` 的 screen surface 入口的 `ClearOutput` 生效；③疊放由回呼 order 決定，小的在下，`SetSurfaceOrder` 在迴圈中無作用；④回呼內不呼叫 `IXUIRenderer::Submit`、不 Add／Remove 回呼，`CreateScreenSurface`／`SetSurfaceOrder`／`WrapEngineTexture`／`GetLoadFrame` 在讀取前於主執行緒做完，`End` 在主執行緒；⑤包裝的貼圖每次繪製以引擎 id 重新解析，原地更新直接反映。
+- 實測（L6，待裁決）：關卡已載入時再讀取（換關卡），XUI2D 在迴圈開始後約 2 ms 釋放並重建資源、世代改變，凍結幀的句柄此後被 `Begin` 拒絕（`eLoadFrame_Generation`），該次讀取只畫最初幾圈；依規則④迴圈中不能重新包裝。
+
 ## 8. 階段
 
 | 單 | 內容 | 驗證的樹 |
@@ -148,5 +159,5 @@ typedef struct XUI2DLApi
 - 出貨組態的著色器快取（§5）。
 - `cev_stats` 的畫面文字：XUI2DL 沒有字形，待使用者決定是移除（只留 log 與 CSV）還是另想辦法。
 - 社群版樹的渲染器有第三方改動，套用腳本的錨點要在 L3／L4 另外確認。
-- 讀取迴圈（L3c）：讀取期間才開始的全螢幕播放器，要到讀取結束後才出現（迴圈內不建立貼圖、不送清單）；讀取中全螢幕播放器的貼圖身分凍結，串流換解析度或排列需求改變時迴圈內保留舊貼圖與畫面，讀取結束後才重建。
+- 讀取迴圈（L3c；XUI2D 後端 L6 相同）：讀取期間才開始的全螢幕播放器，要到讀取結束後才出現（迴圈內不建立貼圖、不送清單；XUI2D 後端畫的是讀取前最後一次組好的幀）；讀取中全螢幕播放器的貼圖身分凍結，串流換解析度或排列需求改變時迴圈內保留舊貼圖與畫面，讀取結束後才重建。
 - `NOTICE.md` 目前只有來源與維護說明，沒有附 MIT 的版權聲明與許可全文；要不要補由使用者決定。
