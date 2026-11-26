@@ -43,6 +43,7 @@ namespace CEVPlayer
 		float m_cevHiddenStopSeconds = 2.f; // cev_hiddenStopSeconds: hidden surface players stop decoding after this long (0 = never)
 		int m_cevAllowPlanar = 1;  // cev_allowPlanar: 0 = surface players always use RGBA8 (no packed planar layouts)
 		int m_cevLoadtime = 1;     // cev_loadtime (M10): 0 = pause everything while a level loads
+		int m_cevDebugNoLoopDraw = 0; // cev_debug_noLoopDraw (L6, hidden, test only): 1 = XUI2D_Patched bit 512 treated as absent
 	};
 
 	extern SPluginEnv* mEnv;

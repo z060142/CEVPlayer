@@ -389,6 +389,13 @@ namespace CEVPlayer
 			pHook(dt);
 	}
 
+	namespace
+	{
+		//! L6: the XUI2D backend's loading-loop drawing runs after the players' tick (order 100, the texture uploads of
+		//! the iteration) and before the UIs (200), so the video lands under the XTFrame UI (XTFrame docs/10 section 10.8).
+		constexpr int kLoopDrawOrder = 150;
+	}
+
 	void CPlayerManager::UpdateLoadtimeRegistration(bool forceRemove)
 	{
 		if (!IsMainThread())
@@ -406,13 +413,32 @@ namespace CEVPlayer
 			return;
 		}
 		bool want = false;
+		bool wantLoopDraw = false;
 		{
 			CTickLock lock(m_tickMutex); // decision only
 			want = !forceRemove && !m_shutdown && mEnv->m_cevLoadtime != 0 && RenderBridge::LoadtimeAvailable()
 				&& (!m_players.empty() || Contract::HasPendingCommands());
+			// L6: the XUI2D backend's order-150 loop drawing, while a fullscreen player exists
+			wantLoopDraw = !forceRemove && !m_shutdown && mEnv->m_cevLoadtime != 0 && !m_fullscreen.empty() && FullscreenOutput::LoopDrawAvailable();
 		}
-		// engine call without any lock held
-		if (want == m_loadtimeRegistered.load() || gEnv == nullptr || gEnv->pRenderer == nullptr)
+		// engine calls without any lock held
+		if (gEnv == nullptr || gEnv->pRenderer == nullptr)
+			return;
+#if CEV_HAVE_LOADTIME_CALLBACKS
+		if (wantLoopDraw != m_loopDrawRegistered)
+		{
+			if (ILoadtimeCallback* const pLoopDraw = FullscreenOutput::LoopDrawCallback())
+			{
+				if (wantLoopDraw)
+					gEnv->pRenderer->AddLoadtimeCallback(pLoopDraw, kLoopDrawOrder);
+				else
+					gEnv->pRenderer->RemoveLoadtimeCallback(pLoopDraw);
+				m_loopDrawRegistered = wantLoopDraw;
+				LogAlways("fullscreen output: loading-loop drawing callback %s", wantLoopDraw ? "registered (order 150)" : "removed");
+			}
+		}
+#endif
+		if (want == m_loadtimeRegistered.load())
 			return;
 		const RenderBridge::ELoadtimeSource source = want ? RenderBridge::LoadtimeSource() : m_loadtimeSource;
 		bool done = false;
@@ -465,7 +491,7 @@ namespace CEVPlayer
 		for (CVideoPlayerImpl* p : m_fullscreen)
 		{
 			if (!p->RunsDuringLoad())
-				continue; // XUI2D backend / material binding: not ticked here, unchanged
+				continue; // material binding / no loop drawing (RunsDuringLoad): not ticked here, unchanged
 			p->SetLoadFrozen(true);
 			m_frozenPlayers.push_back(p);
 		}

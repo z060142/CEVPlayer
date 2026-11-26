@@ -3,7 +3,9 @@
 #include "FullscreenXUI2D.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <mutex>
 #include <unordered_map>
 
 #include <CryCore/Platform/CryWindows.h> // GetModuleHandleA / GetProcAddress
@@ -47,6 +49,40 @@ namespace CEVPlayer
 			std::vector<uint32> s_indices;
 			std::vector<SDrawCmd> s_cmds;
 			std::vector<float> s_params;
+
+			// L6: the frame the loading loop draws. Present (main thread) replaces it with every frame it composes, empty
+			// or not; the main thread does not present while a level loads, so the loop draws the last frame composed
+			// before the load, unchanged for the whole loop. The texture handles in it were made on the main thread under
+			// `generation`; the engine textures stay referenced by s_textures (Age does not run during the load).
+			struct SFrozen
+			{
+				std::vector<SVertex> vertices;
+				std::vector<uint32> indices;
+				std::vector<SDrawCmd> cmds;
+				std::vector<float> params;
+				int width = 0, height = 0;   // SFrame::targetWidth / targetHeight
+				uint32 generation = 0;
+				uint32 mainFrame = 0;        // gEnv->nMainFrameID of the Present that composed it (log only)
+				IXUILoadFrame* pFrame = nullptr;   // the surface's loading-loop entry (GetLoadFrame, main thread)
+			};
+			std::mutex s_frozenMutex;   // main thread writes in Present, the loop reads in LoadtimeUpdate (short copies)
+			SFrozen s_frozen;
+			IXUILoadFrame* s_pLoadFrame = nullptr;   // main thread: GetLoadFrame of s_surface
+
+			// Loop-thread state of the current iteration and the counters of one loading loop (reset by EndLoopIfBegun).
+			IXUILoadFrame* s_pLoopFrame = nullptr;   // loop thread: the entry submitted in this iteration's update
+			std::atomic<bool> s_loopBegun{ false };  // a Begin succeeded since the last End
+			std::atomic<uint32> s_loopIterations{ 0 }, s_loopEmpty{ 0 }, s_loopBegins{ 0 }, s_loopRefused{ 0 }, s_loopExecuted{ 0 }, s_loopExecuteFailed{ 0 };
+
+			void ClearFrozen()
+			{
+				std::lock_guard<std::mutex> lock(s_frozenMutex);
+				s_frozen.vertices.clear();
+				s_frozen.indices.clear();
+				s_frozen.cmds.clear();
+				s_frozen.params.clear();
+				s_frozen.pFrame = nullptr;
+			}
 
 			const char* RendererModuleName(IRenderer* pRenderer)
 			{
@@ -181,16 +217,115 @@ namespace CEVPlayer
 				}
 			}
 
+			//! Main thread. End of the loading-loop entry when a loop began it since the last call (IXUILoadFrame::End
+			//! "after the loading loop stopped"), with one log line of that loop's counters.
+			void EndLoop(const char* why)
+			{
+				const uint32 iterations = s_loopIterations.exchange(0);
+				const uint32 empty = s_loopEmpty.exchange(0);
+				const uint32 begins = s_loopBegins.exchange(0);
+				const uint32 refused = s_loopRefused.exchange(0);
+				const uint32 executed = s_loopExecuted.exchange(0);
+				const uint32 executeFailed = s_loopExecuteFailed.exchange(0);
+				const bool begun = s_loopBegun.exchange(false);
+				if (iterations == 0 && !begun)
+					return;
+				SLoadFrameStats stats;
+				if (s_pLoadFrame != nullptr)
+					s_pLoadFrame->GetStats(stats);
+				if (begun && s_pLoadFrame != nullptr)
+					s_pLoadFrame->End();
+				uint32 frozenFrame = 0, frozenCmds = 0;
+				{
+					std::lock_guard<std::mutex> lock(s_frozenMutex);
+					frozenFrame = s_frozen.mainFrame;
+					frozenCmds = static_cast<uint32>(s_frozen.cmds.size());
+				}
+				LogAlways("fullscreen output: loading loop (XUI2D surface %u, %s): %u iteration(s), %u without a frame, %u begun, %u refused (last refusal %u), "
+				          "%u executed, %u execute(s) refused; End %s; frozen frame of main frame %u (%u draw(s)), main frame now %u; entry stats executed %u draws %u "
+				          "skipped %u clears %u white %u dropped %u output %ux%u",
+					s_surface, why, iterations, empty, begins, refused, stats.lastRefusal, executed, executeFailed, begun ? "called" : "not needed", frozenFrame, frozenCmds,
+					gEnv->nMainFrameID, stats.executed, stats.draws, stats.drawsSkipped, stats.clears, stats.whiteFallbacks, stats.droppedFrames, stats.outputWidth,
+					stats.outputHeight);
+			}
+
 			void DestroySurface(IXUIRenderer* pRenderer, const char* why)
 			{
 				if (s_surface == 0)
 					return;
+				EndLoop(why); // the entry belongs to the surface: given back before it goes
+				ClearFrozen();
+				s_pLoadFrame = nullptr;
 				if (pRenderer != nullptr)
 					pRenderer->DestroySurface(s_surface);
 				LogAlways("fullscreen output: XUI2D surface %u destroyed (%s)", s_surface, why);
 				s_surface = 0;
 				s_viewW = s_viewH = 0;
 			}
+
+#if CEV_HAVE_LOADTIME_CALLBACKS
+			//! L6: the order-150 loadtime callback (between the texture sources at 100 and the UIs at 200, so the video
+			//! lands under the XTFrame UI). XTFrame CE-117 / docs/10 section 10.8 (XUI2D_Patched bit 512): Begin + Submit in
+			//! the update phase, Execute in the render phase; only the first screen-surface entry to execute in an
+			//! iteration gets its ClearOutput, so asking for it every time clears only when nothing was drawn before.
+			class CLoopDraw final : public ILoadtimeCallback
+			{
+			public:
+				void LoadtimeUpdate(float) override
+				{
+					s_pLoopFrame = nullptr;
+					s_loopIterations.fetch_add(1, std::memory_order_relaxed);
+					std::lock_guard<std::mutex> lock(s_frozenMutex);
+					if (s_frozen.pFrame == nullptr || s_frozen.cmds.empty())
+					{
+						s_loopEmpty.fetch_add(1, std::memory_order_relaxed);
+						return; // nothing composed before the load: no Begin in this iteration
+					}
+					if (!s_frozen.pFrame->Begin(s_frozen.generation))
+					{
+						s_loopRefused.fetch_add(1, std::memory_order_relaxed);
+						return;
+					}
+					s_loopBegun.store(true, std::memory_order_relaxed);
+					s_loopBegins.fetch_add(1, std::memory_order_relaxed);
+					s_frozen.pFrame->ClearOutput(0.f, 0.f, 0.f, 1.f);
+					SPass pass;
+					std::memset(&pass, 0, sizeof(pass));
+					pass.target = kSurfaceTarget;
+					pass.firstCmd = 0;
+					pass.cmdCount = static_cast<uint32>(s_frozen.cmds.size());
+					SFrame f = {};
+					f.vertices = s_frozen.vertices.data();
+					f.vertexCount = static_cast<uint32>(s_frozen.vertices.size());
+					f.indices = s_frozen.indices.data();
+					f.indexCount = static_cast<uint32>(s_frozen.indices.size());
+					f.cmds = s_frozen.cmds.data();
+					f.cmdCount = static_cast<uint32>(s_frozen.cmds.size());
+					f.passes = &pass;
+					f.passCount = 1;
+					f.params = s_frozen.params.empty() ? nullptr : s_frozen.params.data();
+					f.paramCount = static_cast<uint32>(s_frozen.params.size());
+					f.targetWidth = s_frozen.width;
+					f.targetHeight = s_frozen.height;
+					s_frozen.pFrame->Submit(f); // deep copy into the entry's arena
+					s_pLoopFrame = s_frozen.pFrame;
+				}
+
+				bool LoadtimeRender() override
+				{
+					IXUILoadFrame* const pFrame = s_pLoopFrame;
+					s_pLoopFrame = nullptr;
+					if (pFrame == nullptr)
+						return true; // nothing submitted in this iteration: no Execute
+					if (pFrame->Execute())
+						s_loopExecuted.fetch_add(1, std::memory_order_relaxed);
+					else
+						s_loopExecuteFailed.fetch_add(1, std::memory_order_relaxed);
+					return true;
+				}
+			};
+			CLoopDraw s_loopDraw;
+#endif
 		}
 
 		int PatchedBits()
@@ -221,6 +356,8 @@ namespace CEVPlayer
 
 		void Present(const std::vector<SQuad>& quads, int outputW, int outputH)
 		{
+			// L6: the first main-thread frame after a loading loop gives the surface back before submitting to it.
+			EndLoop("loop ended");
 			IXUIRenderer* const pRenderer = Renderer();
 			const uint32 frame = gEnv->nMainFrameID;
 			const uint32 generation = pRenderer != nullptr ? pRenderer->GetResourceGeneration() : 0;
@@ -238,6 +375,7 @@ namespace CEVPlayer
 			}
 			if (pRenderer == nullptr || generation == 0)
 			{
+				ClearFrozen();
 				Age(nullptr, generation, frame); // no XUI2D device resources: nothing to draw into
 				return;
 			}
@@ -309,7 +447,9 @@ namespace CEVPlayer
 					if (s_surface != 0)
 					{
 						pRenderer->SetSurfaceOrder(s_surface, kSurfaceOrder);
-						LogAlways("fullscreen output: XUI2D surface %u created (order %d, generation %u)", s_surface, kSurfaceOrder, generation);
+						s_pLoadFrame = pRenderer->GetLoadFrame(s_surface); // L6: made here, before any load (main thread)
+						LogAlways("fullscreen output: XUI2D surface %u created (order %d, generation %u, loading-loop entry %s)", s_surface, kSurfaceOrder, generation,
+							s_pLoadFrame != nullptr ? "yes" : "none");
 					}
 				}
 				if (s_surface != 0)
@@ -341,7 +481,34 @@ namespace CEVPlayer
 					pRenderer->Submit(s_surface, f);
 				}
 			}
+
+			// L6: this frame becomes the one a loading loop starting before the next Present draws (the same draws, the
+			// same handles; empty when nothing was submitted).
+			{
+				std::lock_guard<std::mutex> lock(s_frozenMutex);
+				const bool submitted = !s_cmds.empty() && s_surface != 0;
+				s_frozen.vertices.assign(s_vertices.begin(), submitted ? s_vertices.end() : s_vertices.begin());
+				s_frozen.indices.assign(s_indices.begin(), submitted ? s_indices.end() : s_indices.begin());
+				s_frozen.cmds.assign(s_cmds.begin(), submitted ? s_cmds.end() : s_cmds.begin());
+				s_frozen.params.assign(s_params.begin(), submitted ? s_params.end() : s_params.begin());
+				s_frozen.width = outputW;
+				s_frozen.height = outputH;
+				s_frozen.generation = generation;
+				s_frozen.mainFrame = frame;
+				s_frozen.pFrame = submitted ? s_pLoadFrame : nullptr;
+			}
+			// The textures of the frozen frame are among those just used: Age does not run while a level loads (no
+			// Present), so none of them is released during the loop.
 			Age(pRenderer, generation, frame);
+		}
+
+		ILoadtimeCallback* LoopCallback()
+		{
+#if CEV_HAVE_LOADTIME_CALLBACKS
+			return &s_loopDraw;
+#else
+			return nullptr;
+#endif
 		}
 
 		void Shutdown()

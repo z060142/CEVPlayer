@@ -7,6 +7,7 @@
 
 #include <CryRenderer/IRenderer.h>
 
+#include "Render/RenderBridge.h"
 #include "Render/XUI2DLClient.h"
 #if CEV_HAVE_XUI2D
 #include "Render/FullscreenXUI2D.h"
@@ -246,7 +247,8 @@ namespace CEVPlayer
 			{
 				s_backend = EBackend::XUI2D;
 				s_planarXui2d = (FullscreenXUI2D::PatchedBits() & 256) != 0;
-				LogAlways("fullscreen output: backend xui2d (XUI2D_Patched 0x%x, planar %d)", static_cast<unsigned>(FullscreenXUI2D::PatchedBits()), s_planarXui2d ? 1 : 0);
+				LogAlways("fullscreen output: backend xui2d (XUI2D_Patched 0x%x, planar %d, load clear once (512) %d)", static_cast<unsigned>(FullscreenXUI2D::PatchedBits()),
+					s_planarXui2d ? 1 : 0, (FullscreenXUI2D::PatchedBits() & 512) != 0 ? 1 : 0);
 				return s_backend;
 			}
 #endif
@@ -277,6 +279,29 @@ namespace CEVPlayer
 			case EBackend::XUI2DL: return (s_pApi->caps & XUI2DL_CAP_YUV) != 0;
 			default:               return false;
 			}
+		}
+
+		bool LoopDrawAvailable()
+		{
+#if CEV_HAVE_XUI2D && CEV_HAVE_LOADTIME_CALLBACKS
+			// XUI2D_Patched bit 9 (512): within one loading-loop iteration only the first screen-surface entry to execute
+			// has its ClearOutput applied (XTFrame CE-117, patch 19; kXui2DPatched_LoadClearOnce in the renderer's
+			// RenderDll/XUI2D/XUI2DRenderer.h, IXUIRenderer.h IXUILoadFrame::ClearOutput). Without it the UI's clear wipes
+			// a video drawn before it.
+			return Backend() == EBackend::XUI2D && (FullscreenXUI2D::PatchedBits() & 512) != 0 && mEnv->m_cevDebugNoLoopDraw == 0
+				&& RenderBridge::LoadtimeSource() == RenderBridge::ELoadtimeSource::Patch17;
+#else
+			return false;
+#endif
+		}
+
+		ILoadtimeCallback* LoopDrawCallback()
+		{
+#if CEV_HAVE_XUI2D
+			return FullscreenXUI2D::LoopCallback();
+#else
+			return nullptr;
+#endif
 		}
 
 		bool PresentsAt(EStep step)

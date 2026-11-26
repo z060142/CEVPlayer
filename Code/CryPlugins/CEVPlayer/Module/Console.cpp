@@ -1905,7 +1905,8 @@ namespace CEVPlayer
 		//! L4: the fullscreen output backend (cev_info, cev_surfaces).
 		void LogFullscreenBackend(const char* cmd)
 		{
-			LogAlways("%s: fullscreen backend: %s planar=%d", cmd, FullscreenOutput::BackendName(), FullscreenOutput::SupportsPlanar() ? 1 : 0);
+			LogAlways("%s: fullscreen backend: %s planar=%d loop=%d", cmd, FullscreenOutput::BackendName(), FullscreenOutput::SupportsPlanar() ? 1 : 0,
+				FullscreenOutput::LoopDrawAvailable() ? 1 : 0);
 		}
 
 		void CmdSurfaces(IConsoleCmdArgs*)
@@ -2015,6 +2016,7 @@ namespace CEVPlayer
 		REGISTER_CVAR2("cev_allowPlanar", &mEnv->m_cevAllowPlanar, 1, VF_NULL, "1 = surface players switch to a packed planar texture (R8: Y, U, V [, A]) while every consumer of the texture source contract accepts it; 0 = always RGBA8");
 		ConsoleRegistrationHelper::Register("cev_hiddenStopSeconds", &mEnv->m_cevHiddenStopSeconds, 2.f, VF_NULL, "Surface players that no consumer sees only decode (no copy / conversion / upload); after this many seconds hidden in a row they stop decoding the video. 0 = never stop");
 		REGISTER_CVAR2("cev_loadtime", &mEnv->m_cevLoadtime, 1, VF_NULL, "Keep texture-only players running during level loading screens (needs a renderer with load-time callbacks). 0 = pause everything while a level loads");
+		REGISTER_CVAR2("cev_debug_noLoopDraw", &mEnv->m_cevDebugNoLoopDraw, 0, VF_INVISIBLE, "Test only (L6): 1 = the XUI2D fullscreen backend treats XUI2D_Patched bit 512 as absent (no drawing in the loading loop)");
 	}
 
 	void UnregisterConsole()
@@ -2029,7 +2031,7 @@ namespace CEVPlayer
 			pConsole->RemoveCommand(name);
 		pConsole->RemoveCommand("cev_probe_loadtime");
 
-		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_decodeMode", "cev_decodeAutoMinHeight", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds", "cev_allowPlanar", "cev_loadtime" };
+		static const char* const variables[] = { "cev_stats", "cev_decodeThreads", "cev_decodeMode", "cev_decodeAutoMinHeight", "cev_log", "cev_audio_enable", "cev_muteOnFocusLoss", "cev_disableEmbeddedAudio", "cev_variant", "cev_cueForceFallback", "cev_volume", "cev_hiddenStopSeconds", "cev_allowPlanar", "cev_loadtime", "cev_debug_noLoopDraw" };
 		for (const char* name : variables)
 			pConsole->UnregisterVariable(name, true);
 	}

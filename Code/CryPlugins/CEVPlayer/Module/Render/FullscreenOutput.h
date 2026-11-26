@@ -10,6 +10,8 @@
 
 #include <CEVPlayer/IVideoPlayer.h>
 
+struct ILoadtimeCallback;
+
 namespace CEVPlayer
 {
 	namespace FullscreenOutput
@@ -56,6 +58,15 @@ namespace CEVPlayer
 		const char* BackendName();
 		//! XUI2D: XUI2D_Patched has the planar bit (256); XUI2DL: the backend has XUI2DL_CAP_YUV.
 		bool SupportsPlanar();
+		//! L6: the XUI2D backend can draw the fullscreen layers inside the renderer's loading loop: backend XUI2D,
+		//! XUI2D_Patched has bit 512 (one clear per loop iteration, XTFrame CE-117) and the loading-loop callbacks of
+		//! patch 17 are available (RenderBridge source patch17). The hidden cvar cev_debug_noLoopDraw 1 treats bit 512
+		//! as absent (test only). Read every call.
+		bool LoopDrawAvailable();
+		//! L6: the order-150 loadtime callback that draws the frozen fullscreen frame in the loading loop
+		//! (FullscreenXUI2D::LoopCallback); null when the plug-in was built without the XUI2D backend or without
+		//! loading-loop callbacks. Not null even while LoopDrawAvailable() is false (so it can be removed).
+		ILoadtimeCallback* LoopDrawCallback();
 		//! The step the current backend takes its layers in (a Present from the other step does nothing).
 		bool PresentsAt(EStep step);
 		//! Called once per frame from each step. Turns the layers (first = bottom) into the backend's quads. XUI2DL: a

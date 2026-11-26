@@ -91,6 +91,7 @@ namespace CEVPlayer
 		//! M10: the player outputs only to its texture (not fullscreen, no material binding), so it can run in the
 		//! renderer's loading loop. L3c: a fullscreen player without material binding also runs there when the
 		//! fullscreen backend is XUI2DL, the loading-loop source is xui2dl and cev_loadtime is 1 (the loop draws it).
+		//! L6: also with the XUI2D backend when FullscreenOutput::LoopDrawAvailable() (source patch17).
 		bool RunsDuringLoad() const;
 		//! L3c: set by CPlayerManager::LoadtimeTick around the loading-loop tick of a fullscreen player. While set the
 		//! texture identity is frozen: no texture is created, released or rebuilt and the layout does not switch; a

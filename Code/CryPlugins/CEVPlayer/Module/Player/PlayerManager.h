@@ -64,7 +64,8 @@ namespace CEVPlayer
 		//! engine call (Add / Remove, or XUI2DLApi::SetLoadtimeUpdate) without any lock: it must never run while this
 		//! thread holds the tick lock (the renderer's dispatch holds its registry lock while our callback waits for the
 		//! tick lock). The call goes to RenderBridge::LoadtimeSource() (L3a); removal goes to the source registered
-		//! with. `forceRemove`: shutdown.
+		//! with. `forceRemove`: shutdown. L6: the same step adds / removes the XUI2D backend's loop drawing callback
+		//! (order 150) while a fullscreen player exists and FullscreenOutput::LoopDrawAvailable().
 		void UpdateLoadtimeRegistration(bool forceRemove = false);
 		//! M10: players that output only to their texture keep running during level loads (cev_loadtime, callback
 		//! registered).
@@ -181,6 +182,7 @@ namespace CEVPlayer
 		std::unique_ptr<CLoadtimeCallback> m_loadtimeCallback; // only with CEV_HAVE_LOADTIME_CALLBACKS
 		std::atomic<bool> m_loadtimeRegistered{ false }; // written by the main thread, read by LoadModeActive() on any thread
 		RenderBridge::ELoadtimeSource m_loadtimeSource = RenderBridge::ELoadtimeSource::None; // main thread: where it is registered
+		bool m_loopDrawRegistered = false; // L6, main thread: FullscreenOutput::LoopDrawCallback() is registered (order 150)
 		bool m_inLoadTick = false;   // set while LoadtimeTick runs (renderer calls are allowed then)
 	};
 }

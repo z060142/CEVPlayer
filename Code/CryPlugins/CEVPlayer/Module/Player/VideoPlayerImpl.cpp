@@ -1644,9 +1644,19 @@ namespace CEVPlayer
 		if (!m_fullscreen)
 			return true; // M10: texture-only (surface) player
 		// L3c: the XUI2DL loading loop draws the retained fullscreen layers, so the fullscreen player keeps running there
-		// (texture identity frozen, see SetLoadFrozen). With the XUI2D backend it does not (another task).
-		return mEnv->m_cevLoadtime != 0 && FullscreenOutput::Backend() == FullscreenOutput::EBackend::XUI2DL
-			&& RenderBridge::LoadtimeSource() == RenderBridge::ELoadtimeSource::XUI2DL;
+		// (texture identity frozen, see SetLoadFrozen). L6: the same with the XUI2D backend when it draws the frozen frame
+		// in the loop (LoopDrawAvailable: XUI2D_Patched bit 512 and loading-loop source patch17).
+		if (mEnv->m_cevLoadtime == 0)
+			return false;
+		switch (FullscreenOutput::Backend())
+		{
+		case FullscreenOutput::EBackend::XUI2DL:
+			return RenderBridge::LoadtimeSource() == RenderBridge::ELoadtimeSource::XUI2DL;
+		case FullscreenOutput::EBackend::XUI2D:
+			return FullscreenOutput::LoopDrawAvailable() && RenderBridge::LoadtimeSource() == RenderBridge::ELoadtimeSource::Patch17;
+		default:
+			return false;
+		}
 	}
 
 	void CVideoPlayerImpl::ReapplyLevelLoadPause()
