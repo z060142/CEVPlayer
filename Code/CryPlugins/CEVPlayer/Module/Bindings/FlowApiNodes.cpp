@@ -1,13 +1,15 @@
-// FlowGraph nodes: ten hand described composite nodes in three categories (docs/design/M6-ui-source.md section 4.2).
+// FlowGraph nodes: eleven hand described composite nodes in three categories (docs/design/M6-ui-source.md section 4.2).
 // Registered through the engine's auto registration list (CAutoRegFlowNodeBase), so CVideoPlugin's
 // PLUGIN_FLOWNODE_REGISTER picks them up.
 //
 //   CEVPlayer:PlayOnScreen, CEVPlayer:PlayOnMaterial          ready to use: the node owns its player
+//   CEVPlayer:AttachToFlash                                    S2: a surface in a Flash UI movie clip (no player of its own)
 //   CEVPlayer:UI:PlayToSurface, SurfaceInfo, SurfaceEvents for UIs: a named surface (surface id), no handle needed
 //   CEVPlayer:Advanced:Open, Transport, Settings, Info, Events   handle based building blocks
 //
 // The nodes contain no playback logic: every action and every value goes through the API table (Api::Call on a table
-// entry, by name). Players are addressed by the integer handles of CApiPlayers; the nodes never touch IVideoPlayer.
+// entry, by name). Players are addressed by the integer handles of CApiPlayers; the nodes never touch IVideoPlayer,
+// except CEVPlayer:AttachToFlash (S2), which calls IVideoPlugin::FindPlayerBySurface and the IVideoPlayer Flash functions.
 #include "StdAfx.h"
 #include "PluginEnv.h"
 
@@ -16,6 +18,8 @@
 
 #include <CryFlowGraph/IFlowBaseNode.h>
 #include <Cry3DEngine/IMaterial.h>
+#include <CrySystem/ICryPluginManager.h>
+#include <CEVPlayer/IVideoPlugin.h>
 
 #include "Bindings/ApiPlayers.h"
 #include "Bindings/ApiTable.h"
@@ -1068,6 +1072,77 @@ namespace CEVPlayer
 				}
 			};
 
+			// ========================================================================================== Flash UI (S2)
+			//! The one node that uses the C++ player API instead of the table: IVideoPlugin::FindPlayerBySurface and
+			//! IVideoPlayer::AttachToFlash / DetachFromFlash (docs/design/M12-scaleform-attach.md). No player of its own.
+			class CAttachToFlashNode final : public CFlowBaseNode<eNCT_Instanced>
+			{
+				enum EIn { eI_Attach, eI_Detach, eI_SurfaceId, eI_UIElement, eI_InstanceId, eI_MovieClip };
+				enum EOut { eO_Done, eO_Failed };
+
+			public:
+				virtual IFlowNodePtr Clone(SActivationInfo*) override { return new CAttachToFlashNode(); }
+				virtual void GetMemoryUsage(ICrySizer* pSizer) const override { pSizer->Add(*this); }
+
+				virtual void GetConfiguration(SFlowNodeConfig& config) override
+				{
+					static const SInputPortConfig in[] =
+					{
+						InputPortConfig_Void("Attach", _HELP("Shows the surface's video in MovieClip of the Flash UI element (the clip must exist; the picture has the video's size).")),
+						InputPortConfig_Void("Detach", _HELP("Takes the video out of MovieClip; with an empty UIElement out of every clip of the surface.")),
+						InputPortConfig<string>("SurfaceId", string(), _HELP("Surface whose video is shown (made by PlayToSurface, a Video Player component or C++).")),
+						InputPortConfig<string>("UIElement", string(), _HELP("Name of the Flash UI element (it must be loaded, e.g. shown once).")),
+						InputPortConfig<int>("InstanceId", 0, _HELP("Instance of the UI element (0 = the first one).")),
+						InputPortConfig<string>("MovieClip", string(), _HELP("Instance path of the movie clip inside the element, for example _root.screen.")),
+						{ 0 }
+					};
+					static const SOutputPortConfig out[] =
+					{
+						OutputPortConfig_Void("Done", _HELP("Attach or Detach was done.")),
+						OutputPortConfig_Void("Failed", _HELP("No such surface, or Scaleform, the element or the movie clip is not available; see the log.")),
+						{ 0 }
+					};
+					config.pInputPorts = in;
+					config.pOutputPorts = out;
+					config.sDescription = _HELP("Shows a surface's video in a movie clip of a Flash UI (Scaleform) element. A compatibility option: RGBA8, converted on the CPU. After the element is reloaded (UI reload, level change) trigger Attach again.");
+					config.SetCategory(EFLN_APPROVED);
+				}
+
+				virtual void ProcessEvent(EFlowEvent event, SActivationInfo* pActInfo) override
+				{
+					if (event != eFE_Activate)
+						return;
+					const bool attach = IsPortActive(pActInfo, eI_Attach);
+					const bool detach = IsPortActive(pActInfo, eI_Detach);
+					if (!attach && !detach)
+						return;
+					IVideoPlugin* const pPlugin = gEnv != nullptr && gEnv->pSystem != nullptr ? gEnv->pSystem->GetIPluginManager()->QueryPlugin<IVideoPlugin>() : nullptr;
+					IVideoPlayer* const pPlayer = pPlugin != nullptr ? pPlugin->FindPlayerBySurface(GetPortString(pActInfo, eI_SurfaceId).c_str()) : nullptr;
+					const string element = GetPortString(pActInfo, eI_UIElement);
+					const string clip = GetPortString(pActInfo, eI_MovieClip);
+					const int instance = GetPortInt(pActInfo, eI_InstanceId);
+					if (detach)
+					{
+						if (pPlayer != nullptr)
+						{
+							pPlayer->DetachFromFlash(element.empty() ? nullptr : element.c_str(), instance, clip.c_str());
+							ActivateOutput(pActInfo, eO_Done, true);
+						}
+						else
+						{
+							ActivateOutput(pActInfo, eO_Failed, true);
+						}
+					}
+					if (attach)
+					{
+						if (pPlayer != nullptr && pPlayer->AttachToFlash(element.c_str(), instance, clip.c_str()))
+							ActivateOutput(pActInfo, eO_Done, true);
+						else
+							ActivateOutput(pActInfo, eO_Failed, true);
+					}
+				}
+			};
+
 			// ------------------------------------------------------------------------------------------ registration
 			template<class TNode>
 			class CNodeFactory final : public CAutoRegFlowNodeBase
@@ -1080,6 +1155,7 @@ namespace CEVPlayer
 			// The class names are what saved flow graphs store: never rename one.
 			CNodeFactory<CPlayOnScreenNode> s_playOnScreen("CEVPlayer:PlayOnScreen");
 			CNodeFactory<CPlayOnMaterialNode> s_playOnMaterial("CEVPlayer:PlayOnMaterial");
+			CNodeFactory<CAttachToFlashNode> s_attachToFlash("CEVPlayer:AttachToFlash");
 			CNodeFactory<CPlayToSurfaceNode> s_playToSurface("CEVPlayer:UI:PlayToSurface");
 			CNodeFactory<CSurfaceInfoNode> s_surfaceInfo("CEVPlayer:UI:SurfaceInfo");
 			CNodeFactory<CSurfaceEventsNode> s_surfaceEvents("CEVPlayer:UI:SurfaceEvents");
@@ -1091,7 +1167,7 @@ namespace CEVPlayer
 
 			const char* const kClassNames[] =
 			{
-				"CEVPlayer:PlayOnScreen", "CEVPlayer:PlayOnMaterial",
+				"CEVPlayer:PlayOnScreen", "CEVPlayer:PlayOnMaterial", "CEVPlayer:AttachToFlash",
 				"CEVPlayer:UI:PlayToSurface", "CEVPlayer:UI:SurfaceInfo", "CEVPlayer:UI:SurfaceEvents",
 				"CEVPlayer:Advanced:Open", "CEVPlayer:Advanced:Transport", "CEVPlayer:Advanced:Settings", "CEVPlayer:Advanced:Info", "CEVPlayer:Advanced:Events",
 			};

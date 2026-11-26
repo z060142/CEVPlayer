@@ -1893,6 +1893,47 @@ namespace CEVPlayer
 			mEnv->pManager->ConsolePlaySurface(args->GetArg(1), args->GetArgCount() > 2 ? args->GetArg(2) : nullptr, loop);
 		}
 
+		//! S2: cev_attach_flash <surfaceId> <uiElement> <instanceId> <movieClip> -> IVideoPlayer::AttachToFlash.
+		void CmdAttachFlash(IConsoleCmdArgs* args)
+		{
+			if (args == nullptr || mEnv->pManager == nullptr)
+				return;
+			if (args->GetArgCount() < 5)
+			{
+				LogAlways("usage: cev_attach_flash <surfaceId> <uiElement> <instanceId> <movieClip>   (the movie clip must exist in the element)");
+				return;
+			}
+			IVideoPlayer* const pPlayer = mEnv->pManager->FindPlayerBySurface(args->GetArg(1));
+			if (pPlayer == nullptr)
+			{
+				LogAlways("cev_attach_flash: no surface player <%s>", args->GetArg(1));
+				return;
+			}
+			const bool ok = pPlayer->AttachToFlash(args->GetArg(2), std::atoi(args->GetArg(3)), args->GetArg(4));
+			LogAlways("cev_attach_flash: <%s> -> <%s> %s <%s>: %s (texture id %d)", args->GetArg(1), args->GetArg(2), args->GetArg(3), args->GetArg(4), ok ? "attached" : "FAILED",
+				pPlayer->GetTextureId());
+		}
+
+		//! S2: cev_detach_flash <surfaceId> -> IVideoPlayer::DetachFromFlash for all clips of the player.
+		void CmdDetachFlash(IConsoleCmdArgs* args)
+		{
+			if (args == nullptr || mEnv->pManager == nullptr)
+				return;
+			if (args->GetArgCount() < 2)
+			{
+				LogAlways("usage: cev_detach_flash <surfaceId>   (all movie clips of that surface player)");
+				return;
+			}
+			IVideoPlayer* const pPlayer = mEnv->pManager->FindPlayerBySurface(args->GetArg(1));
+			if (pPlayer == nullptr)
+			{
+				LogAlways("cev_detach_flash: no surface player <%s>", args->GetArg(1));
+				return;
+			}
+			pPlayer->DetachFromFlash(nullptr, 0, nullptr);
+			LogAlways("cev_detach_flash: <%s> detached from all movie clips", args->GetArg(1));
+		}
+
 		//! M10: one line on the loading-loop state (cev_info, cev_surfaces).
 		void LogLoadtimeState(const char* cmd)
 		{
@@ -1911,6 +1952,8 @@ namespace CEVPlayer
 		void CmdSurfaces(IConsoleCmdArgs*)
 		{
 			Contract::LogSurfaces();
+			if (mEnv->pManager != nullptr)
+				mEnv->pManager->LogFlashClips("cev_surfaces");
 			LogLoadtimeState("cev_surfaces");
 			LogFullscreenBackend("cev_surfaces");
 		}
@@ -1945,6 +1988,8 @@ namespace CEVPlayer
 				kVideoPlayerInterfaceVersion, kPluginCaps, Contract::ApiVersion(), Contract::SurfaceCount(), mEnv->pManager != nullptr ? mEnv->pManager->GetPlayerCount() : 0u);
 			LogAlways("cev_info: API table %u controls, %u queries, %u events; %u FlowGraph node classes",
 				static_cast<unsigned>(Api::Controls().size()), static_cast<unsigned>(Api::Queries().size()), static_cast<unsigned>(Api::Events().size()), Api::FlowNodeCount());
+			if (mEnv->pManager != nullptr)
+				mEnv->pManager->LogFlashClips("cev_info");
 			LogLoadtimeState("cev_info");
 			LogFullscreenBackend("cev_info");
 		}
@@ -2247,6 +2292,8 @@ namespace CEVPlayer
 		REGISTER_COMMAND("cev_info", CmdInfo, VF_NULL, "Developer information: player interface version, capability bits, texture source contract version, registered surfaces, API table size");
 		REGISTER_COMMAND("cev_flowtest", CmdFlowTest, VF_NULL, "Self test of the FlowGraph nodes: builds a flow graph in memory with every node class, drives it and checks the outputs. cev_flowtest [pathA] [pathB] (pathB: another size), logs PASS / FAIL");
 		REGISTER_COMMAND("cev_run_script", CmdRunScript, VF_NULL, "Development: cev_run_script <file> runs a list of console commands, one per frame, immediately (not through the deferred queue); wait <seconds>, # comments");
+		REGISTER_COMMAND("cev_attach_flash", CmdAttachFlash, VF_NULL, "Test (S2): cev_attach_flash <surfaceId> <uiElement> <instanceId> <movieClip> shows the surface player's texture in an existing movie clip of a Flash UI element (IVideoPlayer::AttachToFlash)");
+		REGISTER_COMMAND("cev_detach_flash", CmdDetachFlash, VF_NULL, "Test (S2): cev_detach_flash <surfaceId> takes the surface player's texture out of all its Flash movie clips (IVideoPlayer::DetachFromFlash)");
 		REGISTER_COMMAND("cev_contract_selftest", CmdContractSelfTest, VF_NULL, "Self test of the texture source contract through the CryTexSource_v1 export. cev_contract_selftest [pathA] [pathB] (two videos of different sizes), logs PASS / FAIL");
 		// development-only measurement commands (S0)
 		REGISTER_COMMAND("cev_probe_r8", DevProbe::CmdProbeR8, VF_NULL, "Measurement: cev_probe_r8 <w> <h> [rgba] creates an eTF_R8 (or RGBA8) dynamic texture, updates it every frame, draws it top left and logs the process memory it costs (no arguments = off)");
@@ -2287,7 +2334,7 @@ namespace CEVPlayer
 			return;
 		s_registered = false;
 
-		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface", "cev_probe_xui2dl", "cev_probe_fullscreen", "cev_probe_flash" };
+		static const char* const commands[] = { "cev_play", "cev_stop", "cev_pause", "cev_resume", "cev_seek", "cev_audiotrack", "cev_apitest", "cev_list", "cev_play_surface", "cev_surfaces", "cev_contract_selftest", "cev_info", "cev_flowtest", "cev_run_script", "cev_probe_r8", "cev_probe_sync", "cev_bench_play", "cev_bench_stop", "cev_stats_file", "cev_hidden_bench", "cev_bench_hint", "cev_show_surface", "cev_probe_xui2dl", "cev_probe_fullscreen", "cev_probe_flash", "cev_attach_flash", "cev_detach_flash" };
 		for (const char* name : commands)
 			pConsole->RemoveCommand(name);
 		pConsole->RemoveCommand("cev_probe_loadtime");

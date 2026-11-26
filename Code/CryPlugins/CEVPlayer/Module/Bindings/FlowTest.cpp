@@ -235,7 +235,7 @@ namespace CEVPlayer
 			}
 
 			// node indices in s_test.nodes
-			enum ENode { eN_SurfaceA, eN_SurfaceDup, eN_Info, eN_Events, eN_SurfaceB, eN_Open, eN_Transport, eN_Settings, eN_AdvInfo, eN_AdvEvents, eN_Screen, eN_Material, eN_Count };
+			enum ENode { eN_SurfaceA, eN_SurfaceDup, eN_Info, eN_Events, eN_SurfaceB, eN_Open, eN_Transport, eN_Settings, eN_AdvInfo, eN_AdvEvents, eN_Screen, eN_Material, eN_Flash, eN_Count };
 			STestNode* N(ENode n) { return s_test.nodes[n].get(); }
 
 			void Finish(SFlowTest& t, const char* why)
@@ -273,6 +273,7 @@ namespace CEVPlayer
 				AddNode(t, "CEVPlayer:Advanced:Events", { "Handle" }, { "Ready", "Started", "NewFrame", "NewFrameSerial", "Marker", "Looped", "Ended", "Skipped", "Error" });
 				AddNode(t, "CEVPlayer:PlayOnScreen", { "Play", "Stop", "Video", "Fit", "Loop", "Skippable", "Decode" }, { "Started", "Ended", "Skipped", "Error", "ErrorCode", "ErrorMessage" });
 				AddNode(t, "CEVPlayer:PlayOnMaterial", { "Play", "Stop", "Video", "Material", "Slot" }, { "Started", "Ended", "Error", "ErrorCode", "ErrorMessage" });
+				AddNode(t, "CEVPlayer:AttachToFlash", { "Attach", "Detach", "SurfaceId", "UIElement", "InstanceId", "MovieClip" }, { "Done", "Failed" });
 			}
 		}
 
@@ -298,17 +299,17 @@ namespace CEVPlayer
 			LogAlways("cev_flowtest: start (%s, %s)", t.pathA.c_str(), t.pathB.c_str());
 
 			// node classes registered under the documented names, the old ones gone
-			bool classes = FlowNodeCount() == 10;
+			bool classes = FlowNodeCount() == 11;
 			for (uint32_t i = 0; i < FlowNodeCount(); ++i)
 				classes = classes && gEnv->pFlowSystem->GetTypeId(FlowNodeClassName(i)) != InvalidFlowNodeTypeId;
-			t.Check(classes, "the 10 node classes are registered (" + std::to_string(FlowNodeCount()) + ")");
+			t.Check(classes, "the 11 node classes are registered (" + std::to_string(FlowNodeCount()) + ")");
 			bool oldGone = true;
 			for (const char* old : { "CEVPlayer:2DVideoPlayer", "CEVPlayer:TextureVideoPlayer", "CEVPlayer:FlashVideoPlayer", "CEVPlayer:Video:Control:Create", "CEVPlayer:Video:Query:State", "CEVPlayer:Video:Events" })
 				oldGone = oldGone && gEnv->pFlowSystem->GetTypeId(old) == InvalidFlowNodeTypeId;
 			t.Check(oldGone, "the legacy and the generated CEVPlayer:Video:* node classes are not registered");
 			{
 				// Folder layout as the FlowGraph editor shows it (the class name split at ':'): one top-level folder
-				// CEVPlayer with two nodes directly in it and the sub-folders UI (3) and Advanced (5); no node of ours elsewhere (stock Video:ClipCapture is not ours).
+				// CEVPlayer with three nodes directly in it (S2: AttachToFlash) and the sub-folders UI (3) and Advanced (5); no node of ours elsewhere (stock Video:ClipCapture is not ours).
 				int top = 0, ui = 0, advanced = 0, other = 0;
 				std::string names;
 				IFlowNodeTypeIteratorPtr it = gEnv->pFlowSystem->CreateNodeTypeIterator();
@@ -334,7 +335,7 @@ namespace CEVPlayer
 						++other;
 				}
 				LogAlways("cev_flowtest: registered CEVPlayer / video node types:%s", names.c_str());
-				t.Check(top == 2 && ui == 3 && advanced == 5 && other == 0, "folder CEVPlayer: " + std::to_string(top) + " nodes, UI " + std::to_string(ui) + ", Advanced " + std::to_string(advanced) + ", elsewhere " + std::to_string(other) + " (2 / 3 / 5 / 0)");
+				t.Check(top == 3 && ui == 3 && advanced == 5 && other == 0, "folder CEVPlayer: " + std::to_string(top) + " nodes, UI " + std::to_string(ui) + ", Advanced " + std::to_string(advanced) + ", elsewhere " + std::to_string(other) + " (3 / 3 / 5 / 0)");
 			}
 
 			t.typeRegistered = gEnv->pFlowSystem->RegisterType(kProbeType, IFlowNodeFactoryPtr(new CProbeFactory())) != InvalidFlowNodeTypeId;
@@ -460,6 +461,24 @@ namespace CEVPlayer
 				Update(t);
 				t.Check(Count(info, "Exists") == 2 && !LastBool(info, "Exists") && LastInt(info, "TextureId") == 0 && LastInt(info, "Width") == 0 && Last(info, "FrameSerial").empty() && LastInt(info, "State") == 0,
 					"SurfaceInfo of an unknown id: Exists false, the rest 0 / empty");
+
+				// S2: AttachToFlash (no UI element of the test project is assumed: an unknown element fails, Detach succeeds)
+				STestNode* const fl = N(eN_Flash);
+				Set(t, fl, "SurfaceId", string("flowtest_a"));
+				Set(t, fl, "UIElement", string("cev_flowtest_no_such_element"));
+				Set(t, fl, "InstanceId", 0);
+				Set(t, fl, "MovieClip", string("_root.cev_flowtest"));
+				Trigger(t, fl, "Attach");
+				Update(t);
+				t.Check(Count(fl, "Failed") == 1 && Count(fl, "Done") == 0, "AttachToFlash Attach with an unknown UI element -> Failed");
+				Set(t, fl, "UIElement", string(""));
+				Trigger(t, fl, "Detach");
+				Update(t);
+				t.Check(Count(fl, "Done") == 1 && Count(fl, "Failed") == 1, "AttachToFlash Detach (empty UIElement: every clip) -> Done");
+				Set(t, fl, "SurfaceId", string("flowtest_none"));
+				Trigger(t, fl, "Attach");
+				Update(t);
+				t.Check(Count(fl, "Failed") == 2 && Count(fl, "Done") == 1, "AttachToFlash Attach of an unknown surface -> Failed");
 
 				// Open -> handle
 				t.handle = LastInt(N(eN_Open), "Handle");
