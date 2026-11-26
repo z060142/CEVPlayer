@@ -763,14 +763,15 @@ namespace CEVPlayer
 				const int h = gEnv->pRenderer->GetHeight();
 				if (w <= 0 || h <= 0)
 					return;
-				std::vector<uint32> px(static_cast<size_t>(w) * h, 0);
+				// L7a: RGB8 is 3 tightly packed bytes per pixel (R, G, B), which is exactly the body of a binary PPM.
+				std::vector<uint8> px(static_cast<size_t>(w) * h * 3, 0);
 				const Clock::time_point t0 = Clock::now();
-				const bool ok = gEnv->pRenderer->ReadFrameBuffer(px.data(), w, h, true, EReadTextureFormat::RGB8);
+				const bool ok = gEnv->pRenderer->ReadFrameBuffer(reinterpret_cast<uint32*>(px.data()), w, h, true, EReadTextureFormat::RGB8);
 				const float ms = std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
 				uint32 magenta = 0, lit = 0;
-				for (uint32 c : px)
+				for (size_t i = 0; i + 2 < px.size(); i += 3)
 				{
-					const uint32 r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
+					const uint32 r = px[i], g = px[i + 1], b = px[i + 2];
 					magenta += (r > 200 && g < 70 && b > 200) ? 1u : 0u;
 					lit += (r + g + b > 30) ? 1u : 0u;
 				}
@@ -780,11 +781,7 @@ namespace CEVPlayer
 					file = s_readbackDir + "/" + what + "_loop" + std::to_string(s_loopIndex) + ".ppm";
 					std::ofstream out(file, std::ios::binary);
 					out << "P6\n" << w << " " << h << "\n255\n";
-					for (uint32 c : px)
-					{
-						const char rgb[3] = { static_cast<char>(c & 0xFF), static_cast<char>((c >> 8) & 0xFF), static_cast<char>((c >> 16) & 0xFF) };
-						out.write(rgb, 3);
-					}
+					out.write(reinterpret_cast<const char*>(px.data()), static_cast<std::streamsize>(px.size()));
 				}
 				PLog("P4 %s loop %d iteration %u: ReadFrameBuffer(presented, %dx%d) %s in %.2f ms, magenta pixels %u (texture drawn at 300x300 virtual units), lit pixels %u, file <%s>",
 					what, s_loopIndex, s_iterations, w, h, ok ? "ok" : "FAILED", ms, magenta, lit, file.c_str());

@@ -3,6 +3,8 @@
 #include "RenderBridge.h"
 #include "XUI2DLClient.h"
 
+#include <cstdio>
+
 #include <CryCore/Platform/CryWindows.h> // GetModuleHandleA / GetProcAddress
 #include <CryRenderer/IRenderer.h>
 #include <CryRenderer/IShader.h>
@@ -174,7 +176,15 @@ namespace CEVPlayer
 			if (pTexture->GetTextureID() != id || pTexture->GetWidth() != width || pTexture->GetHeight() != height || pTexture->GetNumMips() != 1
 				|| pTexture->GetTextureType() != eTT_2D || pTexture->GetTextureDstFormat() != texFormat)
 			{
-				*pFailure = "the created texture does not match the requested size / format";
+				// L7a: the actual and the expected values go into the message (main thread only: one static buffer).
+				static char s_mismatch[512];
+				std::snprintf(s_mismatch, sizeof(s_mismatch),
+					"the created texture does not match the requested size / format (got id %d %dx%d mips %d type %d (%s) format %d (%s); "
+					"expected id %d %dx%d mips 1 type %d format %d)",
+					pTexture->GetTextureID(), pTexture->GetWidth(), pTexture->GetHeight(), static_cast<int>(pTexture->GetNumMips()),
+					static_cast<int>(pTexture->GetTextureType()), pTexture->GetTypeName(), static_cast<int>(pTexture->GetTextureDstFormat()),
+					pTexture->GetFormatName(), id, width, height, static_cast<int>(eTT_2D), static_cast<int>(texFormat));
+				*pFailure = s_mismatch;
 				pTexture->Release();
 				return nullptr;
 			}
@@ -194,6 +204,15 @@ namespace CEVPlayer
 				return false;
 			gEnv->pRenderer->UpdateTextureInVideoMemory(static_cast<uint32>(id), const_cast<unsigned char*>(data), 0, 0, width, height, texFormat);
 			return true;
+		}
+
+		void FlushBeforeTextureRelease()
+		{
+			// The loading-loop callback runs on the render thread, so "main thread" also means "not inside the loop
+			// callback". CRenderer::FlushRTCommands also returns at once when called on the render thread itself.
+			if (!Available() || !IsMainThread())
+				return;
+			gEnv->pRenderer->FlushRTCommands(true, true, true);
 		}
 
 		void ReleaseTexture(ITexture* pTexture)

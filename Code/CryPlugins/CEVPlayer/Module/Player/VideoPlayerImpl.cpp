@@ -1118,6 +1118,9 @@ namespace CEVPlayer
 		}
 		if (m_pTexture != nullptr)
 		{
+			// L7a: every player texture release goes through here (layout switch, size change rebuild, the rebuild after
+			// a load, Stop, destroy): let the render thread finish its queued commands first (same-name recreation race).
+			RenderBridge::FlushBeforeTextureRelease();
 			RenderBridge::ReleaseTexture(m_pTexture);
 			m_pTexture = nullptr;
 			m_textureChanged = true;

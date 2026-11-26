@@ -60,6 +60,13 @@ namespace CEVPlayer
 		//! renderer's "no texture"). Note: a texture that was drawn through the aux geometry stays alive in the aux
 		//! texture cache (its name stays registered); fullscreen players therefore use reusable generated names.
 		void ReleaseTexture(ITexture* pTexture);
+		//! L7a: call right before releasing a player texture that may be recreated under the same name. On the main
+		//! thread it runs IRenderer::FlushRTCommands(true, true, true): the render thread executes every queued command
+		//! first (texture uploads hold a _smart_ptr<CTexture> until they ran), so the caller's release is the last
+		//! reference and the name is unregistered on the main thread, not concurrently with a same-name lookup. On any
+		//! other thread (the loading-loop tick runs on the render thread) it does nothing: release and lookups then
+		//! happen on that one thread. Callable from any thread.
+		void FlushBeforeTextureRelease();
 
 		//! Makes the texture slot of the (sub) material sample `pTexture`. The previous texture is returned in
 		//! `*ppPrevious` with its reference now owned by the caller (give it back to RestoreMaterialTexture).
