@@ -597,7 +597,60 @@ void GetStats(XUI2DLStats* pStats)
 	memcpy(pStats, &s, bytes);
 }
 
-const XUI2DLApi s_api = { uint32(sizeof(XUI2DLApi)), XUI2DL_API_VERSION, XUI2DL_CAP_CORE | XUI2DL_CAP_YUV, 0, &SetFrame, &GetStats };
+//////////////////////////////////////////////////////////////////////////
+// Loading-loop driver (M11 section 7). Derived from CE_XTUI patch 17 (CE-90) of XTFrame for CRYENGINE:
+// the registry of RenderThread.cpp (LoadtimeCallbacks) reduced to one registrant, and LoadtimeAutoStart /
+// LoadtimeAutoRelease of D3DRenderThread.cpp. The dispatch holds s_loadtimeLock while it calls the update and
+// SetLoadtimeUpdate takes it too, so unregistering returns only when the update is not running.
+
+#ifndef XUI2DL_LOADTIME_HOOKS
+	#define XUI2DL_LOADTIME_HOOKS 0   // apply_xui2dl.py defines 1 when it inserted the loading-loop hooks
+#endif
+
+typedef void (* TLoadtimeUpdate)(void* pUser, float dtSeconds);
+
+CryCriticalSection    s_loadtimeLock;
+TLoadtimeUpdate       s_pfnLoadtimeUpdate = nullptr;   //!< guarded by s_loadtimeLock
+void*                 s_pLoadtimeUser = nullptr;
+std::atomic<bool>     s_loadtimeRegistered{ false };
+std::atomic<threadID> s_loadtimeDispatchThread{ 0 };
+bool                  s_loadtimeAutoOwned = false;      //!< main thread only
+
+bool OnLoadtimeDispatchThread()
+{
+	const threadID t = s_loadtimeDispatchThread.load(std::memory_order_acquire);
+	return t != 0 && t == CryGetCurrentThreadId();
+}
+
+//! The stand-in StopLoadtimeFlashPlayback finds while it stops a loop that has no flash callback (LoadtimeBeforeStop).
+struct SStopMarker final : public ILoadtimeCallback
+{
+	void LoadtimeUpdate(float) override {}
+	bool LoadtimeRender() override { return true; }
+};
+SStopMarker s_stopMarker;
+
+int SetLoadtimeUpdate(TLoadtimeUpdate pfnUpdate, void* pUser)
+{
+	if (!XUI2DL_LOADTIME_HOOKS || !gRenDev || !gRenDev->m_pRT)
+		return 0;
+	if (OnLoadtimeDispatchThread())
+	{
+		CryLogAlways("[XUI2DL] SetLoadtimeUpdate called from inside the loading-loop update; refused");
+		return 0;
+	}
+	if (!gRenDev->m_pRT->IsMainThread())
+		return 0;
+	CryAutoCriticalSection lock(s_loadtimeLock);
+	s_pfnLoadtimeUpdate = pfnUpdate;
+	s_pLoadtimeUser = pfnUpdate ? pUser : nullptr;
+	s_loadtimeRegistered.store(pfnUpdate != nullptr, std::memory_order_release);
+	return 1;
+}
+
+const XUI2DLApi s_api = { uint32(sizeof(XUI2DLApi)), XUI2DL_API_VERSION,
+	                      XUI2DL_CAP_CORE | XUI2DL_CAP_YUV | (XUI2DL_LOADTIME_HOOKS ? uint32(XUI2DL_CAP_LOADTIME) : 0u), 0,
+	                      &SetFrame, &GetStats, &SetLoadtimeUpdate };
 
 //! Render thread, from the first RT_Draw of a non-empty snapshot. A technique still compiling is only
 //! requested here; its draws are skipped and counted until it is ready.
@@ -720,6 +773,86 @@ void EndFrame(const SDisplayContextKey& key)
 	const SDisplayContextKey keyCopy = key;
 	gRenDev->ExecuteRenderThreadCommand([pSnap, keyCopy]() { RT_Draw(*pSnap, keyCopy); }, ERenderCommandFlags::SkipDuringLoading);
 	gRenDev->ExecuteRenderThreadCommand([pSnap]() { RT_Free(pSnap); }, ERenderCommandFlags::None);
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Loading-loop entry points (patch 17: LoadtimeCallbacks::DispatchUpdate, CD3D9Renderer::LoadtimeAutoStart /
+// LoadtimeAutoRelease and its changes to StartLoadtimeFlashPlayback / StopLoadtimeFlashPlayback)
+
+void RT_LoadtimeUpdate(float dtSeconds)
+{
+	if (!s_loadtimeRegistered.load(std::memory_order_acquire))
+		return;   // nothing registered: no lock taken (a registration racing this iteration is seen by the next one)
+	CryAutoCriticalSection lock(s_loadtimeLock);
+	if (!s_pfnLoadtimeUpdate)
+		return;
+	s_loadtimeDispatchThread.store(CryGetCurrentThreadId(), std::memory_order_release);
+	s_pfnLoadtimeUpdate(s_pLoadtimeUser, dtSeconds);
+	s_loadtimeDispatchThread.store(0, std::memory_order_release);
+}
+
+void LoadtimeAutoStart()
+{
+	// The conditions of CFlashUI::StartRenderThread (minus gfx_loadtimethread, which is FlashUI's own
+	// switch): never in the editor, only with a render thread, not for asynchronous level loads.
+	if (gEnv->IsEditor() || !s_loadtimeRegistered.load(std::memory_order_acquire) || s_loadtimeAutoOwned)
+		return;
+	SRenderThread* const pRT = gRenDev->m_pRT;
+	if (pRT->m_eVideoThreadMode != SRenderThread::eVTM_Disabled)
+		return;   // someone (CFlashUI) already runs the loop: the registered update is called in it
+	ICVar* const pMT = gEnv->pConsole->GetCVar("r_MultiThreaded");
+	ICVar* const pAsyncLoad = gEnv->pConsole->GetCVar("g_asynclevelload");
+	if (!pMT || pMT->GetIVal() <= 0 || !pRT->IsMultithreaded() || (pAsyncLoad && pAsyncLoad->GetIVal() > 0))
+		return;
+
+	s_loadtimeAutoOwned = true;
+	gEnv->pCryPak->LockReadIO(true);
+	gcpRendD3D->FlushRTCommands(true, true, true);
+	pRT->RC_StartVideoThread();
+	while (pRT->m_eVideoThreadMode != SRenderThread::eVTM_Active)
+	{
+		pRT->FlushAndWait();
+		CrySleep(0);
+	}
+	CryLogAlways("[XUI2DL] loading loop started for the registered loading-loop update");
+}
+
+void LoadtimeAutoRelease()
+{
+	if (!s_loadtimeAutoOwned)
+		return;
+	s_loadtimeAutoOwned = false;
+	// A StartLoadtimeFlashPlayback caller that joined the loop stops it itself (and unlocks the IO it
+	// locked); otherwise the loop is ours to stop (unless something stopped it already).
+	if (gRenDev->m_pRT->m_pLoadtimeCallback)
+		return;
+	gcpRendD3D->StopLoadtimeFlashPlayback();
+	gEnv->pCryPak->LockReadIO(false);
+	CryLogAlways("[XUI2DL] loading loop for the registered loading-loop update released");
+}
+
+bool LoadtimeJoin(ILoadtimeCallback* pCallback)
+{
+	// The renderer already runs the loop for the registered update (it started it at
+	// LEVEL_LOAD_START_LOADINGSCREEN before this caller's listener ran): join it. Only a null -> callback
+	// change happens while the loop runs, so the loop sees either no flash callback or this one.
+	SRenderThread* const pRT = gRenDev->m_pRT;
+	if (pRT->m_eVideoThreadMode == SRenderThread::eVTM_Disabled)
+		return false;
+	pRT->m_pLoadtimeCallback = pCallback;
+	CryLogAlways("[XUI2DL] a StartLoadtimeFlashPlayback callback joined the running loading loop");
+	return true;
+}
+
+void LoadtimeBeforeStop()
+{
+	// Patch 17 stops the loop also when only registered callbacks are in it: callers such as
+	// CMatMan::ForceDelayedMaterialDeletion and CSystem's quit path rely on this call leaving the render thread
+	// out of the loading loop. The stock stop path runs only with a flash callback, so a no-op stand-in is
+	// installed for it; that path clears it once the loop has stopped. With no loop running nothing changes.
+	SRenderThread* const pRT = gRenDev->m_pRT;
+	if (!pRT->m_pLoadtimeCallback && pRT->m_eVideoThreadMode != SRenderThread::eVTM_Disabled)
+		pRT->m_pLoadtimeCallback = &s_stopMarker;
 }
 
 } // namespace XUI2DL

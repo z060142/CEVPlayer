@@ -63,4 +63,9 @@ typedef struct XUI2DLApi
     uint32_t reserved;
     int  (*SetFrame)(const XUI2DLFrame* pFrame);   /* main thread; 1 = accepted, 0 = refused (bad size / count / kind) */
     void (*GetStats)(XUI2DLStats* pStats);         /* any thread */
+    /* Loading-loop callback. pfnUpdate runs on the render thread once per loading-loop iteration, outside the
+       renderer's loading lock, before that iteration is presented. dtSeconds is the real time since the previous
+       iteration (0 on the first one). Main thread only; never call it from inside the callback. Passing NULL
+       unregisters and returns only when the callback is not running. Returns 1 on success, 0 when refused. */
+    int (*SetLoadtimeUpdate)(void (*pfnUpdate)(void* pUser, float dtSeconds), void* pUser);
 } XUI2DLApi;

@@ -9,6 +9,7 @@
 #include "XUI2DLApi.h"
 
 struct SDisplayContextKey;
+struct ILoadtimeCallback;
 
 namespace XUI2DL
 {
@@ -21,6 +22,25 @@ void RT_CreateResources();
 void RT_ReleaseResources();
 //! Main thread, CD3D9Renderer::EndFrame: queues the draw of the retained list (nothing when it is empty).
 void EndFrame(const SDisplayContextKey& key);
+
+// The loading-loop driver (M11 section 7; engines without CE_XTUI patch 17). These hooks are inserted only
+// where apply_xui2dl.py found no patch 17; it then also defines XUI2DL_LOADTIME_HOOKS=1 for the renderer.
+
+//! Render thread, the loading loop of SRenderThread::Process, right after the StartLoadtimeFlashPlayback
+//! callback's LoadtimeUpdate (outside m_rdldLock): calls the update registered with SetLoadtimeUpdate.
+void RT_LoadtimeUpdate(float dtSeconds);
+//! Main thread, system event LEVEL_LOAD_START_LOADINGSCREEN: starts the loading loop when an update is
+//! registered and no loop runs (not in the editor, only with a render thread, not for asynchronous loads).
+void LoadtimeAutoStart();
+//! Main thread, system events LEVEL_LOAD_END / LEVEL_LOAD_ERROR / FAST_SHUTDOWN: stops the loop
+//! LoadtimeAutoStart started, unless a StartLoadtimeFlashPlayback caller joined it (that caller stops it).
+void LoadtimeAutoRelease();
+//! Main thread, CD3D9Renderer::StartLoadtimeFlashPlayback before it starts a loop: when the loop already
+//! runs (started by LoadtimeAutoStart), installs `pCallback` into it and returns true (the caller returns).
+bool LoadtimeJoin(ILoadtimeCallback* pCallback);
+//! Main thread, start of CD3D9Renderer::StopLoadtimeFlashPlayback: makes the stock stop path also stop a
+//! loop that runs without a StartLoadtimeFlashPlayback callback.
+void LoadtimeBeforeStop();
 
 } // namespace XUI2DL
 

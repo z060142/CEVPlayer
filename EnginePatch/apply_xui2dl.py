@@ -8,6 +8,10 @@
 Every hook is wrapped in "// XUI2DL begin" / "// XUI2DL end" ("#" in CMake). A hook that is already there is
 left alone. When an anchor is missing or ambiguous nothing is written at all. Standard library only.
 
+The loading-loop hooks (section 7: RenderThread.cpp, the flash start / stop and system events, the
+XUI2DL_LOADTIME_HOOKS define) are inserted only when the tree has no CE_XTUI patch 17 (RenderThread.h
+declaring LoadtimeCallbacks); with patch 17 they are skipped and --check says so. --remove removes all.
+
 Exit codes: 0 = done / fully applied (--check), 1 = --check found something missing or different, 2 = error.
 """
 import os
@@ -93,6 +97,66 @@ def loc_cmake(lines):
     return find_one(lines, r"^end_sources\(\)", what="CMakeLists.txt end_sources() anchor")
 
 
+# The loading-loop hooks (M11 section 7): only for trees without CE_XTUI patch 17.
+
+def function_range(lines, signature, what):
+    start = find_one(lines, signature, what=what)
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].rstrip("\r\n") == "}"), None)
+    if end is None:
+        raise AnchorError("%s: no closing brace" % what)
+    return start, end
+
+
+def loc_rt_include(lines):
+    return find_one(lines, r"^\s*#include\s+<CryThreading/IThreadManager\.h>", what="RenderThread.cpp include anchor") + 1
+
+
+def loc_rt_loop(lines):
+    # Right after the stock flash callback's update in the loading loop (outside m_rdldLock).
+    at = find_one(lines, r"^\s*m_pLoadtimeCallback->LoadtimeUpdate\(deltaTime\);", what="loading loop LoadtimeUpdate anchor")
+    if not re.match(r"^\s*if\s*\(\s*m_pLoadtimeCallback\s*\)\s*$", lines[at - 1]):
+        raise AnchorError("loading loop LoadtimeUpdate anchor: the line before is not 'if (m_pLoadtimeCallback)'")
+    return at + 1
+
+
+def indent_of_line_before(lines, at):
+    # The indent of the `if (m_pLoadtimeCallback)` line two lines up (the anchor sits inside that if).
+    return indent_of(lines[at - 2])
+
+
+def loc_thread_join(lines):
+    start, end = function_range(lines, r"^void\s+CD3D9Renderer::StartLoadtimeFlashPlayback\s*\(", "StartLoadtimeFlashPlayback")
+    return find_one(lines, r"^\s*FlushRTCommands\(true,\s*true,\s*true\);", start, end, what="StartLoadtimeFlashPlayback FlushRTCommands anchor")
+
+
+def loc_thread_stop(lines):
+    start, end = function_range(lines, r"^void\s+CD3D9Renderer::StopLoadtimeFlashPlayback\s*\(\s*\)", "StopLoadtimeFlashPlayback")
+    if lines[start + 1].strip() != "{":
+        raise AnchorError("StopLoadtimeFlashPlayback: the line after the signature is not '{'")
+    return start + 2
+
+
+def listener_range(lines):
+    start = find_one(lines, r"^struct\s+CSystemEventListener_Render\b", what="CSystemEventListener_Render")
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].rstrip("\r\n") == "};"), None)
+    if end is None:
+        raise AnchorError("CSystemEventListener_Render: no closing '};'")
+    return start, end
+
+
+def loc_driver_events(lines):
+    start, end = listener_range(lines)
+    return find_one(lines, r"^\s*case\s+ESYSTEM_EVENT_LEVEL_LOAD_END\s*:", start, end, what="LEVEL_LOAD_END case anchor")
+
+
+def loc_driver_load_end(lines):
+    return loc_driver_events(lines) + 1
+
+
+def loc_cmake_define(lines):
+    return loc_cmake(lines) + 1
+
+
 HOOKS = [
     (RD + "DriverD3D.cpp", [
         ("include", "//", ['#include "../XUI2DL/XUI2DL.h"'], loc_driver_include, None),
@@ -115,6 +179,61 @@ HOOKS = [
         ], loc_cmake, None),
     ]),
 ]
+
+RC = "Code/CryEngine/RenderDll/Common/"
+
+# Inserted only when the tree has no CE_XTUI patch 17 (has_patch17): such a tree runs its loading loop through
+# patch 17 and XUI2D, and its XUI2DL is built without XUI2DL_LOADTIME_HOOKS (caps without XUI2DL_CAP_LOADTIME).
+LOADTIME_HOOKS = [
+    (RC + "RenderThread.cpp", [
+        ("include", "//", ['#include "../XUI2DL/XUI2DL.h"'], loc_rt_include, None),
+        ("loading loop update", "//", ["XUI2DL::RT_LoadtimeUpdate(deltaTime);"], loc_rt_loop, indent_of_line_before),
+    ]),
+    (RD + "D3DRenderThread.cpp", [
+        ("loading loop join", "//", ["if (XUI2DL::LoadtimeJoin(pCallback))", "\treturn;"], loc_thread_join, "anchor"),
+        ("loading loop stop", "//", ["XUI2DL::LoadtimeBeforeStop();"], loc_thread_stop, "\t"),
+    ]),
+    (RD + "DriverD3D.cpp", [
+        ("loading loop events", "//", [
+            "case ESYSTEM_EVENT_LEVEL_LOAD_START_LOADINGSCREEN:",
+            "\tXUI2DL::LoadtimeAutoStart();",
+            "\tbreak;",
+            "case ESYSTEM_EVENT_LEVEL_LOAD_ERROR:",
+            "case ESYSTEM_EVENT_FAST_SHUTDOWN:",
+            "\tXUI2DL::LoadtimeAutoRelease();",
+            "\tbreak;",
+        ], loc_driver_events, "anchor"),
+        ("loading loop release at LEVEL_LOAD_END", "//", ["XUI2DL::LoadtimeAutoRelease();"], loc_driver_load_end, "\t\t\t"),
+    ]),
+    (RD + "CMakeLists.txt", [
+        ("loading loop define", "#", ['set_property(SOURCE "../XUI2DL/XUI2DL.cpp" APPEND PROPERTY COMPILE_DEFINITIONS XUI2DL_LOADTIME_HOOKS=1)'], loc_cmake_define, None),
+    ]),
+]
+
+
+def has_patch17(root):
+    """True when RenderThread.h (outside XUI2DL blocks) declares patch 17's LoadtimeCallbacks registry."""
+    path = os.path.join(root, RC + "RenderThread.h")
+    if not os.path.isfile(path):
+        raise AnchorError("%sRenderThread.h: file not found" % RC)
+    text, _ = read_text(path)
+    lines = split_lines(text)
+    inside = set()
+    for b0, b1 in find_blocks(lines, "//"):
+        inside.update(range(b0, b1 + 1))
+    return any("LoadtimeCallbacks" in l for i, l in enumerate(lines) if i not in inside)
+
+
+def merged_hooks(groups):
+    """[(file, [hooks])] of several hook groups, one entry per file in first-seen order."""
+    order, by_file = [], {}
+    for group in groups:
+        for rel, hooks in group:
+            if rel not in by_file:
+                by_file[rel] = []
+                order.append(rel)
+            by_file[rel].extend(hooks)
+    return [(rel, by_file[rel]) for rel in order]
 
 
 def read_text(path):
@@ -178,6 +297,8 @@ def plan_file(root, rel, hooks):
                 raise AnchorError("%s: %s" % (rel, e))
         if indent == "anchor":
             ind = indent_of(lines[at]) if at is not None else ""
+        elif callable(indent):
+            ind = indent(lines, at) if at is not None else ""
         else:
             ind = indent or ""
         begin, end = block_marks(prefix)
@@ -234,10 +355,20 @@ def main(argv):
             print("error: patch file missing: %s" % src_rel)
             return 2
 
+    try:
+        patch17 = has_patch17(root)
+    except AnchorError as e:
+        print("error: %s (nothing written)" % e)
+        return 2
+    hook_groups = merged_hooks([HOOKS] if patch17 else [HOOKS, LOADTIME_HOOKS])
+    patch17_note = ("loading-loop hooks skipped: CE_XTUI patch 17 found (RenderThread.h declares LoadtimeCallbacks); this tree "
+                    "drives the loading loop through patch 17 / XUI2D, not XUI2DL (XUI2DL built without XUI2DL_LOADTIME_HOOKS, "
+                    "caps without XUI2DL_CAP_LOADTIME)")
+
     if mode == "--remove":
         results = []
         try:
-            for rel, hooks in HOOKS:
+            for rel, hooks in merged_hooks([HOOKS, LOADTIME_HOOKS]):
                 path = os.path.join(root, rel)
                 if not os.path.isfile(path):
                     raise AnchorError("%s: file not found" % rel)
@@ -256,13 +387,25 @@ def main(argv):
 
     # Plan everything first: an anchor error writes nothing.
     try:
-        plans = [(rel,) + plan_file(root, rel, hooks) for rel, hooks in HOOKS]
+        plans = [(rel,) + plan_file(root, rel, hooks) for rel, hooks in hook_groups]
     except AnchorError as e:
         print("error: %s (nothing written)" % e)
         return 2
 
     if mode == "--check":
         complete = True
+        if patch17:
+            print(patch17_note)
+            # Loading-loop blocks in a patch-17 tree would double-drive the loop: report them as a defect.
+            for rel, hooks in LOADTIME_HOOKS:
+                path = os.path.join(root, rel)
+                if not os.path.isfile(path):
+                    continue
+                lines = split_lines(read_text(path)[0])
+                for name, prefix, body, locate, indent in hooks:
+                    if any(block_contains(lines, b, body) for b in find_blocks(lines, prefix)):
+                        complete = False
+                        print("hook  %-50s PRESENT although patch 17 is there (remove it)" % (rel + " " + name))
         for src_rel, dst_rel in FILES:
             st = file_state(root, src_rel, dst_rel)
             complete = complete and st == "same"
@@ -281,6 +424,8 @@ def main(argv):
         return 0 if complete else 1
 
     # Apply: copy the files, then insert the missing hooks.
+    if patch17:
+        print(patch17_note)
     for src_rel, dst_rel in FILES:
         st = file_state(root, src_rel, dst_rel)
         if st != "same":
