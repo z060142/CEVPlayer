@@ -29,8 +29,13 @@ void EndFrame(const SDisplayContextKey& key);
 //! Render thread, the loading loop of SRenderThread::Process, right after the StartLoadtimeFlashPlayback
 //! callback's LoadtimeUpdate (outside m_rdldLock): calls the update registered with SetLoadtimeUpdate.
 void RT_LoadtimeUpdate(float dtSeconds);
+//! Render thread, the loading loop of SRenderThread::Process, inside m_rdldLock, after the StartLoadtimeFlashPlayback
+//! callback's LoadtimeRender and before RT_PresentFast: draws the retained list (clearing the back buffer to opaque
+//! black first unless a flash callback drew). Nothing when the list is empty or the resources / shader are not ready.
+void RT_LoadtimeRender();
 //! Main thread, system event LEVEL_LOAD_START_LOADINGSCREEN: starts the loading loop when an update is
 //! registered and no loop runs (not in the editor, only with a render thread, not for asynchronous loads).
+//! With a non-empty retained list it first has the resources created and the shader prewarmed (at most 2 s).
 void LoadtimeAutoStart();
 //! Main thread, system events LEVEL_LOAD_END / LEVEL_LOAD_ERROR / FAST_SHUTDOWN: stops the loop
 //! LoadtimeAutoStart started, unless a StartLoadtimeFlashPlayback caller joined it (that caller stops it).

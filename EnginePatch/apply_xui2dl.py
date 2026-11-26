@@ -8,7 +8,7 @@
 Every hook is wrapped in "// XUI2DL begin" / "// XUI2DL end" ("#" in CMake). A hook that is already there is
 left alone. When an anchor is missing or ambiguous nothing is written at all. Standard library only.
 
-The loading-loop hooks (section 7: RenderThread.cpp, the flash start / stop and system events, the
+The loading-loop hooks (section 7: RenderThread.cpp update and render calls, the flash start / stop and system events, the
 XUI2DL_LOADTIME_HOOKS define) are inserted only when the tree has no CE_XTUI patch 17 (RenderThread.h
 declaring LoadtimeCallbacks); with patch 17 they are skipped and --check says so. --remove removes all.
 
@@ -119,6 +119,17 @@ def loc_rt_loop(lines):
     return at + 1
 
 
+def loc_rt_render(lines):
+    # Right after the stock flash callback's render in the loading loop (inside m_rdldLock, before RT_PresentFast).
+    at = find_one(lines, r"^\s*m_pLoadtimeCallback->LoadtimeRender\(\);", what="loading loop LoadtimeRender anchor")
+    if not re.match(r"^\s*if\s*\(\s*m_pLoadtimeCallback\s*\)\s*$", lines[at - 1]):
+        raise AnchorError("loading loop LoadtimeRender anchor: the line before is not 'if (m_pLoadtimeCallback)'")
+    after = next((i for i in range(at + 1, len(lines)) if re.search(r"RT_PresentFast\(\);", lines[i])), None)
+    if after is None or after - at > 8:
+        raise AnchorError("loading loop LoadtimeRender anchor: no RT_PresentFast() call right after it")
+    return at + 1
+
+
 def indent_of_line_before(lines, at):
     # The indent of the `if (m_pLoadtimeCallback)` line two lines up (the anchor sits inside that if).
     return indent_of(lines[at - 2])
@@ -188,6 +199,7 @@ LOADTIME_HOOKS = [
     (RC + "RenderThread.cpp", [
         ("include", "//", ['#include "../XUI2DL/XUI2DL.h"'], loc_rt_include, None),
         ("loading loop update", "//", ["XUI2DL::RT_LoadtimeUpdate(deltaTime);"], loc_rt_loop, indent_of_line_before),
+        ("loading loop render", "//", ["XUI2DL::RT_LoadtimeRender();"], loc_rt_render, indent_of_line_before),
     ]),
     (RD + "D3DRenderThread.cpp", [
         ("loading loop join", "//", ["if (XUI2DL::LoadtimeJoin(pCallback))", "\treturn;"], loc_thread_join, "anchor"),

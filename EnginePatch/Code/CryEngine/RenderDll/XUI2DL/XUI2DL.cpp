@@ -13,6 +13,7 @@
 #include "../Common/DevBuffer.h"
 #include "../XRenderD3D9/DeviceManager/DeviceObjectHelpers.h"
 #include "../XRenderD3D9/GraphicsPipeline/Common/PrimitiveRenderPass.h"
+#include "../XRenderD3D9/GraphicsPipeline/Common/UtilityPasses.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -83,6 +84,7 @@ std::atomic<uint32> s_outputHeight{ 0 };
 std::atomic<uint64> s_framesDrawn{ 0 };
 std::atomic<uint64> s_drawsExecuted{ 0 };
 std::atomic<uint64> s_drawsSkipped{ 0 };
+std::atomic<uint64> s_loopFramesDrawn{ 0 };   //!< loading-loop iterations that drew at least one layer
 
 //////////////////////////////////////////////////////////////////////////
 // Render-thread resources (XUI2DResources.h / .cpp, reduced)
@@ -323,28 +325,26 @@ bool PlanarConstants(const XUI2DLLayer& l, const CTexture& tex, SPlanarConstants
 	return true;
 }
 
-void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
+bool ResourcesUsable(const SResources& r)
 {
-	// Lazy creation (M11 section 5): the first non-empty snapshot to execute creates the resources.
-	if (!s_pRes && snap.count > 0 && s_deviceAvailable.load(std::memory_order_acquire))
-		RT_EnsureResources();
-	SResources* const pRes = s_pRes;
-	if (!pRes || !ShaderValid(*pRes) || !pRes->pPass || !pRes->pPassCB || !pRes->bSlotCBs || pRes->vb == ~0u || pRes->ib == ~0u)
-	{
-		s_drawsSkipped.fetch_add(snap.count, std::memory_order_relaxed);
-		return;
-	}
-	SResources& r = *pRes;
-	PROFILE_LABEL_SCOPE("XUI2DL");
-	PrewarmPoll(r);
+	return ShaderValid(r) && r.pPass && r.pPassCB && r.bSlotCBs && r.vb != ~0u && r.ib != ~0u;
+}
 
+//! Draws the snapshot onto the output of `key`; returns the number of layer draws executed. Shared by the main
+//! path (RT_Draw) and the loading loop (RT_LoadtimeRender); `bClearFirst` clears the output to opaque black first.
+uint64 RT_DrawLayers(SResources& r, const SSnapshot& snap, const SDisplayContextKey& key, bool bClearFirst)
+{
+	PROFILE_LABEL_SCOPE("XUI2DL");
 	SRenderViewport outputVp;
 	CTexture* const pColor = ResolveOutput(key, outputVp);
 	if (!pColor)
 	{
 		s_drawsSkipped.fetch_add(snap.count, std::memory_order_relaxed);
-		return;
+		return 0;
 	}
+	// The loading loop does not clear the back buffer (XUI2D's ClearNow, XUI2DRenderer.cpp:675-697).
+	if (bClearFirst && pColor->GetDevTexture())
+		CClearSurfacePass::Execute(pColor, ColorF(0.0f, 0.0f, 0.0f, 1.0f));
 	const int targetW = pColor->GetWidth();
 	const int targetH = pColor->GetHeight();
 	s_outputWidth.store(uint32(std::max(targetW, 0)), std::memory_order_relaxed);
@@ -356,7 +356,7 @@ void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
 	if (vp.width <= 0 || vp.height <= 0)
 	{
 		s_drawsSkipped.fetch_add(snap.count, std::memory_order_relaxed);
-		return;
+		return 0;
 	}
 
 	// Geometry and draw list: one quad per drawable layer, positions in viewport pixels.
@@ -520,8 +520,6 @@ void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
 
 	s_drawsExecuted.fetch_add(executed, std::memory_order_relaxed);
 	s_drawsSkipped.fetch_add(skipped, std::memory_order_relaxed);
-	if (executed > 0)
-		s_framesDrawn.fetch_add(1, std::memory_order_relaxed);
 	r.skippedSinceLog += skipped;
 	if (++r.executions % kLogEvery == 0 && r.skippedSinceLog > 0)
 	{
@@ -529,6 +527,23 @@ void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
 		             (unsigned long long)r.skippedSinceLog, kLogEvery, r.prewarmDone ? "ready" : "compiling");
 		r.skippedSinceLog = 0;
 	}
+	return executed;
+}
+
+void RT_Draw(const SSnapshot& snap, const SDisplayContextKey& key)
+{
+	// Lazy creation (M11 section 5): the first non-empty snapshot to execute creates the resources.
+	if (!s_pRes && snap.count > 0 && s_deviceAvailable.load(std::memory_order_acquire))
+		RT_EnsureResources();
+	SResources* const pRes = s_pRes;
+	if (!pRes || !ResourcesUsable(*pRes))
+	{
+		s_drawsSkipped.fetch_add(snap.count, std::memory_order_relaxed);
+		return;
+	}
+	PrewarmPoll(*pRes);
+	if (RT_DrawLayers(*pRes, snap, key, false) > 0)
+		s_framesDrawn.fetch_add(1, std::memory_order_relaxed);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -592,6 +607,7 @@ void GetStats(XUI2DLStats* pStats)
 	s.framesDrawn = s_framesDrawn.load(std::memory_order_relaxed);
 	s.drawsExecuted = s_drawsExecuted.load(std::memory_order_relaxed);
 	s.drawsSkipped = s_drawsSkipped.load(std::memory_order_relaxed);
+	s.loopFramesDrawn = s_loopFramesDrawn.load(std::memory_order_relaxed);
 	const uint32 bytes = std::min<uint32>(pStats->size, uint32(sizeof(s)));
 	s.size = bytes;
 	memcpy(pStats, &s, bytes);
@@ -713,6 +729,54 @@ void RT_EnsureResources()
 	             bShader ? "ok" : "MISSING", found, int(eTech_Count), ready, bBuffers ? "ok" : "FAILED");
 }
 
+//! Render thread, before the loading loop starts (LoadtimePrewarm): creates the resources when missing and
+//! polls the shader prewarm. The loop itself never creates resources or requests shader instances.
+void RT_PrepareForLoop()
+{
+	if (!s_deviceAvailable.load(std::memory_order_acquire))
+		return;
+	if (!s_pRes)
+		RT_EnsureResources();   // ends with a PrewarmPoll
+	else if (ShaderValid(*s_pRes))
+		PrewarmPoll(*s_pRes);
+}
+
+bool ReadyForLoop()
+{
+	return s_resourcesReady.load(std::memory_order_acquire) && s_shaderReady.load(std::memory_order_acquire);
+}
+
+//! Main thread, LoadtimeAutoStart before it enters the loop: with a non-empty retained list, have the resources
+//! created and the shader prewarmed on the render thread, waiting at most 2 s; on timeout the loop does not draw.
+void LoadtimePrewarm()
+{
+	bool bHaveLayers = false;
+	{
+		CryAutoCriticalSection lock(s_currentLock);
+		bHaveLayers = s_pCurrent != nullptr;
+	}
+	if (!bHaveLayers || !s_deviceAvailable.load(std::memory_order_acquire) || ReadyForLoop())
+		return;
+	const CTimeValue start = gEnv->pTimer->GetAsyncTime();
+	for (;;)
+	{
+		gRenDev->ExecuteRenderThreadCommand([]() { RT_PrepareForLoop(); }, ERenderCommandFlags::None);
+		gcpRendD3D->FlushRTCommands(true, true, true);
+		const float waited = (gEnv->pTimer->GetAsyncTime() - start).GetSeconds();
+		if (ReadyForLoop())
+		{
+			CryLogAlways("[XUI2DL] render resources ready for the loading loop after %.3f s", waited);
+			return;
+		}
+		if (waited >= 2.0f)
+		{
+			CryLogAlways("[XUI2DL] render resources or shader not ready 2 s before the loading loop; the loop will not draw the retained layers");
+			return;
+		}
+		CrySleep(10);
+	}
+}
+
 } // namespace
 
 //////////////////////////////////////////////////////////////////////////
@@ -791,6 +855,33 @@ void RT_LoadtimeUpdate(float dtSeconds)
 	s_loadtimeDispatchThread.store(0, std::memory_order_release);
 }
 
+void RT_LoadtimeRender()
+{
+	// Nothing to draw, or not prepared: never create resources or compile shaders inside the loop (L0 survey C.2).
+	if (!s_deviceAvailable.load(std::memory_order_acquire) || !ReadyForLoop())
+		return;
+	SResources* const pRes = s_pRes;
+	if (!pRes || !ResourcesUsable(*pRes))
+		return;
+	SSnapshot* pSnap = nullptr;
+	{
+		CryAutoCriticalSection lock(s_currentLock);   // the lock SetFrame swaps the pointer under
+		pSnap = s_pCurrent;
+		if (pSnap)
+			SnapshotAddRef(pSnap);
+	}
+	if (!pSnap)
+		return;
+	// The loop does not clear the back buffer: clear it unless a StartLoadtimeFlashPlayback callback drew this
+	// iteration (no callback, or only LoadtimeBeforeStop's stand-in); over a flash callback the layers go on top.
+	const ILoadtimeCallback* const pCallback = gRenDev->m_pRT->m_pLoadtimeCallback;
+	const bool bClear = !pCallback || pCallback == &s_stopMarker;
+	// The display context's own key is not known here: the default key resolves to the active display context.
+	if (RT_DrawLayers(*pRes, *pSnap, SDisplayContextKey{}, bClear) > 0)
+		s_loopFramesDrawn.fetch_add(1, std::memory_order_relaxed);
+	RT_Free(pSnap);   // never drops the last reference on the render loading thread
+}
+
 void LoadtimeAutoStart()
 {
 	// The conditions of CFlashUI::StartRenderThread (minus gfx_loadtimethread, which is FlashUI's own
@@ -805,6 +896,7 @@ void LoadtimeAutoStart()
 	if (!pMT || pMT->GetIVal() <= 0 || !pRT->IsMultithreaded() || (pAsyncLoad && pAsyncLoad->GetIVal() > 0))
 		return;
 
+	LoadtimePrewarm();   // before LockReadIO: creating the resources reads the shader
 	s_loadtimeAutoOwned = true;
 	gEnv->pCryPak->LockReadIO(true);
 	gcpRendD3D->FlushRTCommands(true, true, true);
