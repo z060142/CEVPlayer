@@ -8,12 +8,12 @@
 ## 2.0.0 - 2026-11-27
 
 The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3 - 5.6) with a rewrite for CRYENGINE
-5.7.1 and adds a Sandbox plug-in. Details and the decision log: [docs/PLAN.md](docs/PLAN.md) and `docs/design/`.
+5.7.1 and adds a Sandbox plug-in.
 
 ### Project
 
 * Maintenance passed to [z060142](https://github.com/z060142). The original author, Ilya Chernetsov, is credited in
-  the README ("Credits and maintenance"); his copyright notices stay in the files that carry them. The funding link
+  MANUAL.md ("Credits and maintenance"); his copyright notices stay in the files that carry them. The funding link
   of the original repository (`.github/FUNDING.yml`) is removed from this one.
 
 ### Runtime
@@ -31,18 +31,14 @@ The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3
   `patches/optional/02-cryaudio-trigger-position.patch`, SDL_mixer implementation), clock fallback otherwise.
 * Optional hardware decode of VP9 through Media Foundation (VP9 Video Extensions), read back into the same frame ring,
   automatic fallback to libvpx; per player `Decode = Auto | GPU | CPU`, `cev_decodeMode`, `cev_decodeAutoMinHeight`.
-* Console variables and commands `cev_*` (see the README); statistics `cev_stats`, `cev_stats_file`.
+* Console variables and commands `cev_*` (see MANUAL.md); statistics `cev_stats`, `cev_stats_file`.
 * The fullscreen output is drawn by XUI2DL, a minimal 2D stage inside the renderer added by the engine patch
-  `EnginePatch/apply_xui2dl.py` (`docs/design/M11-xui2dl.md`); the renderer's aux geometry is no longer used.
+  `EnginePatch/apply_xui2dl.py`; the renderer's aux geometry is no longer used.
 * An engine without the XUI2DL patch has no fullscreen output (one error line in the log; playback, audio, material and
   surface outputs are unaffected).
-* On an engine with XTFrame (its XUI2D 2D pass with planar shading), the fullscreen output goes through that XUI2D
-  instead, as one more screen surface drawn below the XTFrame UI; XUI2DL is not used there.
-* With XTFrame's XUI2D and `XUI2D_Patched` bit 512, fullscreen players also keep playing during level loading screens: an
-  order-150 loading-loop callback draws the last fullscreen frame composed before the load (below the XTFrame loading
-  UI); `cev_info` reports `loop=0|1`.
-* XUI2DL brings its own loading-loop driver for engines without XTFrame: surface and fullscreen players keep playing
-  during level loading screens there too, the retained fullscreen layers are drawn inside the loop and survive a level
+* XUI2DL is modified from the XUI2D render stage of XTFrame, used under the MIT licence (notice next to its sources).
+* XUI2DL brings its own loading-loop driver: surface and fullscreen players keep playing
+  during level loading screens, the retained fullscreen layers are drawn inside the loop and survive a level
   unload. During a load a fullscreen player keeps its texture and layout; changes are applied after the load.
 * Fullscreen players are no longer forced to RGBA8: packed YUV is kept and converted on the GPU when the 2D stage
   supports it (`GetPixelLayout` reports the packed layout).
@@ -60,13 +56,13 @@ The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3
 * Surface id registry: author-chosen ids (1 to 63 of `A-Z a-z 0-9 _ . : -`, case insensitive), duplicates refused, the id
   survives file / track / variant / size changes.
 * Texture-source contract: export `CryTexSource_v1`, contract version 2 (`query`, `hint`, `open`, `close`, `control`),
-  specified in `docs/design/M6-ui-source.md` §3. Contract functions never call the engine.
+  specified in `UI-SOURCE.md`. Contract functions never call the engine.
 * Consumer hints: visibility throttling (decode only while hidden, stop after `cev_hiddenStopSeconds`, catch-up from the
   previous key frame), variant choice from the on-screen size at playback start, `PauseDecodeWhenHidden`.
 * Packed planar layouts `PACKED_YUV420` / `PACKED_YUVA420` (one `R8` texture) negotiated through `acceptLayouts`, RGBA
   conversion only when a consumer needs RGBA8, layout switches without reloading the video; `cev_allowPlanar`.
 * Self test `cev_contract_selftest`.
-* Level loading screens (M10): with a renderer that offers load-time callbacks (engine patch 17, `XUI2D_Patched` bit 7),
+* Level loading screens: with a renderer that offers load-time callbacks,
   texture-only players run in the engine's loading loop (order-100 callback, its dt capped at 0.25 s) and contract
   commands are applied there; fullscreen and material outputs pause; events are delivered after the load.
   `cev_loadtime` (0 = old behaviour); `cev_info` / `cev_surfaces` report the state. A seek while paused now replaces the

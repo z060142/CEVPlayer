@@ -47,7 +47,7 @@ found on `PATH`) can be used instead; at run time no FFmpeg is used.
   (libvpx-vp9, libopus, libvorbis, pcm_s16le), muxers (webm, ogg, wav), filters (scale, format, aresample and the
   framework filters ffmpeg selects), parsers, bitstream filters and the file / pipe protocols; `--disable-gpl
   --disable-nonfree --disable-version3`. The build script refuses to package when `ffmpeg -version` reports gpl,
-  nonfree or version3. The full list is in `docs/design/M5-ffmpeg.md` §7.
+  nonfree or version3.
 * Contents of the zip (flat): `ffmpeg.exe`, `LICENSE` (LGPL 2.1), `BUILD.txt` (source URLs and SHA-256, tool chain,
   configure arguments), the build script and `versions.env`, and `licenses/` with `FFmpeg-COPYING.LGPLv2.1`,
   `FFmpeg-LICENSE.md`, `libvpx-LICENSE`, `libvpx-PATENTS`, `opus-COPYING`, `libogg-COPYING`, `libvorbis-COPYING`,

@@ -129,7 +129,7 @@ other_links="$(find "$engine/Code/SDKs" -mindepth 1 -maxdepth 1 -type l 2>/dev/n
 if [ "${#linked[@]}" -gt 0 ]; then
   msg="these paths are junctions / symbolic links: ${linked[*]}"$'\n'
   msg+="  sync_sources.sh replaces its destination folders as a whole (rm -rf, then copy), which can change the tree they"$'\n'
-  msg+="  point into. Copy by hand instead (README, 'Build and integration' caveat): Code/CryPlugins/CEVPlayer,"$'\n'
+  msg+="  point into. Copy by hand instead (MANUAL.md, 'Build and integration' caveat): Code/CryPlugins/CEVPlayer,"$'\n'
   msg+="  Code/Sandbox/Plugins/EditorCEVPlayer, Code/SDKs/CEVPlayer and cmake/modules/*.cmake (-> Tools/CMake/modules/),"$'\n'
   msg+="  then run this script with --force-sync only if you accept the rm -rf on those paths."
   if [ "$force_sync" -eq 1 ]; then say "warning: $msg"; say "--force-sync given: continuing"; else problems+=("$msg"); fi
