@@ -290,13 +290,48 @@ the descriptor's folder.
 
 ## Build and integration
 
-Requirements: Windows 10/11 x64, Visual Studio 2022 (MSVC 14.4x, C++ desktop workload, ATL/MFC for Sandbox), a Windows
-SDK, Git Bash for the scripts, a CRYENGINE 5.7.1 source tree or the community fork. Optional: "VP9 Video Extensions"
-from the Microsoft Store for hardware decode; FFmpeg for transcoding in the editor (can be downloaded by the editor).
+There is no prebuilt plug-in DLL: you build the plug-ins inside your own engine tree. The third-party libraries are
+already prebuilt in this repository (`Code/SDKs/CEVPlayer/`), so you do not build them yourself.
+
+Requirements: Windows 10/11 x64, Visual Studio 2022 (MSVC 14.4x, C++ desktop workload), a Windows SDK, Git Bash for the
+scripts, a CRYENGINE 5.7.1 source tree or the community fork. The Sandbox plug-in (`EditorCEVPlayer`) additionally needs
+the Visual Studio components "C++ ATL" and "C++ MFC" (the engine's editor code uses them); without them build with
+`--no-editor`. `--xui2dl` needs python 3. Optional: "VP9 Video Extensions" from the Microsoft Store for hardware decode;
+FFmpeg for transcoding in the editor (can be downloaded by the editor).
 
 Nothing is built inside this repository: the sources are copied into an engine tree.
 
-### Official CRYENGINE 5.7.1 source
+### Quick start
+
+One command runs the manual steps below in order (sync, patches, optional XUI2DL, CMake configure, build):
+
+```bash
+bash tools/setup_engine.sh /path/to/engine --xui2dl        # add --dry-run first to see what it would do
+```
+
+| Option | Effect |
+|---|---|
+| `--xui2dl` | also applies the XUI2DL renderer patch ([Fullscreen output](#fullscreen-output-and-the-renderer)) and builds `CryRenderD3D11`; needed for fullscreen video on an engine without XTFrame |
+| `--with-optional` | forwarded to `apply_patches.sh` (optional CryAudio patch for the cue route) |
+| `--config Profile\|Release\|Debug` | build configuration (default `Profile`) |
+| `--no-editor` | configures with `-DOPTION_SANDBOX=OFF` and skips `EditorCEVPlayer` |
+| `--no-build` | stops after the CMake configure step |
+| `--force-sync` | runs `sync_sources.sh` even when a path it replaces is a junction or symbolic link (see the caveat below) |
+| `--dry-run` | prints what would be done and runs only read-only checks; writes nothing |
+
+It first checks the tree (5.7.1 or community fork, same detection as `apply_patches.sh`), the engine's own CMake,
+MSBuild (through `vswhere`) and, with `--xui2dl`, python 3, and lists whatever is missing. Each step prints one start /
+result line; on a failure it stops and names the log (`<engine>/win64/cevplayer_setup_<step>.log`). The build is plain
+MSBuild of the solution targets through `tools/build_engine.sh`, which adds only the generic
+`tools/msbuild/toolset_compat.props` (one define for Qt 5.12 on VS 2022 17.8+), not the development machine's
+`baseline_compat.props`. It can be run again.
+At the end it prints the built DLLs and the `.cryproject` line from [Use in a project](#use-in-a-project).
+
+It does **not** install Visual Studio or any component, does not download an engine and does not edit your project files.
+
+### Manual steps
+
+#### Official CRYENGINE 5.7.1 source
 
 ```bash
 # 1. copy plug-in sources, SDKs and CMake modules into the engine tree (one direction: edit here, sync there)
@@ -325,7 +360,7 @@ machine (building the solution targets with plain MSBuild works where ATL/MFC is
 <installed bin>` copies the DLLs into an installed engine (with backups). Details:
 [docs/research/02-baseline-build.md](docs/research/02-baseline-build.md).
 
-### Community Edition (CECE, CryENGINE-5-7-community)
+#### Community Edition (CECE, CryENGINE-5-7-community)
 
 CECE ([CryENGINE-5-7-community](https://github.com/z060142/CryENGINE-5-7-community)) has CEVPlayer built in: it is
 part of the engine tree and is built with it, so most CECE users do nothing here. CECE releases take their CEVPlayer

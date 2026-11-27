@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+* `tools/setup_engine.sh`: one command from an engine tree to built plug-ins (checks, sync, patches, optional XUI2DL,
+  CMake configure, plain MSBuild build); `tools/apply_patches.sh --detect` identifies a tree without writing.
+
 ## 2.0.0 - 2026-11-27
 
 The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3 - 5.6) with a rewrite for CRYENGINE
