@@ -1,13 +1,8 @@
 # Changelog
 
-## Unreleased
-
-* `tools/setup_engine.sh`: one command from an engine tree to built plug-ins (checks, sync, patches, optional XUI2DL,
-  CMake configure, plain MSBuild build); `tools/apply_patches.sh --detect` identifies a tree without writing.
-
 ## 2.0.0 - 2026-11-27
 
-The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3 - 5.6) with a rewrite for CRYENGINE
+This version replaces the Libav based plug-in (CRYENGINE 5.3 - 5.6) with a rewrite for CRYENGINE
 5.7.1 and adds a Sandbox plug-in.
 
 ### Project
@@ -104,6 +99,8 @@ The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3
 
 ### Tooling
 
+* `tools/setup_engine.sh`: one command from an engine tree to built plug-ins (checks, sync, patches, optional XUI2DL,
+  CMake configure, plain MSBuild build); `tools/apply_patches.sh --detect` identifies a tree without writing.
 * `tools/sync_sources.sh`, `tools/apply_patches.sh` with the engine patch series in `patches/` (vanilla 5.7.1 and the
   community fork, tree detection by file hashes), `tools/build_baseline.sh`, `tools/build_engine.sh`, `tools/deploy.sh`.
 * `tools/build_sdks.sh` (third-party libraries), `tools/ffmpeg/build_minimal.sh` + `versions.env` (minimal FFmpeg),
