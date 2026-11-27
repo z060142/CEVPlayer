@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """List the files of CEV video assets that must not go into a game's pak files.
 
-An EditorCEVPlayer video asset keeps more files in its folder than the game needs (docs/design/M4-asset-and-editor.md):
+An EditorCEVPlayer video asset keeps more files in its folder than the game needs:
 
   <name>.cevvideo.cryasset   editor metadata. The engine's pak jobs already skip *.cryasset.
   <name>.webm (source copy)  the file as imported. It is also the video the descriptor plays until "Strip audio" /
@@ -17,7 +17,7 @@ are listed in the asset but that the descriptor does not play.
 
   --listfile FILE   write the list to FILE instead of stdout
   --format rc       (default) paths relative to the Assets folder with backslashes, one per line: what the Resource
-                    Compiler's /exclude_listfile= expects (see docs / README "Source file policy")
+                    Compiler's /exclude_listfile= expects (see MANUAL.md, "Source file policy")
   --format rel      relative paths with forward slashes (e.g. for .gitignore / LFS / copy filters)
   --format abs      absolute paths
 

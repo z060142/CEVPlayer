@@ -341,7 +341,7 @@ namespace CEVPlayer
 
 #if CEV_HAVE_LOADTIME_CALLBACKS
 			//! L6: the order-150 loadtime callback (between the texture sources at 100 and the UIs at 200, so the video
-			//! lands under the XTFrame UI). XTFrame CE-117 / docs/10 section 10.8 (XUI2D_Patched bit 512): Begin + Submit in
+			//! lands under the XTFrame UI). XTFrame CE-117 (XUI2D_Patched bit 512): Begin + Submit in
 			//! the update phase, Execute in the render phase; only the first screen-surface entry to execute in an
 			//! iteration gets its ClearOutput, so asking for it every time clears only when nothing was drawn before.
 			class CLoopDraw final : public ILoadtimeCallback

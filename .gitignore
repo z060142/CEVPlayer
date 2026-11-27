@@ -17,3 +17,6 @@
 
 # Generated test clips (tools/make_test_media.sh)
 /test_media/
+
+# internal working documents (kept locally, not published)
+/docs/

@@ -1,4 +1,4 @@
-// FlowGraph nodes: eleven hand described composite nodes in three categories (docs/design/M6-ui-source.md section 4.2).
+// FlowGraph nodes: eleven hand described composite nodes in three categories.
 // Registered through the engine's auto registration list (CAutoRegFlowNodeBase), so CVideoPlugin's
 // PLUGIN_FLOWNODE_REGISTER picks them up.
 //
@@ -1074,7 +1074,7 @@ namespace CEVPlayer
 
 			// ========================================================================================== Flash UI (S2)
 			//! The one node that uses the C++ player API instead of the table: IVideoPlugin::FindPlayerBySurface and
-			//! IVideoPlayer::AttachToFlash / DetachFromFlash (docs/design/M12-scaleform-attach.md). No player of its own.
+			//! IVideoPlayer::AttachToFlash / DetachFromFlash. No player of its own.
 			class CAttachToFlashNode final : public CFlowBaseNode<eNCT_Instanced>
 			{
 				enum EIn { eI_Attach, eI_Detach, eI_SurfaceId, eI_UIElement, eI_InstanceId, eI_MovieClip };

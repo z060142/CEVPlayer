@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Apply the CEVPlayer engine patch series (patches/) to a CRYENGINE source tree.
 #
-#   tools/apply_patches.sh <engine-root> [--force] [--with-optional]
+#   tools/apply_patches.sh <engine-root> [--force] [--with-optional] [--detect]
 #
 # Two engine trees are supported, each with its own series:
 #   vanilla    CRYENGINE 5.7.1            patches/NN-*.patch
@@ -18,12 +18,14 @@
 #
 # Idempotent: a patch that is already applied ("git apply --reverse --check" succeeds) is skipped.
 # Nothing is committed; the patches only modify the working tree.
+# --detect: only identify the tree (prints the variant, exit 0; unknown tree: the reasons, exit 1), write nothing.
 set -euo pipefail
 
 usage() {
-  echo "usage: apply_patches.sh <engine-root> [--force] [--with-optional]" >&2
+  echo "usage: apply_patches.sh <engine-root> [--force] [--with-optional] [--detect]" >&2
   echo "  Applies patches/*.patch (vanilla 5.7.1) or the community series (CECE) to <engine-root>." >&2
   echo "  --with-optional  also applies patches/optional/*.patch (community: patches/community/optional/)." >&2
+  echo "  --detect         only identifies the tree (vanilla / community), writes nothing." >&2
   exit 2
 }
 
@@ -31,10 +33,12 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 engine=""
 force=0
 with_optional=0
+detect=0
 for arg in "$@"; do
   case "$arg" in
     --force) force=1 ;;
     --with-optional) with_optional=1 ;;
+    --detect) detect=1 ;;
     -h|--help) usage ;;
     -*) echo "apply_patches: unknown option $arg" >&2; usage ;;
     *) [ -z "$engine" ] && engine="$arg" || usage ;;
@@ -130,6 +134,7 @@ if [ -z "$variant" ]; then
 fi
 
 echo "apply_patches: $engine -> $variant ($(git -C "$engine" rev-parse --short HEAD 2>/dev/null || echo 'not a git repo'))"
+[ "$detect" -eq 1 ] && exit 0
 
 applied=0 skipped=0
 apply_list() { # patch paths on stdin

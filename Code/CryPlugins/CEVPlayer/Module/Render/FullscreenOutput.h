@@ -1,5 +1,5 @@
-// Fullscreen output: the fullscreen players (and the development debug layers) drawn by a 2D stage of the renderer
-// (docs/design/M11-xui2dl.md). Two backends: an engine with XTFrame's XUI2D (IXUIRenderer, CEV_HAVE_XUI2D) gets the
+// Fullscreen output: the fullscreen players (and the development debug layers) drawn by a 2D stage of the renderer.
+// Two backends: an engine with XTFrame's XUI2D (IXUIRenderer, CEV_HAVE_XUI2D) gets the
 // layers as frames of one more XUI2D screen surface, below the XTFrame UI (Render/FullscreenXUI2D.*); any other engine
 // needs the XUI2DL patch (EnginePatch/) and gets one retained layer list. There is no other drawing path: an engine
 // with neither has no fullscreen output. Main thread only.

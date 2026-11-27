@@ -1,6 +1,6 @@
 // CPU reference of the consumer side of the packed planar layouts (texture source contract, CTS_LAYOUT_PACKED_YUV420 /
 // CTS_LAYOUT_PACKED_YUVA420). Test and documentation only - never on a runtime path. The mathematics is written out
-// in docs/design/M6-ui-source.md section 12 ("Reference implementation of planar sampling").
+// in UI-SOURCE.md section 6 ("Sampling a packed layout").
 //
 // Input: one R8 picture as the source uploads it (packedWidth x packedHeight texels, tight rows) and the rectangles,
 // matrix, range and chroma siting of the contract snapshot. Output: premultiplied RGBA8, width x height (the picture).

@@ -1,5 +1,5 @@
-// M8 measurement probe: what the process RAM of one playing video consists of (docs/design/M6-ui-source.md section 10:
-// the engine measured 110..160 MB per 1080p video while the frame ring alone accounts for 44..51 MB).
+// M8 measurement probe: what the process RAM of one playing video consists of
+// (the engine measured 110..160 MB per 1080p video while the frame ring alone accounts for 44..51 MB).
 //
 //   ram_probe <clip.webm> [frames=90] [ringRgba 0|1 = 1]
 //

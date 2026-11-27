@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply, check or remove the XUI2DL engine patch (docs/design/M11-xui2dl.md section 3).
+"""Apply, check or remove the XUI2DL engine patch.
 
     python apply_xui2dl.py <engine root>            copy the XUI2DL files and insert the hooks
     python apply_xui2dl.py <engine root> --check    report the state, write nothing

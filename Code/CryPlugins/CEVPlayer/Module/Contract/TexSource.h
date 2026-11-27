@@ -1,5 +1,5 @@
 // Texture source contract (CryTexSource), source side. The C declarations below are copied verbatim from
-// docs/design/M6-ui-source.md section 3; the consumer (another plug-in) keeps its own copy. Do not include any
+// UI-SOURCE.md section 3; the consumer (another plug-in) keeps its own copy. Do not include any
 // file of another plug-in here and do not change the field order: both copies must stay identical.
 #pragma once
 
@@ -9,10 +9,10 @@
 extern "C" {
 #endif
 
-// ---- begin: verbatim copy of docs/design/M6-ui-source.md section 3 ----
+// ---- begin: verbatim copy of UI-SOURCE.md section 3 ----
 /* Threading: all calls come from one thread at a time - the consumer's UI update thread. That is
-   the main thread, except during level loading as specified in <loading doc, pending>. The source
-   must not assume the engine main thread.
+   the main thread, except during level loading (section 8). The source must not assume the engine
+   main thread.
    Strings: UTF-8, valid only for the duration of the call. Names are surface ids, compared
    case-insensitively.
    Sizes: every struct starts with `size` (set by whoever allocates it). Neither side reads or writes

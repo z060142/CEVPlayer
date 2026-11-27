@@ -328,7 +328,7 @@ namespace CEVPlayer
 
 
 			// ======================================================================================== M8 part
-			// Layout negotiation (docs/design/M6-ui-source.md section 3 rules 5-8, section 5.2): packed planes only while
+			// Layout negotiation (UI-SOURCE.md sections 4 and 5): packed planes only while
 			// every live consumer accepts them, the stream is 4:2:0 with an even width, there is no fullscreen / material
 			// output and cev_allowPlanar is on. The test plays the role of the consumer and checks the uploaded bytes.
 			constexpr const char* kM8 = "CevM8";       // vp8_vorbis.webm 640x360 (audio: the clock is the audio clock)

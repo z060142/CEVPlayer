@@ -1,7 +1,7 @@
 // What the editor stores in the "Details" of a video asset's .cryasset (editor only, not shipped) and helpers to
 // read / write it.
 //
-// Files of one video asset (all flat in one folder, every name starts with the asset name, see docs/research/04 §2.3):
+// Files of one video asset (all flat in one folder, every name starts with the asset name):
 //   <name>.cevvideo               runtime descriptor (Files[0])
 //   <name>.webm                   the video: copy of a WebM source, or what FFmpeg made of the source (not shipped when the descriptor points elsewhere)
 //   <name>_source.<ext>           source copy of an FFmpeg import / re-encode (never shipped; no copy for a PNG sequence)

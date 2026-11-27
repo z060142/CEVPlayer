@@ -2,7 +2,7 @@
 // the plan runner that executes the builders' output through FfmpegRunner.
 //
 // Only features of the minimal FFmpeg build are used: libvpx-vp9, libopus, the webm muxer and the scale / format
-// filters (see docs/design/M5-ffmpeg.md); two pass encoding writes its first pass to a webm muxer on NUL, so no
+// filters; two pass encoding writes its first pass to a webm muxer on NUL, so no
 // "null" muxer is required.
 #pragma once
 
@@ -97,7 +97,7 @@ namespace cev
 			};
 
 			// Keyframe interval of the encodes (M7): round(frameRate x 2 s), at least 1; 60 when the rate is unknown (<= 0).
-			// Bounds the catch-up of a player that becomes visible again (docs/design/M6-ui-source.md section 5.3).
+			// Bounds the catch-up of a player that becomes visible again.
 			int KeyframeIntervalFrames(double frameRate);
 
 			// TranscodeToWebm: VP9 (+ Opus) in WebM. Alpha: yuva420p + -auto-alt-ref 0 (libvpx-vp9 alpha requirement).

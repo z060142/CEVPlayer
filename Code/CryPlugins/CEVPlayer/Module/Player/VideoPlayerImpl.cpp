@@ -1349,7 +1349,7 @@ namespace CEVPlayer
 	}
 
 	// ------------------------------------------------------------------------------------------------ Flash UI clips (S2)
-	// docs/design/M12-scaleform-attach.md: the RGBA8 texture is loaded into a movie clip with IUIElement::LoadTexIntoMc;
+	// The RGBA8 texture is loaded into a movie clip with IUIElement::LoadTexIntoMc;
 	// Scaleform keeps sampling it in place, so only a new texture (size / layout change, Unload) needs a FlashUI call.
 	bool CVideoPlayerImpl::FlashCallsAllowed()
 	{

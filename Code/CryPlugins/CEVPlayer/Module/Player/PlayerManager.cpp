@@ -392,7 +392,7 @@ namespace CEVPlayer
 	namespace
 	{
 		//! L6: the XUI2D backend's loading-loop drawing runs after the players' tick (order 100, the texture uploads of
-		//! the iteration) and before the UIs (200), so the video lands under the XTFrame UI (XTFrame docs/10 section 10.8).
+		//! the iteration) and before the UIs (200), so the video lands under the XTFrame UI.
 		constexpr int kLoopDrawOrder = 150;
 	}
 

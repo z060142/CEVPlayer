@@ -1,4 +1,4 @@
-// Fullscreen output, XUI2D backend (docs/design/M11-xui2dl.md section 8, L5): on an engine with XTFrame's XUI2D
+// Fullscreen output, XUI2D backend (L5): on an engine with XTFrame's XUI2D
 // (CryRenderer/IXUIRenderer.h with EShading::TexturePlanar, CEV_HAVE_XUI2D) the fullscreen quads go to one more XUI2D
 // screen surface, a second client next to the CryXTUI plug-in. XUI2D is not retained: every frame with quads is
 // submitted, from UpdateBeforeRender, so it lands in the same frame batch as CryXTUI's surfaces and is drawn below

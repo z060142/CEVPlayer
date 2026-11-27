@@ -12,7 +12,7 @@
 
 #include <CryCore/Platform/CryWindows.h>
 
-// Rule 10 of docs/design/M6-ui-source.md section 3: the contract functions (Query, Hint, OpenSurface, CloseSurface,
+// UI-SOURCE.md section 4 (Threading): the contract functions (Query, Hint, OpenSurface, CloseSurface,
 // Control) make no engine call. They only touch the table below, guarded by one SRW lock (no constructor or
 // destructor, usable from the first call to the end of the process).
 
