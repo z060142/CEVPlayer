@@ -1,4 +1,4 @@
-// Access to the renderer's XUI2DL stage (docs/design/M11-xui2dl.md): the "XUI2DL_GetApi" export of a patched
+// Access to the renderer's XUI2DL stage: the "XUI2DL_GetApi" export of a patched
 // renderer DLL (EnginePatch/apply_xui2dl.py). Main thread.
 #pragma once
 

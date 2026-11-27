@@ -1,6 +1,6 @@
 // The bridge player: one cev::PlayerCore + its RGBA texture + its outputs. The IVideoPlayer methods are main thread
 // only (the decode workers and the audio thread only touch the PlayerCore, never this class). Tick() does not assume
-// the main thread (docs/design/M6-ui-source.md section 9): its time comes from the caller.
+// the main thread: its time comes from the caller.
 #pragma once
 
 #include <cstdint>
@@ -267,7 +267,7 @@ namespace CEVPlayer
 		int VariantTargetHeight() const;
 		//! Surface players: writes the snapshot that CryTexSource query returns (end of Tick; no engine call).
 		void PublishSnapshot();
-		// ---- S2: Flash UI movie clips (docs/design/M12-scaleform-attach.md)
+		// ---- S2: Flash UI movie clips
 		struct SFlashClip
 		{
 			std::string element;          // UI element name

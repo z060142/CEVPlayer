@@ -1,4 +1,4 @@
-// Media Foundation hardware decode backend (M9, docs/tasks/M9.md rulings R1 / R2; docs/design/M6-ui-source.md §6, §10).
+// Media Foundation hardware decode backend (M9, rulings R1 / R2).
 //
 // One dedicated thread per backend ("CEV MF Decode") owns everything COM / D3D: CoInitializeEx(MTA), the process-wide
 // counted MFStartup / MFShutdown, a private D3D11 device on the first DXGI adapter (VIDEO_SUPPORT, multithread

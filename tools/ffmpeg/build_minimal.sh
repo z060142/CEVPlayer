@@ -8,7 +8,7 @@
 #             mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf zip curl xz tar perl
 #   tools/ffmpeg/build_minimal.sh [--work <dir>] [--out <dir>] [--jobs <n>]
 #
-# Scope (docs/design/M5-ffmpeg.md): --disable-everything, then only
+# Scope: --disable-everything, then only
 #   demuxers  mov/mp4, matroska/webm, avi, image2 (PNG sequence)
 #   decoders  h264, hevc, prores (incl. 4444), vp8, vp9 (native + libvpx), av1 (libdav1d), png, aac, mp3, opus,
 #             vorbis, flac, pcm

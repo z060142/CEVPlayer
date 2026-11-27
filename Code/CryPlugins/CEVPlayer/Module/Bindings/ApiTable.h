@@ -4,7 +4,7 @@
 // flag and - for controls and queries - a plain C++ function that implements it on top of IVideoPlayer). The
 // Schematyc component functions / signals, the CryVS elements and the console self test are generated from this
 // table (one function per entry). The FlowGraph nodes (Bindings/FlowApiNodes.cpp) are ten hand described composite
-// nodes that only call table functions (docs/design/M6-ui-source.md section 4.2); none of them contains any playback
+// nodes that only call table functions; none of them contains any playback
 // logic of its own.
 //
 // Players are addressed by an integer handle (see CApiPlayers). Handle 0 is never valid. A call with a handle that

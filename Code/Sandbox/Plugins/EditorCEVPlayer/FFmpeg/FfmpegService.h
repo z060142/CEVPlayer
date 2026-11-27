@@ -1,4 +1,4 @@
-// The editor's view of the external FFmpeg (docs/design/M5-ffmpeg.md, "Editor side"): which ffmpeg is used, what it can do,
+// The editor's view of the external FFmpeg: which ffmpeg is used, what it can do,
 // the download of our minimal build, and thin wrappers around the CEVPlayerFFmpeg transcode calls.
 //
 // Threading: Status() / WaitForExe() are safe on any thread. Everything else (SetPath, StartDetect, StartDownload, the modal

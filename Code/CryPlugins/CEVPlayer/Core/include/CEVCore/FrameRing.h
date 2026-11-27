@@ -2,7 +2,7 @@
 // All plane memory is allocated once in Init(); steady state never allocates. The RGBA buffers are on demand (M8):
 // allocated / freed only when the output switches between RGBA and planar (EnsureRgba / ReleaseRgba).
 //
-// Packed layout (M8, docs/design/M6-ui-source.md section 5.1): for 4:2:0 with an even width every slot is ONE
+// Packed layout (M8): for 4:2:0 with an even width every slot is ONE
 // contiguous buffer, rows of exactly `width` bytes: Y (0, 0, w, h), U (0, h, cw, ch), V (cw, h, cw, ch) and, with
 // alpha, A (0, h + ch, w, h). The plane pointers / strides point into it, so the converter and WriteFrame work on
 // both layouts. Other subsamplings (4:2:2, 4:4:4, 4:4:0) and odd widths keep separate 16 byte aligned planes.

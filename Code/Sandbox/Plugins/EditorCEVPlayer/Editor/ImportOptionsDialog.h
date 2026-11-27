@@ -30,7 +30,7 @@ namespace CEVEditor
 		//! Shows the dialog on the main thread and returns false when the user cancelled. Safe to call from any thread:
 		//! on a background thread (the engine runs importers there) the dialog is posted to the main thread and this
 		//! call waits for its result; on the main thread it simply runs. NEVER wait for the main thread while the main
-		//! thread waits for you (docs/research/04 §2.6, "PostOnMainThread().get() deadlock").
+		//! thread waits for you ("PostOnMainThread().get() deadlock").
 		//! `folderRel` = destination folder. After OK the target is checked again (the user may have renamed the asset):
 		//! when an asset of that name exists the user is asked and may refuse (the dialog comes back); a yes sets
 		//! options.overwrite. `alreadyConfirmedName` = name the engine's own import dialog already asked about.

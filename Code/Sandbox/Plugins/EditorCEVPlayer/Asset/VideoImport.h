@@ -1,7 +1,7 @@
 // Import of a video file into a video asset and the follow-up operations on an existing asset. Shared by the importer
 // (drag and drop, background thread), the console command cev_editor_import (main thread) and the editor window.
 //
-// Layout (docs/design/M4-asset-and-editor.md, M5-ffmpeg.md): a WebM source is COPIED into the asset's folder as <name>.webm
+// Layout: a WebM source is COPIED into the asset's folder as <name>.webm
 // (that is also the video the descriptor starts with). Any other source (mp4 / mov / mkv / avi) is copied as
 // <name>_source.<ext> and transcoded by FFmpeg to <name>.webm; a PNG sequence is transcoded from its own folder (not copied).
 // A WebM that is re-encoded at import is copied as <name>_source.webm. <name>_<height>p.webm are the variants listed in the

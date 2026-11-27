@@ -13,8 +13,7 @@
 #   --project FILE       .cryproject (default $CEV_PROJECT, else D:/coding11/_testproject/CEVTest/CEVTest.cryproject)
 #   --timeout N          hard timeout in seconds; the process is killed and the run FAILs
 #                        (default 300; the very first run on a tree is slower (~1 min: rc.exe converts
-#                        EngineAssets .tif textures, shaders compile into <project>/user/shaders) -
-#                        see docs/research/03-smoke-test.md)
+#                        EngineAssets .tif textures, shaders compile into <project>/user/shaders))
 #   --out DIR            where logs go (default <project dir>/../smoke_logs/<stamp>_<engine>_<mode>)
 #   --expect REGEX       extra: log must match REGEX (repeatable)
 #   --forbid REGEX       extra: log must NOT match REGEX (repeatable)

@@ -1,5 +1,5 @@
 // Small job system for the long operations (split audio, WAV, Ogg, source verification, ...): one std::thread per job,
-// independent of the engine's single background queue (docs/research/04 §5). Jobs only do plain C++ (Core / file I/O /
+// independent of the engine's single background queue. Jobs only do plain C++ (Core / file I/O /
 // IOfflineOps); their completion callback runs on the main thread (a Qt queued call into this object). The runner is
 // owned by the plug-in and joins its threads on destruction (cancelling them first); no thread is ever detached.
 //

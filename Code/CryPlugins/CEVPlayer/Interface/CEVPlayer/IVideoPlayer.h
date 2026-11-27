@@ -1,7 +1,7 @@
 // CEVPlayer public player API (interface version 6).
 //
 // This header is for game code that links CEVPlayer directly. Other plug-ins connect through the texture source
-// contract of docs/design/M6-ui-source.md section 3 (exported function CryTexSource_v1) instead of this header.
+// contract of UI-SOURCE.md (exported function CryTexSource_v1) instead of this header.
 // It contains no CRYENGINE includes and no implementation details. Obtain the factory through IVideoPlugin (CEVPlayer/IVideoPlugin.h):
 //
 //     IVideoPlugin* pPlugin = gEnv->pSystem->GetIPluginManager()->QueryPlugin<CEVPlayer::IVideoPlugin>();

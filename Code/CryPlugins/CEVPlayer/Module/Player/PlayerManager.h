@@ -1,6 +1,6 @@
 // Owns all bridge players, ticks them once per frame, dispatches their events at a fixed point and keeps
 // renderer calls away from level loading and shutdown. Main thread only, except UpdateBeforeRender(dt), which does
-// not assume the main thread (docs/design/M6-ui-source.md section 9): its time comes from the caller.
+// not assume the main thread: its time comes from the caller.
 #pragma once
 
 #include <cstdint>

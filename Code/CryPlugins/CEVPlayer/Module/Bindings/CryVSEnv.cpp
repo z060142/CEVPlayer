@@ -1,6 +1,6 @@
 // CryVS bindings (M6c). Compiled only when CMake found the CryVS headers (CEV_HAVE_CRYVS=1, community tree).
 //
-// What is registered (docs/design/M6-ui-source.md section 4.2, docs/tasks/M6c.md):
+// What is registered:
 // - Three drawers = three namespaces of global functions (catalogue path Function::<Namespace>::<Name>): Video,
 //   CEVPlayer::UI and CEVPlayer::Advanced. They are handle based and only call table functions (Api::Call); players they create
 //   are script owned (DestroyScriptOwned removes them when a level unloads / the editor game mode ends). CryVS

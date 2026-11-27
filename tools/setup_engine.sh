@@ -190,18 +190,12 @@ else
   cmake_note="no win64/ yet: first configure"
 fi
 
-xui2d_note=""
-if [ "$xui2dl" -eq 1 ] && [ -d "$engine/Code/CryEngine/RenderDll/XUI2D" ]; then
-  xui2d_note="this tree already has the XTFrame XUI2D stage: XUI2DL can still be applied, but the plug-in will use XUI2D"
-fi
-
 if [ "$dry" -eq 1 ]; then
   n=1; say "[$n/$total] sync sources: would run tools/sync_sources.sh $engine --dry-run"
   bash "$here/tools/sync_sources.sh" "$engine" --dry-run | sed 's/^/    /'
   n=$((n + 1)); say "[$n/$total] engine patches: would run tools/apply_patches.sh $engine$([ "$with_optional" -eq 1 ] && echo ' --with-optional')"
   if [ "$xui2dl" -eq 1 ]; then
     n=$((n + 1)); say "[$n/$total] XUI2DL: would run EnginePatch/apply_xui2dl.py $engine"
-    [ -n "$xui2d_note" ] && say "    note: $xui2d_note"
     if [ "${#python[@]}" -gt 0 ]; then
       say "    current state (apply_xui2dl.py --check):"
       "${python[@]}" "$here/EnginePatch/apply_xui2dl.py" "$engine" --check 2>&1 | sed 's/^/      /'
@@ -225,7 +219,6 @@ run_step 1-sync "sync sources" bash "$here/tools/sync_sources.sh" "$engine"
 patch_args=("$engine"); [ "$with_optional" -eq 1 ] && patch_args+=(--with-optional)
 run_step 2-patches "engine patches" bash "$here/tools/apply_patches.sh" "${patch_args[@]}"
 if [ "$xui2dl" -eq 1 ]; then
-  [ -n "$xui2d_note" ] && say "note: $xui2d_note"
   run_step 3-xui2dl "XUI2DL renderer patch" "${python[@]}" "$here/EnginePatch/apply_xui2dl.py" "$engine"
 fi
 say "CMake: $cmake_note"

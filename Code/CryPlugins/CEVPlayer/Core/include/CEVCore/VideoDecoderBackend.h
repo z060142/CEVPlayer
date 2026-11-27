@@ -1,4 +1,4 @@
-// Replaceable video decoder backends (M9, docs/tasks/M9.md, rulings R1 / R2).
+// Replaceable video decoder backends (M9, rulings R1 / R2).
 //
 // A backend takes one access unit (colour packet + optional alpha packet) together with a ticket that names the ring
 // slot the picture goes into, and hands completed tickets back in submission order:

@@ -1,4 +1,4 @@
-# EditorCEVPlayer: Sandbox plug-in of the CEVPlayer video plug-in (docs/design/M4-asset-and-editor.md, M4b).
+# EditorCEVPlayer: Sandbox plug-in of the CEVPlayer video plug-in (M4b).
 # Registered by patches/01-register-plugins.patch (BuildSandbox.cmake: if(EXISTS .../EditorCEVPlayer/CMakeLists.txt)).
 
 start_sources()

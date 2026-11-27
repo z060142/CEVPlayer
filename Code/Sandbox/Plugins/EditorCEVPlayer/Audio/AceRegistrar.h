@@ -1,7 +1,7 @@
 // SDL_mixer registration of the sounds of a video asset: copies the WAV / Ogg files to audio/sdlmixer/assets/cev/<asset>/
 // (the SDL_mixer implementation only scans audio/sdlmixer/assets/) and writes the ACE library
 // audio/sdlmixer/ace/cev_<asset>.xml with a start / pause / resume trigger per audio track (the format of
-// tools/test_audio/cev_test.xml). The Audio Controls Editor has no API for other plug-ins (docs/research/04 §6), so this
+// tools/test_audio/cev_test.xml). The Audio Controls Editor has no API for other plug-ins, so this
 // is plain XML + ESYSTEM_EVENT_AUDIO_REFRESH. Main thread (it sends a system event). Wwise / FMOD: not handled here, the
 // info panel shows the manual steps.
 #pragma once
@@ -44,6 +44,6 @@ namespace CEVEditor
 	SAceResult RegisterAssetSounds(const std::string& assetName, const std::vector<SAceSound>& sounds);
 	//! Deletes the copies and the library of `assetName` (silently ignores what does not exist) and sends the refresh.
 	void RemoveAssetSounds(const std::string& assetName);
-	//! ESYSTEM_EVENT_AUDIO_REFRESH (effective in Profile / Debug builds of the engine, see docs/research/04 §6.3).
+	//! ESYSTEM_EVENT_AUDIO_REFRESH (effective in Profile / Debug builds of the engine).
 	void SendAudioRefresh();
 }
