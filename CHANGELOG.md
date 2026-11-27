@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - rebuild
+## 2.0.0 - 2026-11-27
 
 The `rebuild` branch replaces the Libav based plug-in of `master` (CRYENGINE 5.3 - 5.6) with a rewrite for CRYENGINE
 5.7.1 and adds a Sandbox plug-in. Details and the decision log: [docs/PLAN.md](docs/PLAN.md) and `docs/design/`.
